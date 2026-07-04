@@ -1,0 +1,5 @@
+# ORACLE DEEPFIELD runtime deps — exact pins (M0). See docs/SPEC.md §4.
+websockets==16.0
+rich==15.0.0
+# dev
+pytest==9.1.1
