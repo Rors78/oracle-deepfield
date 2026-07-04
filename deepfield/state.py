@@ -40,10 +40,13 @@ class PairState:
 class AppState:
     pairs: dict = field(default_factory=dict)     # symbol -> PairState
     regime: object = None                          # engine.Regime or None
-    reconnect_count: int = 0
+    reconnect_count: int = 0                       # legacy aggregate (kept for --once)
     recon_repairs: int = 0
-    link_up: bool = False
+    link_up: bool = False                          # legacy aggregate (all links up)
+    links: dict = field(default_factory=dict)      # conn name -> {"up": bool, "reconnects": int}
     started_ts: float = field(default_factory=time.time)
+    paused: bool = False                           # 'p' key freezes the render loop
+    pause_dirty: bool = False                      # one render pending after toggle
     # Interval boundaries are shared across all 15 pairs (Kraken anchors every
     # symbol's daily/weekly bars to the same UTC calendar boundary) — one pair's
     # forming-bar interval_begin is enough to drive the countdown region (§8).
@@ -54,3 +57,19 @@ class AppState:
         if symbol not in self.pairs:
             self.pairs[symbol] = PairState(symbol=symbol)
         return self.pairs[symbol]
+
+    def link_status(self):
+        """Tri-state, per-connection honest: 'UP' (all), 'PARTIAL' (some),
+        'DOWN' (none/no connections yet). A shared boolean lies when conn A is
+        healthy and conn B is down — whichever event landed last would win."""
+        if not self.links:
+            return "DOWN"
+        ups = [e.get("up", False) for e in self.links.values()]
+        if all(ups):
+            return "UP"
+        if any(ups):
+            return "PARTIAL"
+        return "DOWN"
+
+    def total_reconnects(self):
+        return sum(e.get("reconnects", 0) for e in self.links.values())

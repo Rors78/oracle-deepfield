@@ -64,6 +64,16 @@ LEVELS = {
 # --- UI cadence ---
 SIMPLE_SECS = 60           # plaintext frame period in --simple mode
 RENDER_HZ = 2              # rich Live render cap
+FLASH_SECS = 0.6           # tick-direction tint window; >= one render period at
+                           # RENDER_HZ=2 so the flash is actually visible (spec's
+                           # ~300ms would fall between frames half the time)
+
+# --- Candle-close clock fallback (SPEC §5b) ---
+# The WS ohlc feed sends NOTHING across an interval border until the next trade.
+# The clock watchdog detects a forming bar past its deadline (+grace), REST-
+# confirms the closed bar, flips it, and triggers the confirmed recompute.
+CLOSE_GRACE_SECS = 5
+CLOSE_POLL_SECS = 15
 
 # --- REST throttle (Appendix B) ---
 MIN_CALL_GAP = 0.6

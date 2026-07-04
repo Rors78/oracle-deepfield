@@ -43,11 +43,13 @@ class CandleClosed:
 @dataclass(frozen=True)
 class LinkUp:
     reconnect_count: int
+    name: str = ""          # which connection (A/B) — link status is per-conn
 
 
 @dataclass(frozen=True)
 class LinkDown:
     reason: str
+    name: str = ""
 
 
 @dataclass(frozen=True)

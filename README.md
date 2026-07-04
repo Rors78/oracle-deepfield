@@ -33,7 +33,23 @@ python -m deepfield --simple   # plaintext frame every SIMPLE_SECS (dumb termina
 python -m deepfield --once     # single confirmed eval + one plaintext frame (cron/tests)
 ```
 
-Ctrl-C exits cleanly from any mode.
+Ctrl-C exits cleanly from any mode. **Run exactly one instance** — two copies
+double the WS/REST load and race the alert sounds (the ledger itself is
+cooldown-deduped either way).
+
+### Keys (live TUI)
+
+```
+q  quit cleanly          p  pause/resume the render (freeze to read)
+f  force a reconcile     a  fire a test alert (kind=test)
+```
+
+The dashboard auto-adjusts: it re-measures the terminal every frame, centers
+the content column in wide terminals (cap ~96 cols), and sheds table columns
+gracefully as the terminal narrows (AGE → 24hΔ → DRSI → WRSI) instead of
+truncating. The `~` in the PROV column marks the provisional (pace-adjusted)
+evaluation; amber `~x/y` = a provisional BUY forming that confirmed hasn't
+ratified yet. WRSI arrows show direction vs 3 weeks back (sig2's reference).
 
 ### Running under tmux (recommended for always-on use)
 

@@ -114,7 +114,7 @@ class WSClient:
                     self._force_drop = False
                     self.last_inbound = time.time()
                     log.info("[%s] LINK UP (reconnect #%d): connected %s", self.name, self.reconnect_count, WS_URL)
-                    await self.queue.put(events.LinkUp(self.reconnect_count))
+                    await self.queue.put(events.LinkUp(self.reconnect_count, self.name))
                     await self._subscribe(ws)
                     if self.on_connect is not None:
                         log.info("[%s] gap-heal on (re)connect ...", self.name)
@@ -128,7 +128,7 @@ class WSClient:
                 raise
             except Exception as e:
                 log.warning("[%s] LINK DOWN: %s", self.name, e)
-                await self.queue.put(events.LinkDown(str(e)))
+                await self.queue.put(events.LinkDown(str(e), self.name))
             finally:
                 self._ws = None
             if self._stop:

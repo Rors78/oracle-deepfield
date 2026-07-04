@@ -26,6 +26,9 @@ class ScoreCard:
     required: int
     status: str
     weekly_rsi: float = None
+    wrsi_ref: float = None             # W-RSI 3 bars back — sig2's turn reference,
+                                       # published so the UI can show direction
+                                       # without re-implementing math (invariant 5)
     daily_rsi: float = None
     price: float = None
     low_52w: float = None
@@ -88,12 +91,13 @@ def evaluate(symbol, weekly, daily, profile=FULL, provisional=False, elapsed_fra
         status = "---"
 
     cur_wrsi = w_rsi[-1] if w_rsi and w_rsi[-1] > 0 else None
+    wrsi_ref = w_rsi[-4] if len(w_rsi) >= 4 and w_rsi[-4] > 0 else None
     cur_drsi = d_rsi[-1] if d_rsi and d_rsi[-1] > 0 else None
     pct_above_low = ((price - low_52w) / low_52w * 100) if (low_52w and low_52w > 0 and price > 0) else None
 
     return ScoreCard(
         symbol=symbol, results=results, score=score, denom=denom, required=required,
-        status=status, weekly_rsi=cur_wrsi, daily_rsi=cur_drsi, price=price,
+        status=status, weekly_rsi=cur_wrsi, wrsi_ref=wrsi_ref, daily_rsi=cur_drsi, price=price,
         low_52w=low_52w, high_52w=high_52w, pct_above_low=pct_above_low,
         gap=_gap_metrics(results, wc, w_ema200, w_rsi, w_hist, w_vol_sma, wvol, wo, price, low_52w),
         provisional=provisional,

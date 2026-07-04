@@ -9,6 +9,7 @@ import time
 import shutil
 import asyncio
 import datetime
+from zoneinfo import ZoneInfo
 
 from . import store
 from . import engine
@@ -16,6 +17,7 @@ from . import config
 from . import VERSION
 from .signals import FIRED, NOT, NA
 
+DENVER = ZoneInfo("America/Denver")
 DISPLAY = {p["ws"]: p["display"] for p in config.PAIRS}
 PAIR_LIST = [p["ws"] for p in config.PAIRS]
 
@@ -54,21 +56,38 @@ def _fmt_days_hm(secs):
     return f"{d}d {h:02d}:{m:02d}" if d > 0 else f"{h:02d}:{m:02d}"
 
 
+def _local_short(ts_iso):
+    try:
+        dt = datetime.datetime.fromisoformat(ts_iso)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=datetime.timezone.utc)
+        return dt.astimezone(DENVER).strftime("%m-%d %H:%M")
+    except Exception:
+        return ts_iso[:16]
+
+
+def _countdown(label, begin, span, fmt, now):
+    if begin is None:
+        return f"{label} ?"
+    left = begin + span - now
+    if left <= 0:
+        return f"{label} closing…"
+    pct = (now - begin) / span * 100
+    return f"{label} {fmt(left)} ({pct:.0f}%)"
+
+
 def render_frame_text(appstate, conn):
     W = _width()
     sep = "-" * W
     now = time.time()
     lines = []
     lines.append(f"DEEPFIELD v{VERSION}   {datetime.datetime.now().strftime('%Y-%m-%d %H:%M')}")
-    lines.append("LINK UP" if appstate.link_up else "LINK DOWN")
+    rc = appstate.total_reconnects() if appstate.links else appstate.reconnect_count
+    lines.append(f"LINK {appstate.link_status()}  reconnects {rc}  RECON {appstate.recon_repairs}")
     lines.append(sep)
 
-    if appstate.daily_interval_begin is not None and appstate.weekly_interval_begin is not None:
-        d_left = _fmt_hms(appstate.daily_interval_begin + 86400 - now)
-        w_left = _fmt_days_hm(appstate.weekly_interval_begin + 604800 - now)
-        lines.append(f"D closes {d_left}  W closes {w_left}")
-    else:
-        lines.append("D closes ?  W closes ?")
+    lines.append(_countdown("D", appstate.daily_interval_begin, 86400, _fmt_hms, now)
+                 + "  " + _countdown("W", appstate.weekly_interval_begin, 604800, _fmt_days_hm, now))
 
     btc = appstate.pairs.get("BTC/USD")
     if btc and btc.last_tick:
@@ -106,8 +125,17 @@ def render_frame_text(appstate, conn):
         status = "STALE" if stale else (card.status if card else "---")
 
         scr_s = f"{card.score}/{card.denom}" if card else "---"
-        prov_s = f"±{prov.score}" if prov else "·"
+        # `~` = provisional/pace-adjusted eval (RULINGS Q4); `!` = provisional
+        # BUY forming that confirmed hasn't ratified yet.
+        if prov:
+            prov_s = f"~{prov.score}"
+            if prov.status == "BUY" and (not card or card.status != "BUY"):
+                prov_s += "!"
+        else:
+            prov_s = "·"
         wrsi_s = f"{card.weekly_rsi:.0f}" if card and card.weekly_rsi is not None else "---"
+        if card and card.weekly_rsi is not None and card.wrsi_ref is not None:
+            wrsi_s += "^" if card.weekly_rsi > card.wrsi_ref else "v"
         drsi_s = f"{card.daily_rsi:.0f}" if card and card.daily_rsi is not None else "---"
         price_s = _fmt_price(tick.last if tick else (card.price if card else None))
         lines.append(f"{DISPLAY.get(sym, sym):<5}{scr_s:>5}{prov_s:>6}{wrsi_s:>6}{drsi_s:>6}{price_s:>10}  {STATUS_SHORT.get(status, status)}")
@@ -123,11 +151,12 @@ def render_frame_text(appstate, conn):
     if champion:
         sym, card, ps = champion
         disp = DISPLAY.get(sym, sym)
-        lines.append(f"CHAMPION: {disp}  {card.score}/{card.denom}")
+        lines.append(f"CHAMPION: {disp}  {card.score}/{card.denom} (req {card.required})")
         live_price = ps.last_tick.last if ps.last_tick else None
         lines.append(f"  live entry {_fmt_price(live_price)}  last close {_fmt_price(card.price)}")
         if ps.tranche:
-            lines.append(f"  tranche {ps.tranche.qty:g} {disp} (~${ps.tranche.qty * ps.tranche.price:,.2f})")
+            src = "live" if ps.tranche.price_is_live else "close"
+            lines.append(f"  tranche {ps.tranche.qty:g} {disp} (~${ps.tranche.qty * ps.tranche.price:,.2f} · {ps.tranche.mult:g}x · {src})")
         for res in card.results:
             if res.state == FIRED:
                 lines.append(f"    [x] {res.name}")
@@ -137,12 +166,32 @@ def render_frame_text(appstate, conn):
         lines.append("No active BUY candidates this scan.")
     lines.append(sep)
 
+    closest = []
+    for sym in PAIR_LIST:
+        ps = appstate.pairs.get(sym)
+        card = ps.confirmed if ps else None
+        if card and card.status != "BUY" and card.score >= 2:
+            closest.append((sym, card))
+    closest.sort(key=lambda x: (-x[1].score, x[0]))
+    if closest[:3]:
+        lines.append("CLOSEST NOT YET")
+        for sym, card in closest[:3]:
+            lines.append(f"  {DISPLAY.get(sym, sym):<5}{card.score}/{card.denom} needs {max(0, card.required - card.score)}")
+            shown = 0
+            for res in card.results:
+                if shown >= 2:
+                    break
+                if res.state == NOT and res.slot in card.gap:
+                    lines.append(f"    - {res.name}: {card.gap[res.slot]}"[:W])
+                    shown += 1
+        lines.append(sep)
+
     rows = store.recent_alerts(conn, 5)
     lines.append("ALERT TAIL")
     if not rows:
         lines.append("  (none yet)")
     for ts, symbol, price, score, denom, signals, kind in rows:
-        lines.append(f"  {ts[:16]} {symbol:<8} {_fmt_price(price)} {score}/{denom} [{kind}]")
+        lines.append(f"  {_local_short(ts)} MT {symbol:<9}{_fmt_price(price):>10} {score}/{denom} [{kind}]")
     lines.append(sep)
 
     return "\n".join(lines)
