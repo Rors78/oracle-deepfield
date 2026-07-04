@@ -91,3 +91,25 @@ def test_alerter_telegram_not_configured_returns_none(monkeypatch):
     monkeypatch.setattr(alerter, "TG_TOKEN", None)
     monkeypatch.setattr(alerter, "TG_CHAT", None)
     assert alerter._telegram("hello") is None
+
+
+def test_tranche_repriced_on_tick_not_stale_from_close(tmp_path):
+    """M6 regression: the champion card's 'Live entry' and 'Tranche' price must
+    agree — found via the M6 export proof showing two different prices in the
+    same card because tranche only recomputed on candle-close."""
+    conn = store.connect(str(tmp_path / "t.db"))
+    now = int(time.time())
+    _seed_minimal(conn, now)
+    conn.execute(
+        "INSERT INTO pairs(rest_pair, ws_symbol, display, ordermin, costmin, lot_decimals, updated_ts) "
+        "VALUES('TESTUSD', ?, 'TEST', 0.1, 0.5, 8, ?)", (SYM, now),
+    )
+    conn.commit()
+    ing = Ingest(conn, AppState(), profile=FULL)
+
+    ing._recompute_confirmed(SYM)  # tranche priced off the close (no tick yet)
+    ing.handle_tick(events.Tick(SYM, last=999.0, bid=998, ask=1000, high24=1000,
+                                 low24=900, volume24=10, vwap24=950, change_pct=1.0, ts=time.time()))
+    assert ing.state.pair(SYM).tranche.price == 999.0
+    assert ing.state.pair(SYM).tranche.price_is_live is True
+    conn.close()

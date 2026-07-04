@@ -9,13 +9,25 @@ from dataclasses import dataclass, field
 
 
 @dataclass
+class TrancheInfo:
+    """F8 published result — UI reads this, never recomputes it (invariant 5)."""
+    qty: float
+    mult: float
+    price: float           # the price actually used for the sizing calc
+    price_is_live: bool    # True if from the tick; False if fallback to card.price
+
+
+@dataclass
 class PairState:
     symbol: str
     last_tick: object = None          # events.Tick or None
     last_tick_ts: float = 0.0         # wall-clock receipt time (F5 tick_age)
+    flash_color: str = None           # "green"/"red" — last tick direction (§8)
+    flash_until: float = 0.0          # monotonic deadline for the ~300ms tint
     confirmed: object = None          # engine.ScoreCard or None
     provisional: object = None        # engine.ScoreCard or None
     last_provisional_ts: float = 0.0  # monotonic; throttles F13 to <=1/s
+    tranche: object = None            # TrancheInfo or None (F8, confirmed-only)
     # F10 cooldown is read from the alerts table on demand (store.last_alert_ts) —
     # disk is ground truth, no in-memory mirror to avoid drift after restart.
 
@@ -32,6 +44,11 @@ class AppState:
     recon_repairs: int = 0
     link_up: bool = False
     started_ts: float = field(default_factory=time.time)
+    # Interval boundaries are shared across all 15 pairs (Kraken anchors every
+    # symbol's daily/weekly bars to the same UTC calendar boundary) — one pair's
+    # forming-bar interval_begin is enough to drive the countdown region (§8).
+    daily_interval_begin: int = None
+    weekly_interval_begin: int = None
 
     def pair(self, symbol):
         if symbol not in self.pairs:

@@ -32,10 +32,17 @@ CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT);
 
 
 def connect(db_path):
-    """Open the DB with WAL, init schema, return the connection."""
+    """Open the DB with WAL, init schema, return the connection.
+
+    busy_timeout matters from M6 on: the live writer and the gap-heal thread
+    (its own connection, per M4) now contend on the same WAL file on every
+    (re)connect. Without it, a concurrent write throws "database is locked"
+    instead of waiting the other side out.
+    """
     conn = sqlite3.connect(db_path)
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA synchronous=NORMAL")
+    conn.execute("PRAGMA busy_timeout=5000")
     conn.executescript(SCHEMA)
     conn.commit()
     return conn
@@ -122,6 +129,26 @@ def insert_alert(conn, ts_iso, symbol, price, score, denom, signals, kind):
         (ts_iso, symbol, price, score, denom, "|".join(signals), kind),
     )
     conn.commit()
+
+
+def get_pair_info(conn, ws_symbol):
+    """F8 needs live ordermin/costmin/lot_decimals — read from the pairs table
+    (populated from AssetPairs at backfill), keyed by ws_symbol here."""
+    row = conn.execute(
+        "SELECT ordermin, costmin, lot_decimals, display FROM pairs WHERE ws_symbol=?",
+        (ws_symbol,),
+    ).fetchone()
+    if row is None:
+        return None
+    return {"ordermin": row[0], "costmin": row[1], "lot_decimals": row[2], "display": row[3]}
+
+
+def recent_alerts(conn, n=5):
+    """Last n ledger rows, newest first — for the UI alert tail (§8)."""
+    return conn.execute(
+        "SELECT ts, symbol, price, score, denom, signals, kind FROM alerts ORDER BY id DESC LIMIT ?",
+        (n,),
+    ).fetchall()
 
 
 def last_alert_ts(conn, symbol, kind="confirmed"):

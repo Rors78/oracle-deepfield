@@ -13,10 +13,14 @@ from . import store
 from . import engine
 from . import events
 from . import alerter
+from . import config
 from .profiles import FULL
-from .config import REALERT_HOURS, PROVISIONAL_ALERTS
+from .state import TrancheInfo
+from .config import REALERT_HOURS, PROVISIONAL_ALERTS, STALE_SECS
 
 log = logging.getLogger("deepfield.ingest")
+
+BTC_SYMBOL = "BTC/USD"
 
 
 def _elapsed_fraction(interval_begin, interval_min, now=None):
@@ -30,19 +34,36 @@ class Ingest:
         self.conn = conn
         self.state = appstate
         self.profile = profile
+        self._pair_info_cache = {}  # symbol -> dict|None; ordermin/costmin/lot_decimals
+                                     # are static enough (AssetPairs refresh is daily,
+                                     # §10) that per-tick recompute must not hit the DB.
 
     # ── event handlers ──────────────────────────────────────────────────────
 
     def handle_tick(self, ev: events.Tick):
         ps = self.state.pair(ev.symbol)
+        if ps.last_tick is not None and ev.last != ps.last_tick.last:
+            ps.flash_color = "green" if ev.last > ps.last_tick.last else "red"
+            ps.flash_until = time.monotonic() + 0.3
         ps.last_tick = ev
         ps.last_tick_ts = ev.ts
+        # Keep the champion card's tranche priced off the live tick, not stale
+        # from the last close/startup-sweep — found via the M6 export proof,
+        # where "Live entry" and "Tranche" showed two different prices.
+        if ps.confirmed is not None:
+            self._compute_tranche(ev.symbol, ps.confirmed)
 
     def handle_candle_update(self, ev: events.CandleUpdate):
         closed = 1 if time.time() >= ev.interval_begin + ev.interval * 60 else 0
         store.upsert_candle(self.conn, ev.symbol, ev.interval, ev.interval_begin,
                              ev.o, ev.h, ev.l, ev.c, ev.v, closed)
         self.conn.commit()
+        # Interval boundaries are shared across all 15 pairs — any pair's
+        # forming-bar interval_begin drives the UI countdown region (§8).
+        if ev.interval == 1440:
+            self.state.daily_interval_begin = ev.interval_begin
+        elif ev.interval == 10080:
+            self.state.weekly_interval_begin = ev.interval_begin
         self._maybe_recompute_provisional(ev.symbol)
 
     def handle_candle_closed(self, ev: events.CandleClosed):
@@ -60,6 +81,8 @@ class Ingest:
                 log.debug("CandleClosed duplicate (already closed): %s/%s ts=%d",
                           ev.symbol, ev.interval, ev.interval_begin)
         self._recompute_confirmed(ev.symbol)
+        if ev.symbol == BTC_SYMBOL:
+            self._recompute_regime()
 
     def handle_link_up(self, ev: events.LinkUp):
         self.state.link_up = True
@@ -86,15 +109,64 @@ class Ingest:
             if handler is not None:
                 handler(ev)
 
+    # ── startup ──────────────────────────────────────────────────────────────
+
+    def startup_sweep(self):
+        """Populate confirmed ScoreCards + regime from the DB's closed series
+        right after warm-backfill — otherwise the TUI launches blank and stays
+        blank until the next real candle close (up to 7 days for weekly).
+        Also used by `--once`. No alerts fire here: this is not a live
+        transition, just publishing already-true state (F10 cooldown is keyed
+        off real confirmed-BUY *events*, and a fresh process start isn't one)."""
+        for p in config.PAIRS:
+            symbol = p["ws"]
+            weekly, daily = store.load_weekly_daily_closed(self.conn, symbol)
+            card = engine.evaluate(symbol, weekly, daily, self.profile, provisional=False)
+            self.state.pair(symbol).confirmed = card
+            self._compute_tranche(symbol, card)
+        self._recompute_regime()
+
     # ── recompute + alert gating ────────────────────────────────────────────
 
     def _recompute_confirmed(self, symbol):
         weekly, daily = store.load_weekly_daily_closed(self.conn, symbol)
         card = engine.evaluate(symbol, weekly, daily, self.profile, provisional=False)
         self.state.pair(symbol).confirmed = card
+        self._compute_tranche(symbol, card)
         if card.status == "BUY":
-            self._maybe_alert(symbol, card, kind="confirmed")
+            ps = self.state.pair(symbol)
+            if engine.is_stale(ps.tick_age(), STALE_SECS):
+                log.info("F5: suppressing confirmed alert for %s — STALE (tick_age=%.0fs > %ds)",
+                         symbol, ps.tick_age(), STALE_SECS)
+            else:
+                self._maybe_alert(symbol, card, kind="confirmed")
         return card
+
+    def _recompute_regime(self):
+        weekly, daily = store.load_weekly_daily_closed(self.conn, BTC_SYMBOL)
+        wc, dc = weekly[3], daily[0]
+        self.state.regime = engine.regime(wc, dc, self.profile)
+
+    def _compute_tranche(self, symbol, card):
+        """F8, computed here (not in engine.evaluate — that signature is locked
+        by the M3 parity gate). Uses the LIVE tick price when available, else
+        falls back to the last confirmed close — the champion card shows both,
+        labeled, so the UI can tell which one sized the order. Called on every
+        tick (cheap: cached pair info, pure arithmetic) so it never goes stale
+        relative to the live entry price shown beside it."""
+        if symbol not in self._pair_info_cache:
+            self._pair_info_cache[symbol] = store.get_pair_info(self.conn, symbol)
+        info = self._pair_info_cache[symbol]
+        if info is None or info["ordermin"] is None or info["costmin"] is None:
+            return
+        ps = self.state.pair(symbol)
+        live = ps.last_tick.last if ps.last_tick else None
+        price = live if live else card.price
+        if not price or price <= 0:
+            return
+        qty, mult = engine.tranche(card.score, card.required, info["ordermin"], info["costmin"],
+                                    info["lot_decimals"], price)
+        ps.tranche = TrancheInfo(qty=qty, mult=mult, price=price, price_is_live=bool(live))
 
     def _maybe_recompute_provisional(self, symbol):
         ps = self.state.pair(symbol)

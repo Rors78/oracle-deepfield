@@ -48,8 +48,17 @@ def main(argv=None) -> int:
         conn.close()
         print(f"test-alert fired: sound={result['sound']} notify={result['notify']} telegram={result['telegram']}")
         return 0
-    # TODO(M1+): dispatch remaining handlers as milestones land.
-    print(f"deepfield {VERSION} — scaffold (M0). args={vars(args)}")
+    if args.once:
+        from . import app
+        app.run_once(debug=args.debug)
+        return 0
+    # Default: live TUI (or --simple).
+    import asyncio
+    from . import app
+    try:
+        asyncio.run(app.run_live(simple=args.simple, debug=args.debug))
+    except KeyboardInterrupt:
+        pass
     return 0
 
 
