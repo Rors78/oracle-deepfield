@@ -15,7 +15,10 @@ import importlib.util
 from . import config
 from . import store
 from . import engine
+from .signals import FIRED, NA, NAMES
 from .profiles import COMPAT, FULL
+
+SLOTS = [1, 2, 3, 4, 5, 6, 7]
 
 _V44_PATH = os.path.join(config.PROJECT_ROOT, "docs", "reference", "oracle_dca_v44.py")
 
@@ -117,3 +120,48 @@ def run_parity(db_path=None):
         rows.append({"pair": ws, "v44": v44, "compat": compat, "full": full})
     conn.close()
     return rows
+
+
+def _v44_slot_fired(v44, slot):
+    return NAMES[slot][0] in (v44.get("signals") or [])
+
+
+def _state(card, slot):
+    return [r for r in card.results if r.slot == slot][0].state
+
+
+def _attribute(slot, cstate, fstate):
+    """Map a FULL-vs-COMPAT slot diff to its F-item. UNATTRIBUTED = a stop."""
+    if slot == 1 and fstate == NA and cstate != NA:
+        return "F3"
+    if slot == 5 and cstate != fstate:
+        return "F1"
+    if slot == 4 and cstate != fstate:
+        return "F2"
+    return "UNATTRIBUTED"
+
+
+def triangulate(db_path=None):
+    """M3 gate. Leg A: COMPAT vs v4.4 per slot (must be 105/105). Leg B: FULL vs
+    COMPAT per slot, each diff attributed (zero UNATTRIBUTED)."""
+    rows = run_parity(db_path)
+    legA_total = legA_match = 0
+    legA_diffs = []
+    legB = []
+    for row in rows:
+        for s in SLOTS:
+            vf = _v44_slot_fired(row["v44"], s)
+            cf = (_state(row["compat"], s) == FIRED)
+            legA_total += 1
+            if vf == cf:
+                legA_match += 1
+            else:
+                legA_diffs.append((row["pair"], s, vf, cf))
+            cs, fs = _state(row["compat"], s), _state(row["full"], s)
+            if cs != fs:
+                legB.append((row["pair"], s, cs, fs, _attribute(s, cs, fs)))
+    return {
+        "rows": rows,
+        "legA_total": legA_total, "legA_match": legA_match, "legA_diffs": legA_diffs,
+        "legB": legB, "unattributed": [x for x in legB if x[4] == "UNATTRIBUTED"],
+    }
