@@ -41,6 +41,13 @@ def main(argv=None) -> int:
         from . import wsdrill
         ok = asyncio.run(wsdrill.run_drill())
         return 0 if ok else 1
+    if args.test_alert:
+        from . import store, alerter, config
+        conn = store.connect(config.DB_PATH)
+        result = alerter.test_alert(conn)
+        conn.close()
+        print(f"test-alert fired: sound={result['sound']} notify={result['notify']} telegram={result['telegram']}")
+        return 0
     # TODO(M1+): dispatch remaining handlers as milestones land.
     print(f"deepfield {VERSION} — scaffold (M0). args={vars(args)}")
     return 0

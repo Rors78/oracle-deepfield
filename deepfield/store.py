@@ -76,3 +76,67 @@ def candle_count(conn, pair, interval):
         "SELECT COUNT(*) FROM candles WHERE pair=? AND interval=?", (pair, interval)
     ).fetchone()
     return row[0]
+
+
+def flip_closed(conn, pair, interval, ts):
+    """Mark a bar closed (0->1) without touching its OHLCV (already kept current
+    by CandleUpdate upserts). Returns rowcount — 0 means the row wasn't there yet,
+    which the caller should treat as a gap for the reconciler, not a crash."""
+    cur = conn.execute(
+        "UPDATE candles SET closed=1 WHERE pair=? AND interval=? AND ts=? AND closed=0",
+        (pair, interval, ts),
+    )
+    return cur.rowcount
+
+
+def load_weekly_daily_closed(conn, symbol):
+    """Closed-only series shaped for engine.evaluate(): weekly=(wo,wh,wl,wc,wvol),
+    daily=(dc,). Invariant 3 — the engine reads persisted state, not the stream."""
+    w = conn.execute(
+        "SELECT o,h,l,c,v FROM candles WHERE pair=? AND interval=10080 AND closed=1 ORDER BY ts",
+        (symbol,),
+    ).fetchall()
+    d = conn.execute(
+        "SELECT c FROM candles WHERE pair=? AND interval=1440 AND closed=1 ORDER BY ts",
+        (symbol,),
+    ).fetchall()
+    weekly = ([r[0] for r in w], [r[1] for r in w], [r[2] for r in w], [r[3] for r in w], [r[4] for r in w])
+    daily = ([r[0] for r in d],)
+    return weekly, daily
+
+
+def get_forming(conn, symbol, interval):
+    """The current forming (closed=0) bar for symbol/interval, or None."""
+    row = conn.execute(
+        "SELECT ts,o,h,l,c,v FROM candles WHERE pair=? AND interval=? AND closed=0",
+        (symbol, interval),
+    ).fetchone()
+    if row is None:
+        return None
+    return {"ts": row[0], "o": row[1], "h": row[2], "l": row[3], "c": row[4], "v": row[5]}
+
+
+def insert_alert(conn, ts_iso, symbol, price, score, denom, signals, kind):
+    conn.execute(
+        "INSERT INTO alerts(ts, symbol, price, score, denom, signals, kind) VALUES(?,?,?,?,?,?,?)",
+        (ts_iso, symbol, price, score, denom, "|".join(signals), kind),
+    )
+    conn.commit()
+
+
+def last_alert_ts(conn, symbol, kind="confirmed"):
+    """F10: unix seconds of the most recent alert of `kind` for symbol, or None.
+    Disk (this table) is ground truth for the cooldown — survives restarts.
+    kind='confirmed' is the spec's F10 ledger; 'provisional' reuses the same
+    per-symbol cooldown mechanism when PROVISIONAL_ALERTS is enabled."""
+    row = conn.execute(
+        "SELECT ts FROM alerts WHERE symbol=? AND kind=? ORDER BY ts DESC LIMIT 1",
+        (symbol, kind),
+    ).fetchone()
+    if row is None:
+        return None
+    import datetime
+    dt = datetime.datetime.fromisoformat(row[0])
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=datetime.timezone.utc)
+    return dt.timestamp()
