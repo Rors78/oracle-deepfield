@@ -477,7 +477,10 @@ def _champion_exec_lines(appstate, sym, ps, card):
     o.append(f" @ {plan['leverage']}x", style=f"bold {GOLD}")
     o.append(f" · margin ${plan['margin']:,.2f}", style=CYAN)
     o.append(f" · notional ${plan['notional']:,.2f}", style=GRAY)
-    o.append(f" · risk ${plan['actual_risk']:,.2f} ({config.RISK_PCT*100:.0f}%)", style=SILVER)
+    if plan.get("size_mode") == "min":
+        o.append("  · MIN SIZE (no liquidation worry)", style=GREEN)
+    else:
+        o.append(f" · risk ${plan['actual_risk']:,.2f} ({config.RISK_PCT*100:.0f}%)", style=SILVER)
     lines.append(o)
     entry = plan.get("entry") or 0
     stp = plan.get("stop") or 0

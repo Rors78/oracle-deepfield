@@ -38,7 +38,21 @@ def _exec(conn, mode="paper"):
 
 # ── sizing ───────────────────────────────────────────────────────────────────
 
-def test_size_risk_2pct_off_the_stop(tmp_path):
+def test_size_min_mode_is_minimum_order(tmp_path):
+    """Default: buy the minimum order (ordermin, cost-floored) — tiny, no
+    liquidation worry. risk_usd is 0 (not risk-sized)."""
+    conn = _conn(tmp_path, ordermin=0.1, costmin=0.5, lot_dec=8)
+    e = _exec(conn)   # EXEC_SIZE_MODE default = "min"
+    s = e.size(SYM, entry=100.0, stop=90.0, leverage=10, equity=1000.0)
+    assert s["size_mode"] == "min"
+    assert s["volume"] == 0.1                      # ordermin (cost 0.5/100 < 0.1)
+    assert abs(s["margin"] - (0.1 * 100 / 10)) < 1e-9   # notional/leverage = $1
+    assert s["risk_usd"] == 0.0
+    conn.close()
+
+
+def test_size_risk_2pct_off_the_stop(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "EXEC_SIZE_MODE", "risk")
     conn = _conn(tmp_path)
     e = _exec(conn)
     # equity 1000, risk 2% = $20; entry 100, stop 90 -> $10 stop dist -> vol 2.0
@@ -50,7 +64,8 @@ def test_size_risk_2pct_off_the_stop(tmp_path):
     conn.close()
 
 
-def test_size_margin_cap_binds_on_tight_stop(tmp_path):
+def test_size_margin_cap_binds_on_tight_stop(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "EXEC_SIZE_MODE", "risk")
     conn = _conn(tmp_path)
     e = _exec(conn)
     # razor stop dist 0.5 -> naive vol = 20/0.5 = 40, notional 4000, margin 400.
@@ -62,7 +77,8 @@ def test_size_margin_cap_binds_on_tight_stop(tmp_path):
     conn.close()
 
 
-def test_size_floors_to_ordermin(tmp_path):
+def test_size_floors_to_ordermin(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "EXEC_SIZE_MODE", "risk")
     conn = _conn(tmp_path, ordermin=0.1)   # LTC-like floor, but on BTC row for test
     e = _exec(conn)
     # tiny risk: equity 10 -> risk $0.20, stop dist 10 -> vol 0.02 < ordermin 0.1

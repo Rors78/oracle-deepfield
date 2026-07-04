@@ -90,8 +90,10 @@ TG_CHAT = os.environ.get("ORACLE_TG_CHAT")
 # ═══════════════════════════════════════════════════════════════════════════
 EXEC_MODE = os.environ.get("DEEPFIELD_EXEC_MODE", "off")   # off | paper | live
 
-# Sizing: risk 2% of account equity per trade; position sized off the stop so a
-# stop-out costs exactly that (hydra's vol = risk_usd/(entry-stop)).
+# Sizing. "min" (default, for now): buy the MINIMUM order per pair — positions so
+# small nothing meaningful is ever at risk, so liquidation is a non-issue. "risk":
+# 2% of equity off the stop (kept for later; revisit stop-vs-liquidation first).
+EXEC_SIZE_MODE = os.environ.get("DEEPFIELD_EXEC_SIZE", "min")   # min | risk
 RISK_PCT = 0.02
 PAPER_PORTFOLIO_USD = 1000.0        # equity used for sizing math in paper/off
 
@@ -113,8 +115,9 @@ WEEKLY_LOSS_LIMIT_USD = 35.0
 KILL_SWITCH_DD_PCT = 0.20           # halt at 20% drawdown from peak equity (manual reset)
 HALT_FILE = os.path.join(PROJECT_ROOT, "deepfield.HALT_ENTRIES")  # touch to halt / rm to resume
 
-# Per-pair MAX leverage — verified 2026-07-04 == max Kraken leverage_buy per pair
-# (== hydra FIXED_LEVERAGE). Keyed by ws_symbol.
+# Per-pair leverage — a FIXED hardcoded value Kraken must accept verbatim (it must
+# be present in the pair's leverage_buy array). Sent exactly as-is on every order,
+# hydra-style. Verified 2026-07-04 == max Kraken leverage_buy per pair.
 PER_PAIR_LEVERAGE = {
     "BTC/USD": 10, "ETH/USD": 10, "XRP/USD": 10, "SOL/USD": 10, "DOGE/USD": 10,
     "ADA/USD": 10, "LINK/USD": 10, "SUI/USD": 10, "LTC/USD": 10, "AVAX/USD": 10,

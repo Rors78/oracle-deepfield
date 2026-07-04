@@ -101,14 +101,39 @@ class Executor:
         max_stop = entry * (1 - config.STOP_MIN_PCT)   # tightest allowed (highest price)
         return max(min_stop, min(stop, max_stop))
 
+    def _min_volume(self, ordermin, costmin, entry, lot_dec):
+        """Smallest placeable order: >= ordermin AND cost >= costmin, on the lot
+        grid (rounded UP so it never lands under either floor)."""
+        need = max(ordermin, (costmin / entry) if entry > 0 else 0.0)
+        if lot_dec is None:
+            return need
+        f = 10 ** lot_dec
+        return math.ceil(need * f) / f
+
     def size(self, symbol, entry, stop, leverage, equity):
-        """Returns a sizing dict or None. volume = risk_usd/(entry-stop), capped
-        by margin and floored to Kraken's ordermin/costmin."""
+        """Returns a sizing dict or None.
+        EXEC_SIZE_MODE='min' (default): buy the minimum order — tiny, no liquidation
+        worry. 'risk': volume = risk_usd/(entry-stop), margin-capped, min-floored."""
         info = store.get_pair_info(self.conn, symbol) or {}
         lot_dec = info.get("lot_decimals")
         ordermin = info.get("ordermin") or 0.0
         costmin = info.get("costmin") or 0.0
         stop_dist = entry - stop
+        if entry <= 0:
+            return None
+
+        if config.EXEC_SIZE_MODE == "min":
+            volume = self._min_volume(ordermin, costmin, entry, lot_dec)
+            if volume <= 0:
+                return None
+            notional = volume * entry
+            return {
+                "volume": volume, "notional": notional, "margin": notional / leverage,
+                "risk_usd": 0.0, "actual_risk": volume * max(0.0, stop_dist),
+                "capped": False, "floored_to_min": True, "size_mode": "min",
+            }
+
+        # "risk" mode
         if stop_dist <= 0 or equity is None or equity <= 0:
             return None
         risk_usd = config.RISK_PCT * equity
@@ -136,7 +161,7 @@ class Executor:
         return {
             "volume": volume, "notional": notional, "margin": margin,
             "risk_usd": risk_usd, "actual_risk": actual_risk,
-            "capped": capped, "floored_to_min": floored_to_min,
+            "capped": capped, "floored_to_min": floored_to_min, "size_mode": "risk",
         }
 
     def plan(self, symbol, entry, card, equity):
@@ -144,7 +169,7 @@ class Executor:
         order sent. Pure arithmetic + cached pair info. Returns dict or None."""
         if not entry or not equity or symbol not in config.MARGIN_PAIR:
             return None
-        leverage = config.PER_PAIR_LEVERAGE.get(symbol)
+        leverage = config.PER_PAIR_LEVERAGE.get(symbol)   # fixed, hardcoded
         if not leverage:
             return None
         stop = self.compute_stop(symbol, entry, card)
