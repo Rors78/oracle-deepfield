@@ -36,6 +36,11 @@ def main(argv=None) -> int:
         summary = backfill.run(full=args.full)
         print(f"\nbackfill done in {time.time()-t0:.1f}s — {len(summary)} pair/interval series")
         return 0
+    if args.test_drop:
+        import asyncio
+        from . import wsdrill
+        ok = asyncio.run(wsdrill.run_drill())
+        return 0 if ok else 1
     # TODO(M1+): dispatch remaining handlers as milestones land.
     print(f"deepfield {VERSION} — scaffold (M0). args={vars(args)}")
     return 0
