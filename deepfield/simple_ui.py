@@ -84,6 +84,11 @@ def render_frame_text(appstate, conn):
     lines.append(f"DEEPFIELD v{VERSION}   {datetime.datetime.now().strftime('%Y-%m-%d %H:%M')}")
     rc = appstate.total_reconnects() if appstate.links else appstate.reconnect_count
     lines.append(f"LINK {appstate.link_status()}  reconnects {rc}  RECON {appstate.recon_repairs}")
+    ex = appstate.exec
+    if ex.get("mode", "off") != "off":
+        eq = f"${ex['equity']:,.2f}" if ex.get("equity") is not None else "?"
+        rail = "HALTED" if ex.get("halt") else ("OK" if ex.get("rails_ok", True) else "BLOCKED")
+        lines.append(f"EXEC {ex['mode'].upper()}  equity {eq}  pos {ex.get('open_count',0)}/{config.MAX_OPEN_POSITIONS}  rails {rail}")
     lines.append(sep)
 
     lines.append(_countdown("D", appstate.daily_interval_begin, 86400, _fmt_hms, now)
@@ -123,6 +128,8 @@ def render_frame_text(appstate, conn):
         age = ps.tick_age() if ps else float("inf")
         stale = engine.is_stale(age, config.STALE_SECS)
         status = "STALE" if stale else (card.status if card else "---")
+        if status == "BUY" and ps and ps.cooldown_until > time.time():
+            status = "BUY*"   # * = cooldown-gated, won't act (see CHAMPION)
 
         scr_s = f"{card.score}/{card.denom}" if card else "---"
         # `~` = provisional/pace-adjusted eval (RULINGS Q4); `!` = provisional

@@ -28,6 +28,8 @@ class PairState:
     provisional: object = None        # engine.ScoreCard or None
     last_provisional_ts: float = 0.0  # monotonic; throttles F13 to <=1/s
     tranche: object = None            # TrancheInfo or None (F8, confirmed-only)
+    cooldown_until: float = 0.0       # unix ts a confirmed BUY can re-fire (0 = clear)
+    exec_plan: object = None          # dict: what live execution would place (display)
     # F10 cooldown is read from the alerts table on demand (store.last_alert_ts) —
     # disk is ground truth, no in-memory mirror to avoid drift after restart.
 
@@ -52,6 +54,12 @@ class AppState:
     # forming-bar interval_begin is enough to drive the countdown region (§8).
     daily_interval_begin: int = None
     weekly_interval_begin: int = None
+    # Execution snapshot, published by the exec-refresh task (equity needs a
+    # Kraken call, so it can't be render-time). UI reads this, never computes it.
+    exec: dict = field(default_factory=lambda: {
+        "mode": "off", "equity": None, "open_count": 0, "positions": [],
+        "rails_ok": True, "rails_reason": "", "halt": False, "updated": 0.0,
+    })
 
     def pair(self, symbol):
         if symbol not in self.pairs:

@@ -139,6 +139,20 @@ class Executor:
             "capped": capped, "floored_to_min": floored_to_min,
         }
 
+    def plan(self, symbol, entry, card, equity):
+        """Dry-run order plan for display — what live execution WOULD place, no
+        order sent. Pure arithmetic + cached pair info. Returns dict or None."""
+        if not entry or not equity or symbol not in config.MARGIN_PAIR:
+            return None
+        leverage = config.PER_PAIR_LEVERAGE.get(symbol)
+        if not leverage:
+            return None
+        stop = self.compute_stop(symbol, entry, card)
+        s = self.size(symbol, entry, stop, leverage, equity)
+        if not s:
+            return None
+        return {"leverage": leverage, "stop": stop, "entry": entry, **s}
+
     # ── placement ────────────────────────────────────────────────────────────
 
     def place_entry(self, symbol, entry_price, card):

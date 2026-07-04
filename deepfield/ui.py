@@ -161,7 +161,34 @@ def render_header(appstate, w):
     line2.append(f"· RECON {appstate.recon_repairs}", style=AMBER if appstate.recon_repairs else GRAY)
     if appstate.paused:
         line2.append("   ⏸ PAUSED", style=f"bold {AMBER}")
-    return Group(g, line2)
+    return Group(g, line2, render_exec_line(appstate))
+
+
+EXEC_MODE_STYLE = {"off": GRAY, "paper": CYAN, "validate": AMBER, "live": GREEN}
+
+
+def render_exec_line(appstate):
+    ex = appstate.exec
+    mode = ex.get("mode", "off")
+    t = Text()
+    if mode == "off":
+        t.append("EXEC off", style=GRAY)
+        t.append("  · signal-only (place trades yourself)", style=GRAY)
+        return t
+    dot = RED if (ex.get("halt") or not ex.get("rails_ok", True)) else EXEC_MODE_STYLE.get(mode, GRAY)
+    t.append("● ", style=dot)
+    t.append(f"EXEC {mode.upper()}", style=f"bold {EXEC_MODE_STYLE.get(mode, GRAY)}")
+    eq = ex.get("equity")
+    if eq is not None:
+        t.append(f" · equity ${eq:,.2f}", style=SILVER)
+    t.append(f" · pos {ex.get('open_count', 0)}/{config.MAX_OPEN_POSITIONS}", style=SILVER)
+    if ex.get("halt"):
+        t.append("  ⛔ HALTED (deepfield.HALT_ENTRIES)", style=f"bold {RED}")
+    elif not ex.get("rails_ok", True):
+        t.append(f"  ⛔ {ex.get('rails_reason', 'blocked')}", style=f"bold {RED}")
+    else:
+        t.append("  rails OK", style=GREEN)
+    return t
 
 
 # ── region 2: countdowns ─────────────────────────────────────────────────────
@@ -178,11 +205,36 @@ def _countdown_cell(label, begin, interval_secs, fmt, now):
         t.append("closing… ", style=f"bold {AMBER}")
         t.append("(confirming)", style=GRAY)
         return t
-    t.append(_mini_bar(frac) + " ", style=CYAN)
+    # Urgency: structure updates imminent -> amber under 1h, red under 10m.
+    urgent = RED if left < 600 else (AMBER if left < 3600 else CYAN)
+    t.append(_mini_bar(frac) + " ", style=urgent)
     t.append(f"{frac * 100:3.0f}%  ", style=GRAY)
     t.append("closes ", style=GRAY)
-    t.append(fmt(left), style=f"bold {CYAN}")
+    t.append(fmt(left), style=f"bold {urgent}")
     return t
+
+
+def _fmt_cd(remaining):
+    """Cooldown remaining, compact."""
+    remaining = max(0, int(remaining))
+    if remaining >= 86400:
+        return f"{remaining // 86400}d{(remaining % 86400) // 3600}h"
+    if remaining >= 3600:
+        return f"{remaining // 3600}h{(remaining % 3600) // 60}m"
+    if remaining >= 60:
+        return f"{remaining // 60}m"
+    return f"{remaining}s"
+
+
+def _actionable(ps, now):
+    """A BUY the bot would act on right now: confirmed BUY, not stale, not on
+    cooldown. This is the single most important derived state on the screen."""
+    card = ps.confirmed if ps else None
+    if not card or card.status != "BUY":
+        return False
+    if engine.is_stale(ps.tick_age(now), config.STALE_SECS):
+        return False
+    return ps.cooldown_until <= now
 
 
 def render_countdowns(appstate, w):
@@ -292,6 +344,7 @@ def render_main_table(appstate, w):
         return (-(card.score if card else -1), sym)
 
     now_mono = time.monotonic()
+    now = time.time()
     for sym in sorted(PAIR_LIST, key=sort_key):
         ps = appstate.pairs.get(sym)
         card = ps.confirmed if ps else None
@@ -301,6 +354,13 @@ def render_main_table(appstate, w):
         stale = engine.is_stale(age, config.STALE_SECS)
         status = "STALE" if stale else (card.status if card else "---")
         st_style = STATUS_STYLE.get(status, GRAY)
+        # A cooldown-gated BUY is NOT actionable — show it amber so a gated BUY
+        # never reads as "the bot will act on this" (the audit's #1 finding).
+        st_label = STATUS_SHORT.get(status, status)
+        gated = bool(ps and status == "BUY" and ps.cooldown_until > now)
+        if gated:
+            st_style = AMBER
+            st_label = "BUY⏳"
 
         # PROV cell: `~` marks the provisional/pace-adjusted evaluation (RULINGS
         # Q4 — sig6 is pace-adjusted or floored "either way"). Amber when a
@@ -330,10 +390,43 @@ def render_main_table(appstate, w):
             "24hΔ": Text(f"{tick.change_pct:+.1f}%" if tick else "---",
                          style=(GREEN if tick and tick.change_pct >= 0 else RED) if tick else GRAY),
             "AGE": Text(_fmt_age(age), style=GRAY),
-            "ST": Text(STATUS_SHORT.get(status, status), style=st_style),
+            "ST": Text(st_label, style=st_style),
         }
         table.add_row(*[cells[c] for c in cols], style="dim" if stale else None)
     return table
+
+
+def render_table_summary(appstate, w):
+    """One-line actionability roll-up under the table — the 'what do I do now'
+    answer: BUYs the bot would act on this instant vs gated/stale."""
+    now = time.time()
+    buys = watches = idle = actionable = gated = 0
+    for sym in PAIR_LIST:
+        ps = appstate.pairs.get(sym)
+        card = ps.confirmed if ps else None
+        if not card:
+            continue
+        if card.status == "BUY":
+            buys += 1
+            if _actionable(ps, now):
+                actionable += 1
+            elif ps.cooldown_until > now:
+                gated += 1
+        elif card.status == "WATCH":
+            watches += 1
+        else:
+            idle += 1
+    t = Text()
+    t.append(f"{buys} BUY", style=f"bold {GREEN}" if buys else GRAY)
+    t.append(f" · {watches} watch · {idle} idle", style=GRAY)
+    t.append("      ", style=GRAY)
+    if actionable:
+        t.append(f"▸ {actionable} ACTIONABLE NOW", style=f"bold {GREEN}")
+    else:
+        t.append("▸ nothing actionable", style=GRAY)
+    if gated:
+        t.append(f"  · {gated} on cooldown", style=AMBER)
+    return t
 
 
 # ── champion selection (RULINGS Q1) ─────────────────────────────────────────
@@ -362,6 +455,49 @@ def _score_bar(score, denom, required):
     return Text("█" * (score * 2) + "░" * ((denom - score) * 2), style=style)
 
 
+def _champion_exec_lines(appstate, sym, ps, card):
+    """The REAL leveraged order the executor would place — not the spot tranche —
+    plus honest gating status (position open / cooldown / rails / armed)."""
+    lines = []
+    ex = appstate.exec
+    plan = ps.exec_plan
+    if plan is None:
+        lines.append(Text("  ORDER  sizing… (awaiting equity + price)", style=GRAY))
+        return lines
+    o = Text("  ORDER ", style=GRAY)
+    o.append(f"{plan['volume']:g} {DISPLAY.get(sym, sym)}", style=f"bold {CYAN}")
+    o.append(f" @ {plan['leverage']}x", style=f"bold {GOLD}")
+    o.append(f" · margin ${plan['margin']:,.2f}", style=CYAN)
+    o.append(f" · notional ${plan['notional']:,.2f}", style=GRAY)
+    o.append(f" · risk ${plan['actual_risk']:,.2f} ({config.RISK_PCT*100:.0f}%)", style=SILVER)
+    lines.append(o)
+    entry = plan.get("entry") or 0
+    stp = plan.get("stop") or 0
+    s = Text("  Stop ", style=GRAY)
+    s.append(_fmt_price(stp), style=f"bold {RED}")
+    if entry and stp:
+        s.append(f"  ({(stp/entry - 1)*100:+.1f}%)", style=GRAY)
+    if plan.get("floored_to_min"):
+        s.append("  ⚠ floored to Kraken min (risk > 2%)", style=AMBER)
+    lines.append(s)
+    # gating — why it will or won't act
+    now = time.time()
+    in_position = any(p["symbol"] == sym for p in ex.get("positions", []))
+    g = Text("  ", style=GRAY)
+    if in_position:
+        g.append("● POSITION OPEN", style=f"bold {GREEN}")
+    elif ex.get("halt"):
+        g.append("⛔ HALTED — deepfield.HALT_ENTRIES present", style=f"bold {RED}")
+    elif not ex.get("rails_ok", True):
+        g.append(f"⛔ BLOCKED — {ex.get('rails_reason', '')}", style=f"bold {RED}")
+    elif ps.cooldown_until > now:
+        g.append(f"⏳ COOLDOWN {_fmt_cd(ps.cooldown_until - now)} — will not re-enter", style=f"bold {AMBER}")
+    else:
+        g.append(f"▸ ARMED ({ex.get('mode','?').upper()}) — fires on confirmed BUY", style=f"bold {GREEN}")
+    lines.append(g)
+    return lines
+
+
 def render_champion(appstate, w):
     picked = _pick_champion(appstate)
     if picked is None:
@@ -378,14 +514,17 @@ def render_champion(appstate, w):
     entry.append(_fmt_price(card.price), style=SILVER)
     lines.append(entry)
 
-    if ps.tranche:
+    ex = appstate.exec
+    if ex.get("mode", "off") == "off" and ps.tranche:
+        # signal-only: the spot-DCA tranche is the manual recommendation
         tr = ps.tranche
-        t = Text("  Tranche ", style=GRAY)
+        t = Text("  Buy (spot) ", style=GRAY)
         t.append(f"{tr.qty:g} {disp}", style=f"bold {CYAN}")
         t.append(f"  ≈ ${tr.qty * tr.price:,.2f}", style=CYAN)
         t.append(f" · {CONVICTION_LABEL.get(tr.mult, f'{tr.mult:g}x')}", style=GOLD)
-        t.append(f" · {'live' if tr.price_is_live else 'close'} px", style=GRAY)
         lines.append(t)
+    else:
+        lines.extend(_champion_exec_lines(appstate, sym, ps, card))
 
     rng = Text("  W-Support ", style=GRAY)
     rng.append(_fmt_price(card.low_52w), style=SILVER)
@@ -474,6 +613,55 @@ def render_alert_tail(conn, w):
     return Group(*lines)
 
 
+# ── region: open positions (only when execution has any) ─────────────────────
+
+def render_positions(appstate, w):
+    positions = appstate.exec.get("positions", [])
+    if not positions:
+        return None
+    lines = [Text(f"▸ POSITIONS ({len(positions)})", style=f"bold {CYAN}")]
+    for p in positions:
+        sym = p["symbol"]
+        t = Text(f"  {DISPLAY.get(sym, sym):<5}", style=f"bold {SILVER}")
+        t.append(f"{p['volume']:g} @ {p['leverage']}x", style=CYAN)
+        t.append(f"  entry {_fmt_price(p['entry'])}", style=SILVER)
+        t.append(f"  stop {_fmt_price(p['stop'])}", style=RED)
+        t.append(f"  margin ${p['margin']:,.2f}", style=GRAY)
+        t.append(f"  [{p['mode']}]", style=AMBER if p["mode"] == "paper" else GREEN)
+        lines.append(t)
+    return Group(*lines)
+
+
+# ── region: forming (provisional BUYs one close from confirming) ─────────────
+
+def render_forming(appstate, w):
+    """What flips at the next close — provisional BUYs the confirmed layer hasn't
+    ratified yet, and the signal that would make each fire. The 'watch this' list."""
+    now = time.time()
+    items = []
+    for sym in PAIR_LIST:
+        ps = appstate.pairs.get(sym)
+        prov = ps.provisional if ps else None
+        card = ps.confirmed if ps else None
+        if prov and prov.status == "BUY" and (not card or card.status != "BUY"):
+            items.append((sym, prov, card))
+    if not items:
+        return None
+    lines = [Text("▸ FORMING (provisional BUY — confirms at close)", style=f"bold {AMBER}")]
+    for sym, prov, card in items:
+        # the signals provisional has that confirmed doesn't
+        conf_fired = {r.name for r in card.results if r.state == FIRED} if card else set()
+        flip = [r.name for r in prov.results if r.state == FIRED and r.name not in conf_fired]
+        t = Text(f"  {DISPLAY.get(sym, sym):<5}", style=f"bold {AMBER}")
+        t.append(f"~{prov.score}/{prov.denom}", style=AMBER)
+        if card:
+            t.append(f" (confirmed {card.score}/{card.denom})", style=GRAY)
+        if flip:
+            t.append("  needs to hold: " + ", ".join(flip[:2]), style=SILVER)
+        lines.append(t)
+    return Group(*lines)
+
+
 # ── frame assembly + Live loop ───────────────────────────────────────────────
 
 def render_frame(appstate, conn, total_width=100, show_keys=False):
@@ -483,8 +671,17 @@ def render_frame(appstate, conn, total_width=100, show_keys=False):
         render_countdowns(appstate, w), _sep(w),
         render_btc_pulse(appstate, w),
         render_regime(appstate, w), _sep(w),
-        render_main_table(appstate, w), _sep(w),
+        render_main_table(appstate, w),
+        render_table_summary(appstate, w), _sep(w),
         render_champion(appstate, w),
+    ]
+    positions = render_positions(appstate, w)
+    if positions is not None:
+        parts += [_sep(w), positions]
+    forming = render_forming(appstate, w)
+    if forming is not None:
+        parts += [_sep(w), forming]
+    parts += [
         render_closest(appstate, w), _sep(w),
         render_alert_tail(conn, w),
     ]

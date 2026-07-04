@@ -62,6 +62,56 @@ def _heal_all():
         c.close()
 
 
+async def _exec_state_refresh(appstate, conn, ing, interval=15):
+    """Publish the execution snapshot (equity/positions/rails) + per-BUY cooldown
+    and dry-run order plan into AppState, so the UI stays a pure reader. Equity is
+    the only slow bit (a Kraken call in live) — isolated to a worker thread; every
+    DB touch stays on the loop (single-writer safe)."""
+    import os
+    import time as _t
+    from . import broker
+    ex = ing.executor
+    while True:
+        try:
+            mode = config.EXEC_MODE
+            if ex is None:
+                equity = None
+            elif mode == "live":
+                equity = await asyncio.to_thread(broker.trade_balance)
+                if equity:
+                    ex._update_peak(equity)      # DB write, back on the loop
+            else:
+                equity = config.PAPER_PORTFOLIO_USD
+            rails_ok, reason = ex.rails_ok(equity) if ex else (True, "")
+            positions = [
+                {"symbol": r[0], "entry": r[1], "stop": r[2], "volume": r[3],
+                 "leverage": r[4], "margin": r[5], "mode": r[6]}
+                for r in conn.execute(
+                    "SELECT symbol,entry,stop,volume,leverage,margin,mode FROM orders "
+                    "WHERE status='open' ORDER BY id DESC")
+            ]
+            appstate.exec = {
+                "mode": mode, "equity": equity, "open_count": len(positions),
+                "positions": positions, "rails_ok": rails_ok, "rails_reason": reason,
+                "halt": os.path.exists(config.HALT_FILE), "updated": _t.time(),
+            }
+            for sym, ps in list(appstate.pairs.items()):
+                card = ps.confirmed
+                if card and card.status == "BUY":
+                    last = store.last_alert_ts(conn, sym, "confirmed")
+                    ps.cooldown_until = (last + config.REALERT_HOURS * 3600) if last else 0.0
+                    price = ps.last_tick.last if ps.last_tick else card.price
+                    ps.exec_plan = ex.plan(sym, price, card, equity) if (ex and equity) else None
+                else:
+                    ps.cooldown_until = 0.0
+                    ps.exec_plan = None
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("exec state refresh failed (will retry)")
+        await asyncio.sleep(interval)
+
+
 async def _hourly_reconciler(ing):
     while True:
         await asyncio.sleep(3600)
@@ -153,6 +203,7 @@ async def run_live(simple=False, debug=False):
     tasks.append(asyncio.ensure_future(ing.run(queue)))
     tasks.append(asyncio.ensure_future(ing.clock_close_watchdog(rest_client.fetch_ohlc)))
     tasks.append(asyncio.ensure_future(_hourly_reconciler(ing)))
+    tasks.append(asyncio.ensure_future(_exec_state_refresh(appstate, conn, ing)))
     tasks.append(asyncio.ensure_future(
         simple_ui.run_simple(appstate, conn) if simple
         else ui.run_ui(appstate, conn, show_keys=keys_active)
