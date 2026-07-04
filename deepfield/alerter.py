@@ -9,6 +9,7 @@ legacy termux-media-player bug lacked: it fired the command and read returncode
 alert. test_alert() exercises the whole chain end-to-end with kind='test'.
 """
 import os
+import csv
 import sys
 import math
 import struct
@@ -19,11 +20,19 @@ import datetime
 import subprocess
 import urllib.request
 import urllib.parse
+from zoneinfo import ZoneInfo
 
 from . import store
+from . import config
 from .config import TG_TOKEN, TG_CHAT
 
 log = logging.getLogger("deepfield.alert")
+
+# SPEC §8: "operator is America/Denver". Legacy v4.x logged naive LOCAL
+# wall-clock timestamps (datetime.now(), no tz) -- localizing explicitly here
+# rather than trusting whatever tz a future deployment host happens to have.
+LEGACY_TZ = ZoneInfo("America/Denver")
+LEGACY_DENOM = 7  # v4.x had no F3/N-A concept; always scored out of ALL_SIGNALS
 
 _WAV_PATH = os.path.join(tempfile.gettempdir(), "deepfield_alert.wav")
 _RAW_PATH = os.path.join(tempfile.gettempdir(), "deepfield_alert.raw")
@@ -145,3 +154,51 @@ def fire(conn, symbol, price, score, denom, signals, kind="confirmed"):
 def test_alert(conn):
     """--test-alert: exercise the entire chain end-to-end, kind='test'."""
     return fire(conn, "TEST/USD", 0.0, 0, 0, ["test-alert"], kind="test")
+
+
+def import_legacy_csv(conn, csv_path):
+    """§12 `import-legacy <csv>`: seed the F10 cooldown ledger from a legacy
+    v4.x dca_log.csv, so a symbol logged as BUY there recently doesn't get an
+    immediate duplicate alert from DEEPFIELD's first confirmed evaluation.
+
+    Maps legacy display symbols ('LTC') to ws_symbol ('LTC/USD') via
+    config.PAIRS; unmapped/malformed rows are counted as skipped, not raised.
+    Timestamps are localized as America/Denver (naive legacy local time) then
+    converted to UTC to match alerter.fire()'s own storage format -- getting
+    this wrong would skew the cooldown by the local UTC offset."""
+    display_to_ws = {p["display"]: p["ws"] for p in config.PAIRS}
+    imported = skipped = 0
+    with open(csv_path, "r", newline="") as f:
+        for row in csv.DictReader(f):
+            display = (row.get("symbol") or "").strip()
+            ws = display_to_ws.get(display)
+            if ws is None:
+                skipped += 1
+                continue
+            try:
+                naive = datetime.datetime.strptime((row.get("date") or "").strip(), "%Y-%m-%d %H:%M")
+            except Exception:
+                skipped += 1
+                continue
+            utc_dt = naive.replace(tzinfo=LEGACY_TZ).astimezone(datetime.timezone.utc)
+            try:
+                price = float(row.get("price") or 0.0)
+                score = int(float(row.get("score") or 0))
+            except Exception:
+                price, score = 0.0, 0
+            signals = [s for s in (row.get("signals") or "").split("|") if s]
+            store.insert_alert(conn, utc_dt.isoformat(), ws, price, score, LEGACY_DENOM, signals, kind="confirmed")
+            imported += 1
+    return {"imported": imported, "skipped": skipped}
+
+
+def export_alerts_csv(conn, csv_path):
+    """§12 `export-csv <path>`: dump the alerts ledger to CSV."""
+    rows = conn.execute(
+        "SELECT ts, symbol, price, score, denom, signals, kind FROM alerts ORDER BY id"
+    ).fetchall()
+    with open(csv_path, "w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(["ts", "symbol", "price", "score", "denom", "signals", "kind"])
+        writer.writerows(rows)
+    return len(rows)

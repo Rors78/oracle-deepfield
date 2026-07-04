@@ -93,6 +93,35 @@ def test_alerter_telegram_not_configured_returns_none(monkeypatch):
     assert alerter._telegram("hello") is None
 
 
+def test_alerter_telegram_configured_posts_to_correct_url(monkeypatch):
+    """Can't get real delivery confirmation without operator-supplied bot
+    credentials -- this proves the mechanism (correct URL, correct method,
+    chat_id/text in the POST body) rather than actual Telegram delivery."""
+    monkeypatch.setattr(alerter, "TG_TOKEN", "FAKETOKEN")
+    monkeypatch.setattr(alerter, "TG_CHAT", "12345")
+
+    captured = {}
+
+    class FakeResp:
+        status = 200
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+
+    def fake_urlopen(req, timeout=10):
+        captured["url"] = req.full_url
+        captured["method"] = req.get_method()
+        captured["data"] = req.data
+        return FakeResp()
+
+    monkeypatch.setattr(alerter.urllib.request, "urlopen", fake_urlopen)
+    result = alerter._telegram("BTC/USD BUY 5/7 @ 60000")
+
+    assert result is True
+    assert captured["url"] == "https://api.telegram.org/botFAKETOKEN/sendMessage"
+    assert captured["method"] == "POST"
+    assert b"chat_id=12345" in captured["data"]
+
+
 def test_tranche_repriced_on_tick_not_stale_from_close(tmp_path):
     """M6 regression: the champion card's 'Live entry' and 'Tranche' price must
     agree — found via the M6 export proof showing two different prices in the

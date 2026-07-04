@@ -30,11 +30,33 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv=None) -> int:
     args = build_parser().parse_args(argv)
+    if args.cmd == "import-legacy":
+        from . import store, alerter, config
+        conn = store.connect(config.DB_PATH)
+        result = alerter.import_legacy_csv(conn, args.csv)
+        conn.close()
+        print(f"import-legacy: {result['imported']} rows imported, {result['skipped']} skipped")
+        return 0
+    if args.cmd == "export-csv":
+        from . import store, alerter, config
+        conn = store.connect(config.DB_PATH)
+        n = alerter.export_alerts_csv(conn, args.path)
+        conn.close()
+        print(f"export-csv: {n} rows written to {args.path}")
+        return 0
     if args.backfill:
         from . import backfill
         t0 = time.time()
         summary = backfill.run(full=args.full)
         print(f"\nbackfill done in {time.time()-t0:.1f}s — {len(summary)} pair/interval series")
+        return 0
+    if args.reconcile:
+        from . import store, reconciler, rest_client, config
+        conn = store.connect(config.DB_PATH)
+        symbols = [p["ws"] for p in config.PAIRS]
+        repairs = reconciler.gap_heal(conn, symbols, rest_client.fetch_ohlc)
+        conn.close()
+        print(f"reconcile pass complete: {repairs} repairs")
         return 0
     if args.test_drop:
         import asyncio
