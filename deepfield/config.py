@@ -6,6 +6,15 @@ never trusted as truth (SPEC §7 F8, Appendix C).
 """
 import os
 
+# Paths (single 916G root disk; project island under home). RULINGS env ruling.
+_PKG_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.dirname(_PKG_DIR)
+DB_PATH = os.path.join(PROJECT_ROOT, "deepfield.db")
+LOG_DIR = os.path.join(PROJECT_ROOT, "logs")
+
+# Backfill/live intervals (minutes). SPEC §6.
+INTERVALS = (1440, 10080)
+
 # v1 asset code -> v2 symbol normalization (the rename traps). SPEC §6.
 NORMALIZE = {"XBT": "BTC", "XDG": "DOGE"}
 

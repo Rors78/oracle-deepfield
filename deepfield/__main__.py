@@ -4,6 +4,7 @@ Default = live TUI. Flags/subcommands wired here; handlers land in later milesto
 """
 import argparse
 import sys
+import time
 
 from . import VERSION
 
@@ -16,6 +17,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--debug", action="store_true", help="verbose logging")
     p.add_argument("--test-alert", action="store_true", help="exercise the full alert chain (kind=test)")
     p.add_argument("--reconcile", action="store_true", help="run one reconcile pass and exit")
+    p.add_argument("--backfill", action="store_true", help="cold/warm backfill pairs+candles and exit")
+    p.add_argument("--full", action="store_true", help="with --backfill: force full (cold) fetch")
     p.add_argument("--test-drop", action="store_true", help="M4 drill: force a WS reconnect")
     sub = p.add_subparsers(dest="cmd")
     imp = sub.add_parser("import-legacy", help="seed the cooldown ledger from dca_log.csv")
@@ -27,7 +30,13 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv=None) -> int:
     args = build_parser().parse_args(argv)
-    # TODO(M1+): dispatch to handlers as milestones land.
+    if args.backfill:
+        from . import backfill
+        t0 = time.time()
+        summary = backfill.run(full=args.full)
+        print(f"\nbackfill done in {time.time()-t0:.1f}s — {len(summary)} pair/interval series")
+        return 0
+    # TODO(M1+): dispatch remaining handlers as milestones land.
     print(f"deepfield {VERSION} — scaffold (M0). args={vars(args)}")
     return 0
 
