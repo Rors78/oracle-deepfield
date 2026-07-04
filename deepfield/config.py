@@ -82,3 +82,55 @@ FETCH_RETRIES = 2
 # --- Telegram: env only, never in files, never committed (§10/§11) ---
 TG_TOKEN = os.environ.get("ORACLE_TG_TOKEN")
 TG_CHAT = os.environ.get("ORACLE_TG_CHAT")
+
+# ═══════════════════════════════════════════════════════════════════════════
+# EXECUTION — live Kraken spot-margin (operator override, docs/RULINGS.md).
+# Deterministic: signal fires -> size -> open leveraged long -> rest stop -> log.
+# NO learning brain. Off by default; nothing can fire until EXEC_MODE flips.
+# ═══════════════════════════════════════════════════════════════════════════
+EXEC_MODE = os.environ.get("DEEPFIELD_EXEC_MODE", "off")   # off | paper | live
+
+# Sizing: risk 2% of account equity per trade; position sized off the stop so a
+# stop-out costs exactly that (hydra's vol = risk_usd/(entry-stop)).
+RISK_PCT = 0.02
+PAPER_PORTFOLIO_USD = 1000.0        # equity used for sizing math in paper/off
+
+# Stop: weekly support (bottom-thesis invalidation), clamped to a sane band so a
+# razor-thin stop can't blow up position size and a far one can't dust it.
+STOP_MODE = "support"               # support | pct
+STOP_PCT = 0.10                     # used when STOP_MODE="pct"
+STOP_MIN_PCT = 0.05
+STOP_MAX_PCT = 0.15
+PROTECTIVE_STOP = True              # rest a real stop on the exchange (kill-safe)
+
+ENTRY_ORDERTYPE = "limit"           # limit (post-only maker) | market
+MARGIN_CAP_PCT = 0.90               # a single position may post at most this frac of free margin
+
+# Risk rails (deterministic hard limits, from GoldenEye — NOT learners):
+MAX_OPEN_POSITIONS = 15
+DAILY_LOSS_LIMIT_USD = 15.0         # halt new entries after this realized daily loss
+WEEKLY_LOSS_LIMIT_USD = 35.0
+KILL_SWITCH_DD_PCT = 0.20           # halt at 20% drawdown from peak equity (manual reset)
+HALT_FILE = os.path.join(PROJECT_ROOT, "deepfield.HALT_ENTRIES")  # touch to halt / rm to resume
+
+# Per-pair MAX leverage — verified 2026-07-04 == max Kraken leverage_buy per pair
+# (== hydra FIXED_LEVERAGE). Keyed by ws_symbol.
+PER_PAIR_LEVERAGE = {
+    "BTC/USD": 10, "ETH/USD": 10, "XRP/USD": 10, "SOL/USD": 10, "DOGE/USD": 10,
+    "ADA/USD": 10, "LINK/USD": 10, "SUI/USD": 10, "LTC/USD": 10, "AVAX/USD": 10,
+    "AAVE/USD": 5, "UNI/USD": 5, "DOT/USD": 5, "BCH/USD": 5, "ALGO/USD": 2,
+}
+# Leveraged orders MUST use the :BTNL margin-book name (Non-ECP rejects spot name).
+MARGIN_PAIR = {
+    "BTC/USD": "XBTUSD:BTNL", "ETH/USD": "ETHUSD:BTNL", "XRP/USD": "XRPUSD:BTNL",
+    "SOL/USD": "SOLUSD:BTNL", "DOGE/USD": "XDGUSD:BTNL", "ADA/USD": "ADAUSD:BTNL",
+    "LINK/USD": "LINKUSD:BTNL", "SUI/USD": "SUIUSD:BTNL", "LTC/USD": "LTCUSD:BTNL",
+    "AVAX/USD": "AVAXUSD:BTNL", "AAVE/USD": "AAVEUSD:BTNL", "UNI/USD": "UNIUSD:BTNL",
+    "DOT/USD": "DOTUSD:BTNL", "BCH/USD": "BCHUSD:BTNL", "ALGO/USD": "ALGOUSD:BTNL",
+}
+# :BTNL margin-book PRICE precision (differs from spot — too many decimals rejects).
+MARGIN_TICK_DECIMALS = {
+    "BTC/USD": 1, "ETH/USD": 2, "XRP/USD": 5, "SOL/USD": 2, "DOGE/USD": 7,
+    "ADA/USD": 6, "LINK/USD": 5, "SUI/USD": 4, "LTC/USD": 2, "AVAX/USD": 2,
+    "AAVE/USD": 2, "UNI/USD": 3, "DOT/USD": 4, "BCH/USD": 2, "ALGO/USD": 5,
+}

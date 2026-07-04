@@ -61,3 +61,20 @@ drops out of the provisional denominator. Marked `~` in UI either way.
 ## dca_log.csv
 On the phone; gates only M7 seeding. If skipped: only cost is possible one-time
 duplicate alerts for LTC/ADA/AVAX/BCH within 24h of the 11:23 v4.4 alerts.
+
+## OPERATOR OVERRIDE — live leveraged execution (2026-07-04)
+Overrides SPEC §1/§9/§14 and invariant 9 ("signal-only, no order execution").
+Operator (50yr experienced, runs hydra.py live) directed: add live Kraken
+**margin/leverage** execution, same 15 pairs, **max leverage per pair allowed**,
+matching hydra.py's proven patterns. Risk contradiction (leverage vs stated
+year-hold) was flagged once, acknowledged, and explicitly overridden — operator's
+informed call on his own account. Build to hydra parity, not from scratch.
+
+Verified 2026-07-04 vs Kraken live: max leverage_buy per pair == hydra FIXED_LEVERAGE.
+  10x: BTC ETH XRP SOL DOGE ADA LINK SUI LTC AVAX
+  5x:  AAVE UNI DOT BCH
+  2x:  ALGO (Kraken offers only 2 there)
+All 15 margin-tradeable. Leveraged orders MUST use `<altname>:BTNL` (aclass forex);
+Non-ECP accounts reject margin on the spot name. Auth/nonce/signing ported from
+hydra `_kraken_private`. Safety rails (paper/off default, HALT file, validate probe,
+protective stop) are hydra-parity engineering, NOT re-litigation of the risk call.

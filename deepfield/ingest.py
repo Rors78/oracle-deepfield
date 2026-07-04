@@ -44,6 +44,14 @@ class Ingest:
         self._pair_info_cache = {}  # symbol -> dict|None; ordermin/costmin/lot_decimals
                                      # are static enough (AssetPairs refresh is daily,
                                      # §10) that per-tick recompute must not hit the DB.
+        # Execution is OFF unless EXEC_MODE flips (docs/RULINGS override). When
+        # off, self.executor is None and the confirmed-BUY path is signal-only.
+        self.executor = None
+        if config.EXEC_MODE != "off":
+            from . import executor as executor_mod
+            self.executor = executor_mod.Executor(conn)
+            log.warning("EXECUTION ENABLED — mode=%s (live leveraged orders on confirmed BUYs)",
+                        config.EXEC_MODE)
 
     # ── event handlers ──────────────────────────────────────────────────────
 
@@ -301,3 +309,7 @@ class Ingest:
         if ps.last_tick is not None and not engine.is_stale(ps.tick_age(), STALE_SECS):
             price = ps.last_tick.last
         alerter.fire(self.conn, symbol, price, card.score, card.denom, card.fired, kind=kind)
+        # Execution rides the SAME confirmed-BUY-past-cooldown gate as the alert:
+        # at most one entry per symbol per REALERT_HOURS. Never provisional.
+        if kind == "confirmed" and self.executor is not None:
+            self.executor.place_entry(symbol, price, card)

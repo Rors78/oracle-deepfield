@@ -182,3 +182,42 @@ def run_once(debug=False):
     conn, appstate, ing = _startup(debug)
     print(simple_ui.render_frame_text(appstate, conn))
     conn.close()
+
+
+def run_exec_probe(debug=False):
+    """--exec-probe: send validate=true orders for all 15 pairs against real
+    Kraken — proves pair name, leverage, precision, and minimums are accepted
+    WITHOUT executing. The proof gate before EXEC_MODE goes live."""
+    from . import broker, executor
+    setup_logging(debug=debug)
+    broker.setup_raw_log(config.LOG_DIR)
+    if not broker.keys_present():
+        print(f"NO KEYS — put your Kraken key/secret (2 lines) in {broker.KEYFILES[0]} first.")
+        print("Use a DEDICATED API key for DEEPFIELD (nonce is per-key; sharing with hydra collides).")
+        return
+    backfill.run(full=False, log=logging.getLogger("deepfield.backfill").info)
+    conn = store.connect(config.DB_PATH)
+    appstate = AppState()
+    ing = ingest_mod.Ingest(conn, appstate)
+    ing.startup_sweep()
+    ex = executor.Executor(conn)
+    ex.mode = "validate"
+    print("VALIDATE PROBE — real Kraken order-check, nothing executes:\n")
+    for p in config.PAIRS:
+        sym = p["ws"]
+        ps = appstate.pair(sym)
+        card = ps.confirmed
+        price = card.price if card else None
+        if not price:
+            print(f"  {sym:9s} skip (no price)")
+            continue
+        oid = ex.place_entry(sym, price, card)
+        row = conn.execute("SELECT status, entry, stop, volume, leverage, error FROM orders WHERE id=?",
+                           (oid,)).fetchone() if oid else None
+        if row:
+            st, entry, stop, vol, lev, err = row
+            mark = "✅" if st == "validated" else "❌"
+            print(f"  {sym:9s} {mark} {st:9s} vol={vol:g} x{lev} @ {entry} stop={stop}" + (f"  {err}" if err else ""))
+        else:
+            print(f"  {sym:9s} ❌ no order row")
+    conn.close()

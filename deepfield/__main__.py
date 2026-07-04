@@ -20,6 +20,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--backfill", action="store_true", help="cold/warm backfill pairs+candles and exit")
     p.add_argument("--full", action="store_true", help="with --backfill: force full (cold) fetch")
     p.add_argument("--test-drop", action="store_true", help="M4 drill: force a WS reconnect")
+    p.add_argument("--exec-probe", action="store_true",
+                   help="send validate=true orders for all pairs — prove the live order path without executing")
+    p.add_argument("--exec-status", action="store_true", help="show execution config, rails, equity, recent orders")
     sub = p.add_subparsers(dest="cmd")
     imp = sub.add_parser("import-legacy", help="seed the cooldown ledger from dca_log.csv")
     imp.add_argument("csv")
@@ -69,6 +72,24 @@ def main(argv=None) -> int:
         result = alerter.test_alert(conn)
         conn.close()
         print(f"test-alert fired: sound={result['sound']} notify={result['notify']} telegram={result['telegram']}")
+        return 0
+    if args.exec_status:
+        from . import store, broker, config, executor as ex
+        conn = store.connect(config.DB_PATH)
+        print(f"EXEC_MODE={config.EXEC_MODE}  RISK_PCT={config.RISK_PCT}  keys={'present' if broker.keys_present() else 'MISSING'}")
+        e = ex.Executor(conn)
+        equity = config.PAPER_PORTFOLIO_USD if config.EXEC_MODE != "live" else broker.trade_balance()
+        ok, reason = e.rails_ok(equity)
+        print(f"equity(for sizing)=${equity}  rails={'OK' if ok else 'BLOCKED: ' + reason}")
+        print(f"open positions (this bot)={store.open_position_count(conn)}  HALT file={'YES' if __import__('os').path.exists(config.HALT_FILE) else 'no'}")
+        print("recent orders:")
+        for r in conn.execute("SELECT ts,symbol,mode,side,volume,leverage,entry,stop,status FROM orders ORDER BY id DESC LIMIT 8"):
+            print("  ", r)
+        conn.close()
+        return 0
+    if args.exec_probe:
+        from . import app
+        app.run_exec_probe()
         return 0
     if args.once:
         from . import app

@@ -28,6 +28,13 @@ CREATE TABLE IF NOT EXISTS alerts(
     kind TEXT                                       -- confirmed | provisional | test
 );
 CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT);
+CREATE TABLE IF NOT EXISTS orders(
+    id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, symbol TEXT, margin_pair TEXT,
+    side TEXT, ordertype TEXT, mode TEXT,        -- off | paper | live | validate
+    entry REAL, stop REAL, volume REAL, leverage INTEGER,
+    notional REAL, margin REAL, risk_usd REAL,
+    txid TEXT, stop_txid TEXT, status TEXT, error TEXT
+);
 """
 
 
@@ -128,6 +135,43 @@ def insert_alert(conn, ts_iso, symbol, price, score, denom, signals, kind):
         "INSERT INTO alerts(ts, symbol, price, score, denom, signals, kind) VALUES(?,?,?,?,?,?,?)",
         (ts_iso, symbol, price, score, denom, "|".join(signals), kind),
     )
+    conn.commit()
+
+
+def insert_order(conn, row):
+    """row: dict of the orders columns. Returns the new order id."""
+    cols = ["ts", "symbol", "margin_pair", "side", "ordertype", "mode", "entry", "stop",
+            "volume", "leverage", "notional", "margin", "risk_usd", "txid", "stop_txid",
+            "status", "error"]
+    cur = conn.execute(
+        f"INSERT INTO orders({','.join(cols)}) VALUES({','.join('?' * len(cols))})",
+        [row.get(c) for c in cols],
+    )
+    conn.commit()
+    return cur.lastrowid
+
+
+def open_position_count(conn):
+    """Positions this bot opened and believes are open (status='open')."""
+    return conn.execute("SELECT COUNT(*) FROM orders WHERE status='open'").fetchone()[0]
+
+
+def realized_pnl_since(conn, since_iso):
+    row = conn.execute(
+        "SELECT COALESCE(SUM(CAST(json_extract(error,'$.pnl') AS REAL)),0) FROM orders "
+        "WHERE ts >= ? AND status='closed'", (since_iso,),
+    ).fetchone()
+    return row[0] if row else 0.0
+
+
+def meta_get(conn, key, default=None):
+    row = conn.execute("SELECT value FROM meta WHERE key=?", (key,)).fetchone()
+    return row[0] if row else default
+
+
+def meta_set(conn, key, value):
+    conn.execute("INSERT INTO meta(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                 (key, str(value)))
     conn.commit()
 
 

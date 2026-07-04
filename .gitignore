@@ -7,3 +7,8 @@ __pycache__/
 logs/
 *.log
 .pytest_cache/
+
+# execution: never commit halt flag or any key material
+deepfield.HALT_ENTRIES
+*.key
+.deepfield_keys
