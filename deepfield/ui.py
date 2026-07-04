@@ -440,7 +440,15 @@ def _pick_champion(appstate):
             candidates.append((sym, ps, card))
     if not candidates:
         return None
+    # Operator ruling (supersedes RULINGS Q1's pure score order): feature the BUY
+    # you can ACT ON. An actionable BUY (fresh, not on cooldown) is champion over a
+    # higher-score one that's gated/stale — otherwise the card headlines something
+    # the bot won't touch. Within each group, the old order holds: score -> nearest
+    # 52w-low -> alphabetical. If none are actionable, the top gated BUY still shows
+    # (with its ⏳/⛔ status), so nothing is hidden.
+    now = time.time()
     candidates.sort(key=lambda item: (
+        0 if _actionable(item[1], now) else 1,
         -item[2].score,
         item[2].pct_above_low if item[2].pct_above_low is not None else float("inf"),
         item[0],

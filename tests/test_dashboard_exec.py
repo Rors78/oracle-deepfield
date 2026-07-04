@@ -102,6 +102,29 @@ def test_frame_renders_with_exec_and_positions(tmp_path):
     conn.close()
 
 
+def test_champion_prefers_actionable_over_higher_score_gated():
+    """Operator ruling: an actionable lower-score BUY beats a gated higher-score
+    one for the champion card (so the card headlines what the bot will act on)."""
+    st = AppState()
+    now = time.time()
+    tick = type("T", (), {"last": 1.0})()
+    # LTC: higher score (5) but GATED (cooldown)
+    ltc = st.pair("LTC/USD")
+    ltc.confirmed = Card(status="BUY"); ltc.confirmed.score = 5
+    ltc.cooldown_until = now + 3600
+    ltc.last_tick = tick; ltc.last_tick_ts = now
+    # SUI: lower score (4) but ACTIONABLE (fresh, no cooldown)
+    sui = st.pair("SUI/USD")
+    sui.confirmed = Card(status="BUY"); sui.confirmed.score = 4
+    sui.cooldown_until = 0.0
+    sui.last_tick = tick; sui.last_tick_ts = now
+    picked = ui._pick_champion(st)
+    assert picked is not None and picked[0] == "SUI/USD"   # actionable wins
+    # sanity: if SUI were also gated, the higher-score LTC would win
+    sui.cooldown_until = now + 3600
+    assert ui._pick_champion(st)[0] == "LTC/USD"
+
+
 def test_champion_shows_position_open_when_in_position(tmp_path):
     conn = store.connect(str(tmp_path / "t.db"))
     st = AppState()
