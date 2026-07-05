@@ -61,9 +61,13 @@ class Executor:
             store.meta_set(self.conn, "peak_equity", equity)
 
     def rails_ok(self, equity):
-        """Deterministic hard limits. (ok: bool, reason: str)."""
+        """Deterministic hard limits. (ok: bool, reason: str). The manual HALT file
+        is always honored (operator's hand-on-switch); the AUTOMATIC circuit
+        breakers below are gated by RAILS_ENABLED (operator override: default off)."""
         if os.path.exists(config.HALT_FILE):
             return False, f"HALT file present ({config.HALT_FILE})"
+        if not config.RAILS_ENABLED:
+            return True, "ok (auto-rails disabled)"
         # Fail-safe: in live mode an unknown equity means the kill-switch cannot be
         # evaluated — do NOT trade blind (min-size sizing ignores equity, so without
         # this the drawdown halt would be silently bypassed on a TradeBalance failure).
@@ -355,6 +359,13 @@ class Executor:
             # Position confirmed GONE (kr succeeded and doesn't list it): close the
             # order, never re-place. This is a DEFINITE state (kr is not None here).
             if not has_pos:
+                # If the protective stop somehow still rests, CANCEL it — a stop-sell
+                # with no position opens a short if triggered. (Kraken usually
+                # auto-cancels on manual close, but don't rely on it.)
+                if status in ("open", "pending"):
+                    broker.cancel_order(stop_txid)
+                    log.warning("startup: %s position gone but stop still resting — canceled orphan %s",
+                                sym, stop_txid)
                 self.conn.execute("UPDATE orders SET status='closed' WHERE id=?", (oid,))
                 self.conn.commit()
                 log.info("startup: %s not in OpenPositions — order %d closed, no re-place", sym, oid)

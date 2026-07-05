@@ -113,7 +113,14 @@ POST_ONLY_SLIP_PCT = 0.001          # bid this far BELOW last so the post-only m
                                     # no-fill). 10bps ~= a patient bottom bid; negligible cost.
 MARGIN_CAP_PCT = 0.90               # a single position may post at most this frac of free margin
 
-# Risk rails (deterministic hard limits, from GoldenEye — NOT learners):
+# Risk rails (deterministic hard limits, from GoldenEye — NOT learners).
+# OPERATOR OVERRIDE: automatic circuit breakers OFF ("no circuit breakers, no
+# fear"). RAILS_ENABLED=False makes rails_ok skip the drawdown kill-switch, the
+# daily/weekly loss caps, the max-positions gate, and the equity-unknown block —
+# the bot never stops ITSELF. The manual HALT file (below) stays as the operator's
+# hand-on-switch, and the per-position protective stop is the strategy's own exit,
+# neither of which is a "circuit breaker". Flip True to re-arm the auto-brakes.
+RAILS_ENABLED = False
 MAX_OPEN_POSITIONS = 15
 DAILY_LOSS_LIMIT_USD = 15.0         # halt new entries after this realized daily loss
 WEEKLY_LOSS_LIMIT_USD = 35.0

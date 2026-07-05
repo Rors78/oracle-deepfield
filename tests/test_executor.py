@@ -114,7 +114,8 @@ def test_rails_halt_file_blocks(tmp_path, monkeypatch):
     conn.close()
 
 
-def test_rails_kill_switch_on_drawdown(tmp_path):
+def test_rails_kill_switch_on_drawdown(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, 'RAILS_ENABLED', True)
     conn = _conn(tmp_path)
     store.meta_set(conn, "peak_equity", 1000.0)
     ok, reason = _exec(conn).rails_ok(750.0)   # -25% > 20% DD limit
@@ -125,6 +126,7 @@ def test_rails_kill_switch_on_drawdown(tmp_path):
 
 
 def test_rails_max_positions_blocks(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, 'RAILS_ENABLED', True)
     conn = _conn(tmp_path)
     monkeypatch.setattr(config, "MAX_OPEN_POSITIONS", 1)
     conn.execute("INSERT INTO orders(symbol,status) VALUES('X/USD','open')")
@@ -261,7 +263,8 @@ def test_validate_mode_builds_order_without_executing(tmp_path, monkeypatch):
 
 # ── code-review hardening regressions ─────────────────────────────────────────
 
-def test_rails_block_when_live_equity_unknown(tmp_path):
+def test_rails_block_when_live_equity_unknown(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, 'RAILS_ENABLED', True)
     """Live TradeBalance failure -> equity None -> must BLOCK (kill-switch can't be
     evaluated, and min-size sizing ignores equity so it would otherwise slip through)."""
     conn = _conn(tmp_path)
@@ -271,6 +274,7 @@ def test_rails_block_when_live_equity_unknown(tmp_path):
 
 
 def test_cap_counts_pending_limits(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, 'RAILS_ENABLED', True)
     """A resting 'pending' entry limit counts toward MAX_OPEN_POSITIONS (it will fill)."""
     conn = _conn(tmp_path)
     monkeypatch.setattr(config, "MAX_OPEN_POSITIONS", 1)
