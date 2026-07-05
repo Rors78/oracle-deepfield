@@ -210,6 +210,34 @@ def test_finding3_boot_time_buy_still_arms(tmp_path, monkeypatch):
     conn.close()
 
 
+def test_finding2_restart_border_no_duplicate_fire(tmp_path, monkeypatch):
+    """Restart-at-border: _last_fired is in-process and cleared by a restart. Seeding it
+    from the DB's max closed ts at boot means a late WS close for the already-closed
+    border bar does NOT fire again (on top of the boot arm). A genuinely new bar does."""
+    conn = store.connect(str(tmp_path / "t.db"))
+    now = int(time.time())
+    _seed_minimal(conn, now)                     # closed daily bars up to now-86400
+    monkeypatch.setattr("deepfield.ingest.config.PAIRS", _TEST_PAIRS)
+    monkeypatch.setattr("deepfield.ingest.config.INTERVALS", (1440, 10080))
+    ing = Ingest(conn, AppState(), profile=FULL)
+    monkeypatch.setattr(ing, "_recompute_regime", lambda: None)
+    monkeypatch.setattr(engine, "evaluate", lambda *a, **k: _Buy())
+    ing.handle_tick(_fresh_tick(10.0))
+    ing.startup_sweep()                          # seeds _last_fired from DB max closed ts
+
+    fires = []
+    monkeypatch.setattr(ing, "_maybe_alert", lambda s, c, kind: fires.append(s))
+    last_closed = store.max_closed_ts(conn, "TEST/USD", 1440)
+    ing.handle_candle_closed(events.CandleClosed("TEST/USD", 1440, last_closed))
+    assert fires == []                           # already closed+fired pre-restart -> suppressed
+
+    store.upsert_candle(conn, "TEST/USD", 1440, last_closed + 86400, 10, 11, 9, 10, 50, closed=1)
+    conn.commit()
+    ing.handle_candle_closed(events.CandleClosed("TEST/USD", 1440, last_closed + 86400))
+    assert fires == ["TEST/USD"]                 # a genuinely newer bar still fires
+    conn.close()
+
+
 # ── A3: the single writer must never die ─────────────────────────────────────
 
 def test_A3_writer_survives_poisoned_event(tmp_path):

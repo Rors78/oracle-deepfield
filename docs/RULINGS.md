@@ -78,3 +78,12 @@ All 15 margin-tradeable. Leveraged orders MUST use `<altname>:BTNL` (aclass fore
 Non-ECP accounts reject margin on the spot name. Auth/nonce/signing ported from
 hydra `_kraken_private`. Safety rails (paper/off default, HALT file, validate probe,
 protective stop) are hydra-parity engineering, NOT re-litigation of the risk call.
+
+## Coupling rule — REALERT_HOURS ↔ alert TOCTOU (audit F2, 2026-07-05)
+`REALERT_HOURS` is 0 (cooldown off, operator override). It may not be set >0 on its
+own: the cooldown check (`last_alert_ts`, on the writer) and the record (`alerter.fire`,
+in the offloaded dispatch thread) are not atomic, so two near-simultaneous closes both
+pass the check before either records. Re-enabling the cooldown REQUIRES moving the
+check+insert into one writer-side transaction in the same change. Flip one without the
+other and the cooldown is porous exactly when it matters (weekly borders, WS+watchdog
+dupes). Cross-ref: `deepfield/config.py` REALERT_HOURS.

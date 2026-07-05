@@ -186,6 +186,15 @@ class Ingest:
         # a symbol they flip to BUY only fires through a real close, never the boot arm.
         if self._boot_buys is None:
             self._boot_buys = buys
+            # Seed the per-close fire-dedup from the DB so a restart doesn't re-fire a
+            # bar that already closed (and fired) pre-restart: a late WS close for the
+            # straddled border would otherwise fire AGAIN on top of the boot arm — two
+            # orders from one restart. A genuinely newer bar (ts > seed) still fires.
+            for p in config.PAIRS:
+                for interval in config.INTERVALS:
+                    mt = store.max_closed_ts(self.conn, p["ws"], interval)
+                    if mt is not None:
+                        self._last_fired[(p["ws"], interval)] = mt
         self._recompute_regime()
 
     # ── §5(b) clock-close fallback ───────────────────────────────────────────

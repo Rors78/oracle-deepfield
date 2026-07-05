@@ -85,6 +85,17 @@ def max_ts(conn, pair, interval):
     return row[0]
 
 
+def max_closed_ts(conn, pair, interval):
+    """MAX(ts) of a CLOSED bar for (pair, interval), or None. Seeds the per-close
+    fire-dedup at boot so a restart doesn't re-fire a bar that already closed (and
+    fired) before the restart."""
+    row = conn.execute(
+        "SELECT MAX(ts) FROM candles WHERE pair=? AND interval=? AND closed=1",
+        (pair, interval),
+    ).fetchone()
+    return row[0] if row and row[0] is not None else None
+
+
 def candle_count(conn, pair, interval):
     row = conn.execute(
         "SELECT COUNT(*) FROM candles WHERE pair=? AND interval=?", (pair, interval)

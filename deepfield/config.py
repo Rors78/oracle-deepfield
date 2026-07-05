@@ -56,6 +56,11 @@ DANGER_DRSI = 30           # §8: danger tag + tier boundary alignment
 # the same symbol (there is no separate dedupe; rails are also off). Set >0 to
 # re-arm the per-symbol wait (e.g. 24 = the old once-a-day guard).
 REALERT_HOURS = 0          # F10: per-symbol cooldown before re-alert (0 = disabled)
+# COUPLING (audit F2): flipping this >0 re-arms the cooldown, but the check
+# (last_alert_ts) runs on the writer while the insert (alerter.fire) runs in the
+# offloaded dispatch thread — a TOCTOU that lets two near-simultaneous closes both
+# pass. If you set REALERT_HOURS > 0, the check+insert MUST be made atomic on the
+# writer in the SAME change, or the cooldown is porous exactly when it matters.
 PROVISIONAL_ALERTS = False # invariant 7: provisional is display-only unless True
 
 # --- Conviction multipliers (F8): score relative to required threshold ---
