@@ -13,6 +13,13 @@ No learning brain, no calibration period. EXEC_MODE gates everything:
 
 Mechanics (pair name, leverage, post-only, :BTNL trigger=index, price precision)
 are hydra's field-verified patterns; nothing here is guessed.
+
+AUDITOR NOTE: the auto-rails (drawdown kill-switch, loss caps, max-positions),
+the alert cooldown, and re-fire-on-restart are switched OFF *by design* — see
+docs/AUDIT_ORIENTATION.md before flagging removed safeguards. Containment rests
+on min-sizing (EXEC_SIZE_MODE), NOT the rails; protective stops ARE placed
+(PROTECTIVE_STOP=True). Read that doc for the intended model and the parts that
+genuinely warrant scrutiny (sizing/rounding, the pending->open->stopped machine).
 """
 import os
 import math
@@ -323,64 +330,127 @@ class Executor:
                 log.info("ENTRY %s: %s unfilled — no position", sym, status)
 
     def verify_open_stops(self):
-        """On live restart: confirm each open position's protective stop is still
-        resting on Kraken; re-place if it's gone. CRITICAL SAFETY RULE: act ONLY on
-        DEFINITE exchange state. A transient API failure (None) is never treated as
-        'gone' — otherwise a blip would (a) abandon a real unprotected long, or
-        (b) re-place a stop that's actually resting -> two stops -> the second opens
-        a SHORT on the Non-ECP :BTNL book. On any uncertainty we leave the row
-        untouched and retry next restart."""
+        """On live restart: reconcile each pair's OPEN ledger rows and their
+        protective stops against Kraken's ACTUAL open long volume for that pair.
+        CRITICAL SAFETY RULE: act ONLY on DEFINITE exchange state. A transient API
+        failure (None) is never treated as 'gone'.
+
+        Why PER-PAIR VOLUME, not per-row pair-presence: the strategy stacks MANY
+        rows per pair, so "does the pair have *any* position?" is the wrong test —
+        a row whose OWN stop already triggered still sees a sibling position, would
+        fall through to the re-place branch, and push total resting-stop volume
+        ABOVE open volume. If the stops then sweep, the excess sell opens a SHORT on
+        the Non-ECP :BTNL book (the exact catastrophe this function exists to
+        prevent). Instead we budget each pair's DEFINITE open long volume across its
+        open rows oldest-first: a row still backed by remaining volume keeps/gets
+        exactly one resting stop; a row with no volume left behind it is closed and
+        its stop (if any) canceled as an orphan. Invariant held: resting-stop volume
+        per pair <= open volume per pair (never a naked short), while genuinely-open
+        volume stays protected. Uncertainty (stop query None) still leaves the row
+        untouched for the next restart."""
         if self.mode != "live":
             return
         kr = broker.open_positions()
         if kr is None:                                     # could not check -> do NOTHING
             log.warning("startup: OpenPositions unavailable — skipping stop verification")
             return
-        open_ids = set()
-        for _pid, pos in kr.items():
-            pr = str(pos.get("pair", ""))
-            open_ids.add(pr)
-            open_ids.add(pr.split(":")[0])
+
+        # Kraken OpenPositions is posid -> {"pair": <key|altname>, "vol": str,
+        # "vol_closed": str, "type": buy/sell} (hydra field-verified shape). Match on
+        # the NORMALIZED pair key: drop any ':SUFFIX', map the four X-prefixed altnames
+        # to their canonical key, then EXACT compare (substring matching would let an
+        # empty/embedded name mis-match and mis-sum volume). Sum NET open LONG volume;
+        # exclude a position only when it is EXPLICITLY typed 'sell' — a missing/odd
+        # type still counts, so an unexpected response shape can never silently zero a
+        # pair and strip real stops.
+        _ALT_TO_KEY = {"XBTUSD": "XXBTZUSD", "ETHUSD": "XETHZUSD",
+                       "XRPUSD": "XXRPZUSD", "LTCUSD": "XLTCZUSD"}
+        canon_keys = {p["rest"] for p in config.PAIRS}
         rest_by_ws = {p["ws"]: p["rest"] for p in config.PAIRS}
 
-        def _has_position(sym, mpair):
-            base = (mpair or "").split(":")[0]          # e.g. XBTUSD
-            rest = rest_by_ws.get(sym, "")              # e.g. XXBTZUSD
-            return any(x and (x in open_ids or any(x in pid or pid in x for pid in open_ids))
-                       for x in (base, rest))
+        def _norm_pair(pr):
+            base = str(pr or "").split(":")[0]
+            if not base:
+                return ""
+            return base if base in canon_keys else _ALT_TO_KEY.get(base, base)
 
+        def _long_vol(pos):
+            if str(pos.get("type", "")).lower() == "sell":
+                return 0.0
+            try:
+                return max(0.0, float(pos.get("vol", 0) or 0) - float(pos.get("vol_closed", 0) or 0))
+            except (TypeError, ValueError):
+                return 0.0
+
+        positions = list(kr.values()) if isinstance(kr, dict) else []
+        # Shape sanity: Kraken returned entries but NONE parse to a long volume -> the
+        # response is not the shape we expect. Bail like 'could not check' rather than
+        # read every row as unbacked and cancel real protective stops. (An empty dict
+        # is the legitimate 'account flat' state and falls through to close rows.)
+        if kr and not any(_long_vol(p) > 0 for p in positions):
+            log.warning("startup: OpenPositions returned %d entries but no parseable long "
+                        "volume — unexpected shape, skipping stop verification", len(kr))
+            return
+
+        def _pair_open_volume(sym):
+            key = rest_by_ws.get(sym, "")
+            if not key:
+                return 0.0
+            return sum(_long_vol(p) for p in positions if _norm_pair(p.get("pair", "")) == key)
+
+        # Oldest-first: when part of a pair's stack has closed out, surviving open
+        # volume is allocated to the earliest rows; the newest (now-unbacked) rows retire.
         rows = self.conn.execute(
             "SELECT id, symbol, margin_pair, volume, leverage, stop, stop_txid "
-            "FROM orders WHERE status='open'").fetchall()
+            "FROM orders WHERE status='open' ORDER BY id").fetchall()
+
+        # PASS 1 — classify each row against its pair's DEFINITE open-volume budget and
+        # do all REMOVALS now (close unbacked rows, cancel their orphan stops). Only
+        # reductions here, so resting-stop volume can never transiently exceed open vol.
+        budget = {}
+        backed = []
         for oid, sym, mpair, vol, lev, stop, stop_txid in rows:
-            has_pos = _has_position(sym, mpair)
-            o = broker.query_order(stop_txid) if stop_txid else None
-            status = (o or {}).get("status")
-            # Position confirmed GONE (kr succeeded and doesn't list it): close the
-            # order, never re-place. This is a DEFINITE state (kr is not None here).
-            if not has_pos:
-                # If the protective stop somehow still rests, CANCEL it — a stop-sell
-                # with no position opens a short if triggered. (Kraken usually
-                # auto-cancels on manual close, but don't rely on it.)
-                if status in ("open", "pending"):
+            key = (sym, mpair)
+            if key not in budget:
+                budget[key] = _pair_open_volume(sym)
+            try:
+                volf = float(vol or 0)
+            except (TypeError, ValueError):
+                volf = 0.0
+            # No open volume left to back this row -> position gone (stop triggered /
+            # manual close). Close it; if a stop somehow still rests, CANCEL the orphan
+            # (a stop-sell with no position opens a short). DEFINITE state — kr not None.
+            if budget[key] < volf - 1e-8:
+                o = broker.query_order(stop_txid) if stop_txid else None
+                if (o or {}).get("status") in ("open", "pending"):
                     broker.cancel_order(stop_txid)
-                    log.warning("startup: %s position gone but stop still resting — canceled orphan %s",
-                                sym, stop_txid)
+                    log.warning("startup: %s order %d unbacked (pair open %.8g < %.8g) — "
+                                "canceled orphan stop %s", sym, oid, budget[key], volf, stop_txid)
                 self.conn.execute("UPDATE orders SET status='closed' WHERE id=?", (oid,))
                 self.conn.commit()
-                log.info("startup: %s not in OpenPositions — order %d closed, no re-place", sym, oid)
+                log.info("startup: %s order %d not backed by open volume — closed, no re-place", sym, oid)
                 continue
-            # Position IS open. Stop confirmed resting -> fine.
+            budget[key] -= volf                            # row consumes real open volume
+            backed.append((oid, sym, mpair, vol, lev, stop, stop_txid))
+
+        # PASS 2 — ADDITIONS only, after every removal is done: ensure each backed row
+        # has exactly one resting stop; re-place only a DEFINITELY-gone/missing one.
+        for oid, sym, mpair, vol, lev, stop, stop_txid in backed:
+            o = broker.query_order(stop_txid) if stop_txid else None
+            status = (o or {}).get("status")
             if status in ("open", "pending"):
+                continue                                   # stop confirmed resting -> fine
+            if o is None and stop_txid:
+                # Stop status UNKNOWN (query failed) while backed: do NOT re-place
+                # blindly (it might already rest -> duplicate -> short). Retry later.
+                log.warning("startup: %s order %d stop query failed — leaving as-is, retry next restart", sym, oid)
                 continue
-            # Stop status UNKNOWN (query failed -> None) while the position is open:
-            # do NOT re-place blindly (it might already rest -> duplicate -> short).
-            if o is None:
-                log.warning("startup: %s position open but stop query failed — leaving as-is, retry next restart", sym)
+            if not config.PROTECTIVE_STOP:                 # stops disabled -> never place one
                 continue
-            # Position open AND stop is DEFINITELY gone (closed/canceled/expired):
-            # re-place, once, non-idempotent transport (no blind resend duplicate).
-            log.warning("startup: %s position OPEN but stop %s — re-placing", sym, status)
+            # Stop DEFINITELY gone (closed/canceled/expired) or never placed, and the
+            # position is backed: re-place once, non-idempotent transport.
+            log.warning("startup: %s order %d position backed but stop %s — re-placing",
+                        sym, oid, status or "missing")
             res = broker.private("/0/private/AddOrder", {
                 "pair": mpair, "type": "sell", "ordertype": "stop-loss",
                 "price": str(stop), "volume": str(vol), "leverage": str(lev), "trigger": "index"},

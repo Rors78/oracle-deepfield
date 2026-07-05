@@ -317,3 +317,165 @@ def test_verify_open_stops_skips_when_positions_unavailable(tmp_path, monkeypatc
     assert conn.execute("SELECT status FROM orders WHERE symbol=?", (SYM,)).fetchone()[0] == "open"
     assert sent == []          # nothing queried, nothing (re-)placed
     conn.close()
+
+
+# ── Finding 1: per-pair volume reconciliation (stacked positions) ─────────────
+
+def _seed_open(conn, stop_txid, vol=0.1, stop=90.0):
+    """Seed one OPEN stacked long on the shared pair with its own protective stop."""
+    cur = conn.execute(
+        "INSERT INTO orders(symbol,margin_pair,volume,leverage,stop,stop_txid,status) "
+        "VALUES(?,?,?,?,?,?, 'open')", (SYM, "XBTUSD:BTNL", vol, 10, stop, stop_txid))
+    conn.commit()
+    return cur.lastrowid
+
+
+def _pos(vol):
+    """A Kraken OpenPositions entry (long) on the BTC pair, rest-name form."""
+    return {"pair": "XXBTZUSD", "type": "buy", "vol": str(vol), "vol_closed": "0"}
+
+
+def _wire_broker(monkeypatch, positions, stop_status, sent):
+    """positions: dict of Kraken OpenPositions; stop_status: txid->status; sent: sink."""
+    monkeypatch.setattr(ex_mod.broker, "open_positions", lambda: positions)
+    monkeypatch.setattr(ex_mod.broker, "query_order", lambda t: {"status": stop_status.get(t)} if t else None)
+    monkeypatch.setattr(ex_mod.broker, "private",
+                        lambda ep, p=None, **kw: (sent.append(("private", p)) or {"txid": ["ONEWSTOP"]}))
+    monkeypatch.setattr(ex_mod.broker, "cancel_order", lambda t: sent.append(("cancel", t)) or {})
+
+
+def test_verify_stacked_triggered_row_not_reprotected(tmp_path, monkeypatch):
+    """FINDING 1 regression. Three stacked longs on one pair; the newest row's stop
+    already TRIGGERED (position closed). Kraken shows only 2 positions of open volume.
+    The triggered row must be CLOSED, and NO duplicate stop placed for it — the old
+    per-pair-presence logic would have re-placed it, pushing stop volume above open
+    volume -> a short on the next sweep."""
+    conn = _conn(tmp_path)
+    a = _seed_open(conn, "OSTOP-A")
+    b = _seed_open(conn, "OSTOP-B")
+    c = _seed_open(conn, "OSTOP-C")            # its stop triggered -> position gone
+    sent = []
+    _wire_broker(monkeypatch,
+                 positions={"P1": _pos(0.1), "P2": _pos(0.1)},   # only 0.2 open (2 of 3)
+                 stop_status={"OSTOP-A": "open", "OSTOP-B": "open", "OSTOP-C": "closed"},
+                 sent=sent)
+    _exec(conn, mode="live").verify_open_stops()
+    st = dict(conn.execute("SELECT id,status FROM orders").fetchall())
+    assert st[a] == "open" and st[b] == "open"          # backed rows keep their stops
+    assert st[c] == "closed"                             # unbacked row retired
+    assert not any(kind == "private" for kind, _ in sent)   # NO stop (re-)placed anywhere
+    assert not any(kind == "cancel" for kind, _ in sent)    # C's stop already gone -> nothing to cancel
+    conn.close()
+
+
+def test_verify_unbacked_row_with_resting_stop_is_canceled(tmp_path, monkeypatch):
+    """An unbacked row whose stop somehow STILL rests -> the orphan is canceled
+    (a stop-sell with no position opens a short)."""
+    conn = _conn(tmp_path)
+    a = _seed_open(conn, "OSTOP-A")
+    b = _seed_open(conn, "OSTOP-B")            # unbacked, but stop still resting
+    sent = []
+    _wire_broker(monkeypatch,
+                 positions={"P1": _pos(0.1)},                    # only 1 position open
+                 stop_status={"OSTOP-A": "open", "OSTOP-B": "open"},
+                 sent=sent)
+    _exec(conn, mode="live").verify_open_stops()
+    st = dict(conn.execute("SELECT id,status FROM orders").fetchall())
+    assert st[a] == "open" and st[b] == "closed"
+    assert ("cancel", "OSTOP-B") in sent                # orphan stop canceled
+    assert not any(kind == "private" for kind, _ in sent)
+    conn.close()
+
+
+def test_verify_backed_row_missing_stop_is_reprotected(tmp_path, monkeypatch):
+    """The legit single-position case still works: a backed row whose stop is
+    DEFINITELY gone gets exactly one re-placed stop."""
+    conn = _conn(tmp_path)
+    a = _seed_open(conn, "OSTOP-A")
+    sent = []
+    _wire_broker(monkeypatch,
+                 positions={"P1": _pos(0.1)},                    # position backs the row
+                 stop_status={"OSTOP-A": "canceled"},            # stop gone
+                 sent=sent)
+    _exec(conn, mode="live").verify_open_stops()
+    assert conn.execute("SELECT status FROM orders WHERE id=?", (a,)).fetchone()[0] == "open"
+    placed = [p for kind, p in sent if kind == "private"]
+    assert len(placed) == 1                              # exactly one re-place
+    assert placed[0]["type"] == "sell" and placed[0]["ordertype"] == "stop-loss"
+    assert conn.execute("SELECT stop_txid FROM orders WHERE id=?", (a,)).fetchone()[0] == "ONEWSTOP"
+    conn.close()
+
+
+def test_verify_whole_pair_gone_closes_all_and_cancels_stops(tmp_path, monkeypatch):
+    """Whole pair flat on Kraken -> every open row closed; any resting stop canceled;
+    nothing re-placed."""
+    conn = _conn(tmp_path)
+    a = _seed_open(conn, "OSTOP-A")
+    b = _seed_open(conn, "OSTOP-B")
+    sent = []
+    _wire_broker(monkeypatch,
+                 positions={},                                   # nothing open
+                 stop_status={"OSTOP-A": "open", "OSTOP-B": "closed"},
+                 sent=sent)
+    _exec(conn, mode="live").verify_open_stops()
+    st = dict(conn.execute("SELECT id,status FROM orders").fetchall())
+    assert st[a] == "closed" and st[b] == "closed"
+    assert ("cancel", "OSTOP-A") in sent                # A's stop still rested -> canceled
+    assert not any(kind == "private" for kind, _ in sent)
+    conn.close()
+
+
+def test_verify_orphan_cancel_precedes_reprotect(tmp_path, monkeypatch):
+    """Two-pass ordering: ALL removals (orphan-stop cancels) happen before ANY
+    re-place, so total resting-stop volume never transiently exceeds open volume —
+    the exact excess-stop condition that would open a short on a simultaneous sweep."""
+    conn = _conn(tmp_path)
+    a = _seed_open(conn, "OSTOP-A")            # backed, but its stop is GONE -> re-place
+    b = _seed_open(conn, "OSTOP-B")            # backed, stop resting -> fine
+    c = _seed_open(conn, "OSTOP-C")            # unbacked, stop still resting -> cancel orphan
+    sent = []
+    _wire_broker(monkeypatch,
+                 positions={"P1": _pos(0.1), "P2": _pos(0.1)},   # 0.2 open backs A+B, not C
+                 stop_status={"OSTOP-A": "canceled", "OSTOP-B": "open", "OSTOP-C": "open"},
+                 sent=sent)
+    _exec(conn, mode="live").verify_open_stops()
+    kinds = [k for k, _ in sent]
+    assert ("cancel", "OSTOP-C") in sent and any(k == "private" for k in kinds)
+    assert kinds.index("cancel") < kinds.index("private")   # cancel (removal) BEFORE re-place (add)
+    st = dict(conn.execute("SELECT id,status FROM orders").fetchall())
+    assert st[a] == "open" and st[b] == "open" and st[c] == "closed"
+    conn.close()
+
+
+def test_verify_short_position_not_counted_as_long(tmp_path, monkeypatch):
+    """A short (type=sell) on the pair must NOT count as long volume — otherwise it
+    would back a row that has no real long behind it and keep an excess stop."""
+    conn = _conn(tmp_path)
+    a = _seed_open(conn, "OSTOP-A")
+    sent = []
+    _wire_broker(monkeypatch,
+                 positions={"pBuy": {"pair": "SOLUSD", "type": "buy", "vol": "1", "vol_closed": "0"},
+                            "pSell": {"pair": "XXBTZUSD", "type": "sell", "vol": "0.5", "vol_closed": "0"}},
+                 stop_status={"OSTOP-A": "open"},
+                 sent=sent)
+    _exec(conn, mode="live").verify_open_stops()
+    # BTC row sees only the excluded short -> 0 long -> unbacked -> closed + stop canceled.
+    assert conn.execute("SELECT status FROM orders WHERE id=?", (a,)).fetchone()[0] == "closed"
+    assert ("cancel", "OSTOP-A") in sent
+    conn.close()
+
+
+def test_verify_bails_on_unparseable_positions_shape(tmp_path, monkeypatch):
+    """If OpenPositions is non-empty but no entry parses to a long volume, the shape
+    is unexpected — bail like 'could not check', never strip real stops."""
+    conn = _conn(tmp_path)
+    a = _seed_open(conn, "OSTOP-A")
+    sent = []
+    _wire_broker(monkeypatch,
+                 positions={"p": {"foo": "bar"}},               # unrecognizable shape
+                 stop_status={"OSTOP-A": "open"},
+                 sent=sent)
+    _exec(conn, mode="live").verify_open_stops()
+    assert conn.execute("SELECT status FROM orders WHERE id=?", (a,)).fetchone()[0] == "open"
+    assert sent == []                                           # nothing canceled or placed
+    conn.close()
