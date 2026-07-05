@@ -478,7 +478,7 @@ def _champion_exec_lines(appstate, sym, ps, card):
     o.append(f" · margin ${plan['margin']:,.2f}", style=CYAN)
     o.append(f" · notional ${plan['notional']:,.2f}", style=GRAY)
     if plan.get("size_mode") == "min":
-        o.append("  · MIN SIZE (no liquidation worry)", style=GREEN)
+        o.append("  · MIN SIZE", style=GREEN)
     else:
         o.append(f" · risk ${plan['actual_risk']:,.2f} ({config.RISK_PCT*100:.0f}%)", style=SILVER)
     lines.append(o)
@@ -769,8 +769,7 @@ def render_frame_wide(appstate, conn, total_width, show_keys=False):
     for r in (render_positions(appstate, right_w), render_forming(appstate, right_w)):
         if r is not None:
             right_parts += [Text(""), r]
-    right_parts += [Text(""), render_closest(appstate, right_w),
-                    Text(""), render_alert_tail(conn, right_w)]
+    right_parts += [Text(""), render_alert_tail(conn, right_w)]
     right = Group(*right_parts)
 
     body = Table.grid(expand=False, padding=(0, 2, 0, 0))
@@ -804,7 +803,6 @@ def render_frame(appstate, conn, total_width=100, show_keys=False):
     if forming is not None:
         parts += [_sep(w), forming]
     parts += [
-        render_closest(appstate, w), _sep(w),
         render_alert_tail(conn, w),
     ]
     if show_keys:

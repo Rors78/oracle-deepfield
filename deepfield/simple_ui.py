@@ -173,25 +173,6 @@ def render_frame_text(appstate, conn):
         lines.append("No active BUY candidates this scan.")
     lines.append(sep)
 
-    closest = []
-    for sym in PAIR_LIST:
-        ps = appstate.pairs.get(sym)
-        card = ps.confirmed if ps else None
-        if card and card.status != "BUY" and card.score >= 2:
-            closest.append((sym, card))
-    closest.sort(key=lambda x: (-x[1].score, x[0]))
-    if closest[:3]:
-        lines.append("CLOSEST NOT YET")
-        for sym, card in closest[:3]:
-            lines.append(f"  {DISPLAY.get(sym, sym):<5}{card.score}/{card.denom} needs {max(0, card.required - card.score)}")
-            shown = 0
-            for res in card.results:
-                if shown >= 2:
-                    break
-                if res.state == NOT and res.slot in card.gap:
-                    lines.append(f"    - {res.name}: {card.gap[res.slot]}"[:W])
-                    shown += 1
-        lines.append(sep)
 
     rows = store.recent_alerts(conn, 5)
     lines.append("ALERT TAIL")
