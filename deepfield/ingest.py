@@ -308,8 +308,33 @@ class Ingest:
         price = card.price
         if ps.last_tick is not None and not engine.is_stale(ps.tick_age(), STALE_SECS):
             price = ps.last_tick.last
-        alerter.fire(self.conn, symbol, price, card.score, card.denom, card.fired, kind=kind)
-        # Execution rides the SAME confirmed-BUY-past-cooldown gate as the alert:
-        # at most one entry per symbol per REALERT_HOURS. Never provisional.
-        if kind == "confirmed" and self.executor is not None:
-            self.executor.place_entry(symbol, price, card)
+        # The alert chain (sound/notify/Telegram) and live order placement do
+        # BLOCKING network I/O with retries — on the writer that stalls the event
+        # loop and can trip the WS watchdog. Offload to a thread (own DB conn,
+        # sqlite isn't cross-thread) when a loop is running; run inline otherwise
+        # (--once / tests, where self.conn is the right connection).
+        do_exec = (kind == "confirmed" and self.executor is not None)
+        args = (symbol, price, card.score, card.denom, list(card.fired), kind, do_exec, card)
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            self._dispatch(self.conn, *args)     # sync path (no event loop)
+            return
+        asyncio.ensure_future(asyncio.to_thread(self._dispatch_threaded, *args))
+
+    def _dispatch_threaded(self, *args):
+        conn = store.connect(config.DB_PATH)     # thread-local connection
+        try:
+            self._dispatch(conn, *args)
+        except Exception:
+            log.exception("offloaded alert/exec dispatch failed")
+        finally:
+            conn.close()
+
+    def _dispatch(self, conn, symbol, price, score, denom, fired, kind, do_exec, card):
+        alerter.fire(conn, symbol, price, score, denom, fired, kind=kind)
+        if do_exec:
+            from . import executor as executor_mod
+            ex = executor_mod.Executor(conn)
+            ex.mode = config.EXEC_MODE
+            ex.place_entry(symbol, price, card)

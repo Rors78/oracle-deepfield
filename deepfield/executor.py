@@ -268,6 +268,23 @@ class Executor:
         the stop FILLED, the position closed — mark the order closed instead."""
         if self.mode != "live":
             return
+        # Which pairs Kraken actually shows a position for RIGHT NOW. A stop-loss
+        # SELL for a pair with NO position would OPEN A SHORT on the Non-ECP :BTNL
+        # book when triggered — so re-placement is gated on this set (LONG-ONLY).
+        open_ids = set()
+        for _pid, pos in (broker.open_positions() or {}).items():
+            pr = str(pos.get("pair", ""))
+            open_ids.add(pr)
+            open_ids.add(pr.split(":")[0])
+        rest_by_ws = {p["ws"]: p["rest"] for p in config.PAIRS}
+
+        def _has_position(sym, mpair):
+            base = (mpair or "").split(":")[0]          # e.g. XBTUSD
+            rest = rest_by_ws.get(sym, "")              # e.g. XXBTZUSD
+            return bool(open_ids) and any(
+                x and (x in open_ids or any(x in pid or pid in x for pid in open_ids))
+                for x in (base, rest))
+
         rows = self.conn.execute(
             "SELECT id, symbol, margin_pair, volume, leverage, stop, stop_txid "
             "FROM orders WHERE status='open'").fetchall()
@@ -276,12 +293,15 @@ class Executor:
             status = (o or {}).get("status")
             if status in ("open", "pending"):
                 continue                                   # still protected
-            if status == "closed":
+            # stop filled OR the position is simply gone -> close the order, and
+            # NEVER re-place (a stop with no position becomes a short).
+            if status == "closed" or not _has_position(sym, mpair):
                 self.conn.execute("UPDATE orders SET status='closed' WHERE id=?", (oid,))
                 self.conn.commit()
-                log.info("startup: %s stop FILLED — position closed (order %d)", sym, oid)
+                log.info("startup: %s position gone (stop status=%s) — order %d closed, no re-place",
+                         sym, status, oid)
                 continue
-            log.warning("startup: %s stop not resting (status=%s) — re-placing", sym, status)
+            log.warning("startup: %s stop not resting (status=%s) but position OPEN — re-placing", sym, status)
             res = broker.private("/0/private/AddOrder", {
                 "pair": mpair, "type": "sell", "ordertype": "stop-loss",
                 "price": str(stop), "volume": str(vol), "leverage": str(lev), "trigger": "index"})

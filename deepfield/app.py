@@ -80,12 +80,13 @@ async def _exec_state_refresh(appstate, conn, ing, interval=15):
                 equity = None
             elif mode == "live":
                 balance = await asyncio.to_thread(broker.trade_balance_full)
-                try:
-                    equity = float(balance["e"]) if balance else None
-                    margin_used = float(balance["m"]) if balance else None
-                    free_margin = float(balance["mf"]) if balance else None
-                except (TypeError, ValueError, KeyError):
-                    equity = None
+
+                def _bf(key):   # each field independent — a missing m/mf must not null equity
+                    try:
+                        return float(balance[key]) if balance else None
+                    except (TypeError, ValueError, KeyError):
+                        return None
+                equity, margin_used, free_margin = _bf("e"), _bf("m"), _bf("mf")
                 if equity:
                     ex._update_peak(equity)      # DB write, back on the loop
             else:

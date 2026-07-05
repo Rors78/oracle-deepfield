@@ -181,7 +181,8 @@ def test_validate_mode_builds_order_without_executing(tmp_path, monkeypatch):
     assert captured["params"]["validate"] == "true"          # never executes
     assert captured["params"]["pair"] == "XBTUSD:BTNL"
     assert captured["params"]["leverage"] == "10"
-    assert captured["params"]["oflags"] == "post"            # post-only maker
+    assert captured["params"]["ordertype"] == "market"       # market = guaranteed fill
+    assert "oflags" not in captured["params"] and "price" not in captured["params"]
     row = conn.execute("SELECT status FROM orders WHERE id=?", (oid,)).fetchone()
     assert row[0] == "validated"
     conn.close()
