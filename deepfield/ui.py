@@ -695,6 +695,13 @@ def render_account(appstate, w):
     elif not ex.get("rails_ok", True):
         e.append(f"   ⛔ {ex.get('rails_reason','')}", style=f"bold {RED}")
     lines.append(e)
+    pending = ex.get("pending", [])
+    if pending:
+        r = Text("  RESTING  ", style=GRAY)
+        r.append(f"{len(pending)} limit(s) awaiting fill: ", style=AMBER)
+        r.append(", ".join(f"{p['volume']:g} {DISPLAY.get(p['symbol'], p['symbol'])}@{_fmt_price(p['entry'])}"
+                           for p in pending[:3]), style=SILVER)
+        lines.append(r)
     return Group(*lines)
 
 

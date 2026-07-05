@@ -250,17 +250,52 @@ class Executor:
                 row["txid"] = str((res.get("descr") or {}).get("order", "validated"))
             return store.insert_order(self.conn, row)
 
-        # live
+        # live: place the post-only maker limit and record it PENDING. A resting
+        # limit is NOT a position — do not rest a stop yet (a stop with no position
+        # would open a short) and do not count it as open. poll_fills() promotes
+        # it to 'open' and rests the protective stop only once Kraken confirms fill.
         res = broker.private("/0/private/AddOrder", params)
         if res and res.get("txid"):
             row["txid"] = res["txid"][0]
-            row["status"] = "open"
-            oid = store.insert_order(self.conn, row)
-            self._rest_stop(symbol, margin_pair, stop_px, vol, leverage, oid, paper=False)
-            return oid
+            row["status"] = "pending"
+            log.info("ENTRY %s: limit resting @ %s (pending fill) %s", symbol, px, row["txid"])
+            return store.insert_order(self.conn, row)
         row["status"] = "rejected"
         row["error"] = "no txid from AddOrder"
         return store.insert_order(self.conn, row)
+
+    def poll_fills(self):
+        """Promote resting entry limits to positions once Kraken confirms fill,
+        then rest the protective stop. A limit sits 'pending' until this sees an
+        executed volume — so pos counts, P&L, stops, and re-verification never
+        touch an unfilled order. Terminal-but-unfilled orders become 'canceled'.
+        LIVE only; paper simulates instant fill at placement."""
+        if self.mode != "live":
+            return
+        rows = self.conn.execute(
+            "SELECT id, symbol, margin_pair, volume, leverage, stop, txid "
+            "FROM orders WHERE status='pending'").fetchall()
+        for oid, sym, mpair, vol, lev, stop, txid in rows:
+            o = broker.query_order(txid) if txid else None
+            if o is None:
+                continue                        # transient query failure — retry next cycle
+            status = o.get("status")
+            try:
+                vol_exec = float(o.get("vol_exec", 0) or 0)
+            except (TypeError, ValueError):
+                vol_exec = 0.0
+            if status not in ("closed", "canceled", "expired"):
+                continue                        # still resting — patient bid, leave it
+            if vol_exec > 0:                     # filled (fully, or partial then done)
+                self.conn.execute("UPDATE orders SET status='open', volume=? WHERE id=?", (vol_exec, oid))
+                self.conn.commit()
+                log.info("FILL %s: %.6g filled — position open, resting stop", sym, vol_exec)
+                self._rest_stop(sym, mpair, stop, vol_exec, lev, oid, paper=False)
+            else:
+                self.conn.execute("UPDATE orders SET status='canceled', error=? WHERE id=?",
+                                  (f"entry {status}, unfilled", oid))
+                self.conn.commit()
+                log.info("ENTRY %s: %s unfilled — no position", sym, status)
 
     def verify_open_stops(self):
         """On live restart: confirm each open position's protective stop is still

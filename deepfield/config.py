@@ -105,10 +105,9 @@ STOP_MIN_PCT = 0.05
 STOP_MAX_PCT = 0.15
 PROTECTIVE_STOP = True              # rest a real stop on the exchange (kill-safe)
 
-ENTRY_ORDERTYPE = "market"          # market = guaranteed fill (status='open' is then
-                                    # accurate). "limit" is post-only maker but can rest
-                                    # UNFILLED while recorded open — don't use without a
-                                    # fill monitor. min-size taker fee is fractions of a cent.
+ENTRY_ORDERTYPE = "limit"           # post-only maker ONLY (no market entries). A resting
+                                    # limit is recorded status='pending' and promoted to
+                                    # 'open' only when the fill monitor confirms it filled.
 MARGIN_CAP_PCT = 0.90               # a single position may post at most this frac of free margin
 
 # Risk rails (deterministic hard limits, from GoldenEye — NOT learners):

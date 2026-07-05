@@ -62,6 +62,21 @@ def _heal_all():
         c.close()
 
 
+def _poll_fills_threaded():
+    """Off-loop (own conn): promote filled entry limits to positions and rest
+    their stops. Blocking Kraken I/O, so never on the event loop."""
+    from . import executor as executor_mod
+    c = store.connect(config.DB_PATH)
+    try:
+        e = executor_mod.Executor(c)
+        e.mode = "live"
+        e.poll_fills()
+    except Exception:
+        log.exception("poll_fills failed")
+    finally:
+        c.close()
+
+
 async def _exec_state_refresh(appstate, conn, ing, interval=15):
     """Publish the execution snapshot (equity/positions/rails) + per-BUY cooldown
     and dry-run order plan into AppState, so the UI stays a pure reader. Equity is
@@ -79,6 +94,7 @@ async def _exec_state_refresh(appstate, conn, ing, interval=15):
             if ex is None:
                 equity = None
             elif mode == "live":
+                await asyncio.to_thread(_poll_fills_threaded)   # filled limits -> positions + stops
                 balance = await asyncio.to_thread(broker.trade_balance_full)
 
                 def _bf(key):   # each field independent — a missing m/mf must not null equity
@@ -100,9 +116,16 @@ async def _exec_state_refresh(appstate, conn, ing, interval=15):
                     "SELECT symbol,entry,stop,volume,leverage,margin,mode FROM orders "
                     "WHERE status='open' ORDER BY id DESC")
             ]
+            pending = [
+                {"symbol": r[0], "entry": r[1], "volume": r[2], "leverage": r[3]}
+                for r in conn.execute(
+                    "SELECT symbol,entry,volume,leverage FROM orders "
+                    "WHERE status='pending' ORDER BY id DESC")
+            ]
             appstate.exec = {
                 "mode": mode, "equity": equity, "open_count": len(positions),
-                "positions": positions, "rails_ok": rails_ok, "rails_reason": reason,
+                "positions": positions, "pending": pending,
+                "rails_ok": rails_ok, "rails_reason": reason,
                 "halt": os.path.exists(config.HALT_FILE), "updated": _t.time(),
                 "balance": balance, "margin_used": margin_used, "free_margin": free_margin,
             }

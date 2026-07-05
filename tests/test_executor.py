@@ -166,6 +166,77 @@ def test_place_entry_never_raises(tmp_path):
     conn.close()
 
 
+# ── live fill lifecycle: pending -> (fill) open+stop | (unfilled) canceled ─────
+
+def _seed_pending(conn, txid="OENTRY", stop=90.0):
+    cur = conn.execute(
+        "INSERT INTO orders(symbol,margin_pair,volume,leverage,stop,txid,status) "
+        "VALUES(?,?,?,?,?,?, 'pending')", (SYM, "XBTUSD:BTNL", 0.1, 10, stop, txid))
+    conn.commit()
+    return cur.lastrowid
+
+
+def test_live_entry_is_pending_with_no_stop(tmp_path, monkeypatch):
+    conn = _conn(tmp_path, ordermin=0.1)
+    orders = []
+
+    def fake_private(ep, p=None):
+        if "TradeBalance" in ep:
+            return {"e": "1000"}                 # rails equity
+        orders.append(p)
+        return {"txid": ["OENTRY-1"]}
+
+    monkeypatch.setattr(ex_mod.broker, "private", fake_private)
+    e = _exec(conn, mode="live")
+    oid = e.place_entry(SYM, 100.0, Card(low_52w=92.0))
+    status, txid, stop_txid = conn.execute(
+        "SELECT status,txid,stop_txid FROM orders WHERE id=?", (oid,)).fetchone()
+    assert status == "pending"          # a resting limit is NOT a position
+    assert txid == "OENTRY-1"
+    assert stop_txid is None            # NO stop rested for an unfilled entry
+    # exactly ONE order was sent — the entry buy limit; no stop-loss yet
+    assert len(orders) == 1
+    assert orders[0]["type"] == "buy" and orders[0]["ordertype"] == "limit"
+    assert all(o.get("ordertype") != "stop-loss" for o in orders)
+    conn.close()
+
+
+def test_poll_fills_promotes_filled_and_rests_stop(tmp_path, monkeypatch):
+    conn = _conn(tmp_path)
+    seq = []
+    monkeypatch.setattr(ex_mod.broker, "private",
+                        lambda ep, p=None: (seq.append(p) or {"txid": ["OSTOP-1"]}))
+    monkeypatch.setattr(ex_mod.broker, "query_order",
+                        lambda txid: {"status": "closed", "vol_exec": "0.1"})
+    e = _exec(conn, mode="live")
+    oid = _seed_pending(conn, "OENTRY-2")
+    e.poll_fills()
+    status, stop_txid, vol = conn.execute(
+        "SELECT status,stop_txid,volume FROM orders WHERE id=?", (oid,)).fetchone()
+    assert status == "open"             # filled -> position
+    assert stop_txid == "OSTOP-1"       # protective stop rested only now
+    assert abs(vol - 0.1) < 1e-9
+    assert any(p.get("type") == "sell" and p.get("ordertype") == "stop-loss" for p in seq)
+    conn.close()
+
+
+def test_poll_fills_unfilled_cancel_opens_nothing(tmp_path, monkeypatch):
+    conn = _conn(tmp_path)
+    calls = []
+    monkeypatch.setattr(ex_mod.broker, "private", lambda ep, p=None: calls.append(p))
+    monkeypatch.setattr(ex_mod.broker, "query_order",
+                        lambda txid: {"status": "canceled", "vol_exec": "0"})
+    e = _exec(conn, mode="live")
+    oid = _seed_pending(conn, "OENTRY-3")
+    e.poll_fills()
+    status, stop_txid = conn.execute(
+        "SELECT status,stop_txid FROM orders WHERE id=?", (oid,)).fetchone()
+    assert status == "canceled"         # never filled -> no position
+    assert stop_txid is None
+    assert calls == []                  # and NO order of any kind was sent
+    conn.close()
+
+
 def test_validate_mode_builds_order_without_executing(tmp_path, monkeypatch):
     conn = _conn(tmp_path)
     captured = {}
@@ -181,8 +252,8 @@ def test_validate_mode_builds_order_without_executing(tmp_path, monkeypatch):
     assert captured["params"]["validate"] == "true"          # never executes
     assert captured["params"]["pair"] == "XBTUSD:BTNL"
     assert captured["params"]["leverage"] == "10"
-    assert captured["params"]["ordertype"] == "market"       # market = guaranteed fill
-    assert "oflags" not in captured["params"] and "price" not in captured["params"]
+    assert captured["params"]["ordertype"] == "limit"        # post-only maker (NO market)
+    assert captured["params"]["oflags"] == "post"
     row = conn.execute("SELECT status FROM orders WHERE id=?", (oid,)).fetchone()
     assert row[0] == "validated"
     conn.close()
