@@ -56,11 +56,16 @@ DANGER_DRSI = 30           # §8: danger tag + tier boundary alignment
 # the same symbol (there is no separate dedupe; rails are also off). Set >0 to
 # re-arm the per-symbol wait (e.g. 24 = the old once-a-day guard).
 REALERT_HOURS = 0          # F10: per-symbol cooldown before re-alert (0 = disabled)
-# COUPLING (audit F2): flipping this >0 re-arms the cooldown, but the check
-# (last_alert_ts) runs on the writer while the insert (alerter.fire) runs in the
-# offloaded dispatch thread — a TOCTOU that lets two near-simultaneous closes both
-# pass. If you set REALERT_HOURS > 0, the check+insert MUST be made atomic on the
-# writer in the SAME change, or the cooldown is porous exactly when it matters.
+# COUPLING (audit F2): flipping this >0 re-arms the cooldown, but two strands must
+# be fixed IN THE SAME change or it's porous exactly when it matters:
+#  1. TOCTOU — the check (last_alert_ts) runs on the writer while the insert
+#     (alerter.fire) runs in the offloaded dispatch thread, so two near-simultaneous
+#     closes both pass. Make check+insert atomic on the writer.
+#  2. The alerts table IS the cooldown ledger, but _dispatch now places the order
+#     BEFORE alerter.fire and isolates the alert — so a failed alert records NO fire
+#     for an order that DID happen, blinding the cooldown to it. When re-enabling,
+#     record the fire on the ORDER path (not the decoration path), so the ledger
+#     reflects orders placed, not alerts that happened to succeed.
 PROVISIONAL_ALERTS = False # invariant 7: provisional is display-only unless True
 
 # --- Conviction multipliers (F8): score relative to required threshold ---

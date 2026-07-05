@@ -86,4 +86,12 @@ in the offloaded dispatch thread) are not atomic, so two near-simultaneous close
 pass the check before either records. Re-enabling the cooldown REQUIRES moving the
 check+insert into one writer-side transaction in the same change. Flip one without the
 other and the cooldown is porous exactly when it matters (weekly borders, WS+watchdog
-dupes). Cross-ref: `deepfield/config.py` REALERT_HOURS.
+dupes).
+
+Second strand (added after the `_dispatch` isolation fix): the alerts table IS the
+cooldown ledger (`last_alert_ts`), but `_dispatch` now places the order BEFORE
+`alerter.fire` and isolates the alert, so a **failed alert records no fire for an
+order that actually happened** — blinding a re-enabled cooldown to it. So re-enabling
+must ALSO record the fire on the ORDER path, not the decoration path: the ledger must
+reflect orders placed, not alerts that happened to succeed. Cross-ref:
+`deepfield/config.py` REALERT_HOURS, `deepfield/ingest.py` `_dispatch`.

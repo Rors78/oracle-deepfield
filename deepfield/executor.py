@@ -460,10 +460,15 @@ class Executor:
         # reductions here, so resting-stop volume can never transiently exceed open vol.
         budget = {}
         backed = []
+        recon = {}   # per-pair happy-path tally -> a positive evidence line at the end
         for oid, sym, mpair, vol, lev, stop, stop_txid, entry_txid in rows:
             key = (sym, mpair)
             if key not in budget:
                 budget[key] = _pair_open_volume(sym)
+            if sym not in recon:
+                recon[sym] = {"rows": 0, "openvol": budget[key], "closed": 0,
+                              "resting": 0, "replaced": 0, "unknown": 0}
+            recon[sym]["rows"] += 1
             try:
                 volf = float(vol or 0)
             except (TypeError, ValueError):
@@ -484,6 +489,7 @@ class Executor:
                 self.conn.execute("UPDATE orders SET status='closed', error=COALESCE(?, error) WHERE id=?",
                                   (pnl_json, oid))
                 self.conn.commit()
+                recon[sym]["closed"] += 1
                 log.info("startup: %s order %d not backed by open volume — closed, no re-place", sym, oid)
                 continue
             budget[key] -= volf                            # row consumes real open volume
@@ -495,10 +501,12 @@ class Executor:
             o = broker.query_order(stop_txid) if stop_txid else None
             status = (o or {}).get("status")
             if status in ("open", "pending"):
+                recon[sym]["resting"] += 1
                 continue                                   # stop confirmed resting -> fine
             if o is None and stop_txid:
                 # Stop status UNKNOWN (query failed) while backed: do NOT re-place
                 # blindly (it might already rest -> duplicate -> short). Retry later.
+                recon[sym]["unknown"] += 1
                 log.warning("startup: %s order %d stop query failed — leaving as-is, retry next restart", sym, oid)
                 continue
             if not config.PROTECTIVE_STOP:                 # stops disabled -> never place one
@@ -514,9 +522,18 @@ class Executor:
             if res and res.get("txid"):
                 self.conn.execute("UPDATE orders SET stop_txid=? WHERE id=?", (res["txid"][0], oid))
                 self.conn.commit()
+                recon[sym]["replaced"] += 1
                 log.info("PROTECT %s: re-placed stop @ %s (%s)", sym, stop, res["txid"][0])
             else:
                 log.error("PROTECT %s: re-place FAILED — position may be UNPROTECTED", sym)
+
+        # Positive evidence: one line per pair, so a clean reconcile leaves proof it ran
+        # and the invariant held — not silence to interpret (audit re-review). E.g.
+        # "reconcile SUI/USD: 3 open rows, 15 open vol on Kraken, 3 stops resting, ...".
+        for sym, r in recon.items():
+            log.info("reconcile %s: %d open rows, %.6g open vol on Kraken, %d stops resting, "
+                     "%d closed, %d re-placed, %d unknown",
+                     sym, r["rows"], r["openvol"], r["resting"], r["closed"], r["replaced"], r["unknown"])
 
     def _stop_exit_pnl_json(self, sym, oid, entry_txid, stop_order):
         """Realized P&L for a STOP-triggered close, from Kraken's own execution records:
