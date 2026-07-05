@@ -12,3 +12,4 @@ logs/
 deepfield.HALT_ENTRIES
 *.key
 .deepfield_keys
+.claude/skills/run-deepfield/last-frame.txt
