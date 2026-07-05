@@ -174,6 +174,14 @@ def committed_position_count(conn):
         "SELECT COUNT(*) FROM orders WHERE status IN ('open','pending')").fetchone()[0]
 
 
+def has_pending_entry(conn, symbol):
+    """True if this symbol already has a resting (status='pending') entry order — its
+    BUY thesis is already expressed on the book, so the boot arm needn't re-fire it."""
+    return conn.execute(
+        "SELECT 1 FROM orders WHERE symbol=? AND status='pending' LIMIT 1", (symbol,)
+    ).fetchone() is not None
+
+
 def realized_pnl_since(conn, since_iso):
     """Realized P&L for positions CLOSED since `since_iso`. Buckets by the close time
     (error.closed_ts), NOT the entry ts — the daily/weekly loss caps ask "how much did

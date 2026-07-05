@@ -362,6 +362,15 @@ class Ingest:
                 # resweep stays quiet; its real close fires it instead (Finding 3).
                 or self._boot_buys is None or symbol not in self._boot_buys):
             return
+        # If a pending entry bid already rests for this symbol, its thesis is already
+        # expressed on the book — the arm's whole purpose (bridge the up-to-7-day wait
+        # for the next close) is already served. Skip the re-fire so a restart doesn't
+        # stack a redundant bid on the resting one; the duplicates were restart-driven,
+        # not new pyramid steps. Consume the one-shot; the next real close fires normally.
+        if store.has_pending_entry(self.conn, symbol):
+            self._armed_buys.add(symbol)
+            log.info("startup-arm: %s already has a resting pending entry — skipping re-fire", symbol)
+            return
         self._armed_buys.add(symbol)   # one-shot: never retry this symbol on later ticks
         log.info("startup-arm: %s already confirmed BUY %d/%d — firing on first fresh tick",
                  symbol, card.score, card.denom)
@@ -409,9 +418,19 @@ class Ingest:
             conn.close()
 
     def _dispatch(self, conn, symbol, price, score, denom, fired, kind, do_exec, card):
-        alerter.fire(conn, symbol, price, score, denom, fired, kind=kind)
+        # Place the live order FIRST and in isolation. The alert chain is DECORATION and
+        # must never delay or, on a raise, silently DROP a live order — `alerter.fire`
+        # runs unguarded DB/format code (e.g. a 'database is locked' on the alerts
+        # insert, a Telegram timeout) and previously sat upstream of place_entry inside
+        # the same try, so any such raise skipped the order. Order first; alert wrapped
+        # so its failure is logged, never propagated (decoration must not kill the trade).
         if do_exec:
             from . import executor as executor_mod
             ex = executor_mod.Executor(conn)
             ex.mode = config.EXEC_MODE
             ex.place_entry(symbol, price, card)
+        try:
+            alerter.fire(conn, symbol, price, score, denom, fired, kind=kind)
+        except Exception:
+            log.exception("alerter.fire failed for %s (kind=%s) — order already handled; alert dropped",
+                          symbol, kind)

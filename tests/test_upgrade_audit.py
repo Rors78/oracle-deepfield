@@ -238,6 +238,44 @@ def test_finding2_restart_border_no_duplicate_fire(tmp_path, monkeypatch):
     conn.close()
 
 
+def test_dispatch_alert_failure_does_not_drop_order(tmp_path, monkeypatch):
+    """Decoration must not kill the transaction: a RAISE in alerter.fire (e.g. a
+    'database is locked' on the alerts insert, a Telegram timeout) must NOT prevent the
+    live order. Order is placed first and the alert is isolated."""
+    from deepfield import executor as ex_mod
+    conn = store.connect(str(tmp_path / "t.db"))
+    ing = Ingest(conn, AppState(), profile=FULL)
+    placed = []
+    monkeypatch.setattr(ex_mod.Executor, "place_entry", lambda self, sym, price, card: placed.append(sym))
+    monkeypatch.setattr(alerter, "fire",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("database is locked")))
+
+    class Card: status = "BUY"; price = 10.0; score = 5; denom = 7; required = 5; fired = ["x"]
+    ing._dispatch(conn, SYM, 10.0, 5, 7, ["x"], "confirmed", do_exec=True, card=Card())
+    assert placed == [SYM]                        # order placed despite the alert raising
+    conn.close()
+
+
+def test_arm_skips_when_pending_entry_rests(tmp_path, monkeypatch):
+    """The boot arm does NOT re-fire a symbol that already has a resting pending entry —
+    its thesis is expressed on the book, so a restart doesn't stack a redundant bid."""
+    conn = store.connect(str(tmp_path / "t.db"))
+    _seed_minimal(conn, int(time.time()))
+    monkeypatch.setattr("deepfield.ingest.config.PAIRS", _TEST_PAIRS)
+    ing = Ingest(conn, AppState(), profile=FULL)
+    monkeypatch.setattr(ing, "_recompute_regime", lambda: None)
+    monkeypatch.setattr(engine, "evaluate", lambda *a, **k: _Buy())
+    ing.startup_sweep()                          # TEST is BUY at boot -> in snapshot
+    conn.execute("INSERT INTO orders(symbol,status) VALUES('TEST/USD','pending')")  # a bid already rests
+    conn.commit()
+
+    fires = []
+    monkeypatch.setattr(ing, "_maybe_alert", lambda s, c, kind: fires.append(s))
+    ing.handle_tick(_fresh_tick(10.0))           # arm sees the resting pending -> skips
+    assert fires == []
+    conn.close()
+
+
 # ── A3: the single writer must never die ─────────────────────────────────────
 
 def test_A3_writer_survives_poisoned_event(tmp_path):
