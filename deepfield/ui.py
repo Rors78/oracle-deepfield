@@ -488,7 +488,7 @@ def _champion_exec_lines(appstate, sym, ps, card):
     s.append(_fmt_price(stp), style=f"bold {RED}")
     if entry and stp:
         s.append(f"  ({(stp/entry - 1)*100:+.1f}%)", style=GRAY)
-    if plan.get("floored_to_min"):
+    if plan.get("floored_to_min") and plan.get("size_mode") == "risk":
         s.append("  ⚠ floored to Kraken min (risk > 2%)", style=AMBER)
     lines.append(s)
     # gating — why it will or won't act
@@ -630,17 +630,29 @@ def render_positions(appstate, w):
     positions = appstate.exec.get("positions", [])
     if not positions:
         return None
-    lines = [Text(f"▸ POSITIONS ({len(positions)})", style=f"bold {CYAN}")]
+    total_pnl = 0.0
+    rows = []
     for p in positions:
         sym = p["symbol"]
+        ps = appstate.pairs.get(sym)
+        cur = ps.last_tick.last if (ps and ps.last_tick) else None
+        # P&L is leverage-independent per unit: (price - entry) * volume.
+        pnl = (cur - p["entry"]) * p["volume"] if cur else None
+        if pnl is not None:
+            total_pnl += pnl
         t = Text(f"  {DISPLAY.get(sym, sym):<5}", style=f"bold {SILVER}")
-        t.append(f"{p['volume']:g} @ {p['leverage']}x", style=CYAN)
-        t.append(f"  entry {_fmt_price(p['entry'])}", style=SILVER)
+        t.append(f"{p['volume']:g}@{p['leverage']}x", style=CYAN)
+        t.append(f"  in {_fmt_price(p['entry'])}", style=SILVER)
+        t.append(f" now {_fmt_price(cur) if cur else '---'}", style=WHITE)
         t.append(f"  stop {_fmt_price(p['stop'])}", style=RED)
-        t.append(f"  margin ${p['margin']:,.2f}", style=GRAY)
+        if pnl is not None:
+            t.append(f"  {'+' if pnl >= 0 else ''}${pnl:,.2f}", style=GREEN if pnl >= 0 else RED)
         t.append(f"  [{p['mode']}]", style=AMBER if p["mode"] == "paper" else GREEN)
-        lines.append(t)
-    return Group(*lines)
+        rows.append(t)
+    head = Text(f"▸ POSITIONS ({len(positions)})", style=f"bold {CYAN}")
+    head.append(f"   unrealized {'+' if total_pnl >= 0 else ''}${total_pnl:,.2f}",
+                style=GREEN if total_pnl >= 0 else RED)
+    return Group(head, *rows)
 
 
 # ── region: forming (provisional BUYs one close from confirming) ─────────────
@@ -675,7 +687,47 @@ def render_forming(appstate, w):
 
 # ── frame assembly + Live loop ───────────────────────────────────────────────
 
+WIDE_THRESHOLD = 150   # at/above this width, use the two-column dashboard
+
+
+def render_frame_wide(appstate, conn, total_width, show_keys=False):
+    """Full-screen two-column layout for wide terminals: pairs on the left,
+    champion + positions + forming + closest + alerts filling what would
+    otherwise be dead space on the right. Narrow terminals never reach here."""
+    full = min(total_width - 2, 236)
+    left_w = min(94, full * 52 // 100)
+    right_w = full - left_w - 2
+
+    top = Group(
+        render_header(appstate, full), _sep(full),
+        render_countdowns(appstate, full),
+        render_btc_pulse(appstate, full),
+        render_regime(appstate, full),
+    )
+    left = Group(render_main_table(appstate, left_w), render_table_summary(appstate, left_w))
+
+    right_parts = [render_champion(appstate, right_w)]
+    for r in (render_positions(appstate, right_w), render_forming(appstate, right_w)):
+        if r is not None:
+            right_parts += [Text(""), r]
+    right_parts += [Text(""), render_closest(appstate, right_w),
+                    Text(""), render_alert_tail(conn, right_w)]
+    right = Group(*right_parts)
+
+    body = Table.grid(expand=False, padding=(0, 2, 0, 0))
+    body.add_column(width=left_w, vertical="top")
+    body.add_column(width=right_w, vertical="top")
+    body.add_row(left, right)
+
+    parts = [top, _sep(full), body]
+    if show_keys:
+        parts += [_sep(full), Text("q quit · p pause · f reconcile · a test-alert", style=DIM_LINE)]
+    return Group(*parts)
+
+
 def render_frame(appstate, conn, total_width=100, show_keys=False):
+    if total_width >= WIDE_THRESHOLD:
+        return render_frame_wide(appstate, conn, total_width, show_keys)
     w = _content_width(total_width)
     parts = [
         render_header(appstate, w), _sep(w),
