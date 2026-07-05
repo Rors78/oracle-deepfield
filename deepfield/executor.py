@@ -309,15 +309,33 @@ class Executor:
             except (TypeError, ValueError):
                 vol_exec = 0.0
             if status not in ("closed", "canceled", "expired"):
-                if vol_exec > 0:            # PARTIAL fill while still resting = a real
-                    # position. Cancel the remainder so it can't grow past the stop,
-                    # then protect what filled.
-                    broker.cancel_order(txid)
-                    self.conn.execute("UPDATE orders SET status='open', volume=? WHERE id=?", (vol_exec, oid))
-                    self.conn.commit()
-                    log.info("FILL %s: partial %.6g while resting — canceled remainder, resting stop", sym, vol_exec)
-                    self._rest_stop(sym, mpair, stop, vol_exec, lev, oid, paper=False)
-                continue                        # else unfilled + resting — patient bid, leave it
+                if vol_exec <= 0:
+                    continue                    # unfilled + resting — patient bid, leave it
+                # PARTIAL fill while still resting = a real position forming. Cancel the
+                # remainder so it can't keep filling past our size/stop. Two hazards
+                # (Finding 4): more can fill between the first query and the cancel
+                # landing, and the cancel itself can FAIL. So NEVER transition until the
+                # order is TERMINAL with a settled volume — flipping to 'open' early would
+                # (a) size the position/stop off a stale snapshot, or (b) on a failed
+                # cancel, orphan a still-resting remainder (poll_fills only revisits
+                # 'pending'). On any failure/uncertainty leave it pending and converge next cycle.
+                if broker.cancel_order(txid) is None:
+                    log.warning("FILL %s: partial %.6g but cancel FAILED — leaving pending, retry next cycle",
+                                sym, vol_exec)
+                    continue
+                o = broker.query_order(txid)
+                if o is None:
+                    log.info("FILL %s: partial, cancel sent — awaiting terminal confirm next cycle", sym)
+                    continue
+                status = o.get("status")
+                if status not in ("closed", "canceled", "expired"):
+                    log.info("FILL %s: cancel sent, order not terminal yet — retry next cycle", sym)
+                    continue
+                try:
+                    vol_exec = float(o.get("vol_exec", 0) or 0)   # settled terminal volume
+                except (TypeError, ValueError):
+                    vol_exec = 0.0
+                # fall through to the terminal handler with the settled status/vol_exec
             if vol_exec > 0:                     # terminal + filled (fully, or partial then done)
                 self.conn.execute("UPDATE orders SET status='open', volume=? WHERE id=?", (vol_exec, oid))
                 self.conn.commit()

@@ -50,6 +50,12 @@ class Ingest:
         self._bg_tasks = set()   # strong refs so fire-and-forget dispatch isn't GC'd
         self._armed_buys = set()  # symbols already-BUY at startup that have fired their
                                   # one-shot boot arm this session (see handle_tick)
+        self._last_fired = {}     # (symbol, interval) -> last interval_begin that fired a
+                                  # confirmed alert/order. The WS feed AND the clock-close
+                                  # watchdog both emit CandleClosed for the same bar, so the
+                                  # edge must be tracked explicitly — flip_closed's rowcount
+                                  # can't be trusted (upsert_candle already set closed=1 on
+                                  # the clock-close/late-update path). Fire once per NEW bar.
         if config.EXEC_MODE != "off":
             from . import executor as executor_mod
             self.executor = executor_mod.Executor(conn)
@@ -101,7 +107,17 @@ class Ingest:
         # The old provisional card still counts the just-closed bar as forming —
         # honest display is "unknown" until fresh forming data arrives (seconds).
         self.state.pair(ev.symbol).provisional = None
-        self._recompute_confirmed(ev.symbol)
+        # Edge-gate the alert/exec on FIRST sight of this bar close. The WS feed and
+        # the clock-close watchdog both emit CandleClosed for the same bar; without
+        # this, one close places two live orders (Finding 2). Tracked explicitly per
+        # (symbol, interval) rather than via flip_closed's rowcount, which is unreliable
+        # here (upsert_candle already flips closed=1 on the clock-close/late-update path,
+        # so the rowcount would be 0 and wrongly SUPPRESS the fire on quiet pairs).
+        fkey = (ev.symbol, ev.interval)
+        fire = ev.interval_begin > self._last_fired.get(fkey, -1)
+        if fire:
+            self._last_fired[fkey] = ev.interval_begin
+        self._recompute_confirmed(ev.symbol, fire=fire)
         if ev.symbol == BTC_SYMBOL:
             self._recompute_regime()
 
@@ -232,12 +248,15 @@ class Ingest:
             if interval_begin > (self.state.weekly_interval_begin or 0):
                 self.state.weekly_interval_begin = interval_begin
 
-    def _recompute_confirmed(self, symbol):
+    def _recompute_confirmed(self, symbol, fire=True):
+        """Recompute the confirmed card (always, for display). fire=False recomputes
+        WITHOUT alerting/ordering — used for a duplicate close so the same bar can't
+        place two live orders (Finding 2). A genuine close passes fire=True."""
         weekly, daily = store.load_weekly_daily_closed(self.conn, symbol)
         card = engine.evaluate(symbol, weekly, daily, self.profile, provisional=False)
         self.state.pair(symbol).confirmed = card
         self._compute_tranche(symbol, card)
-        if card.status == "BUY":
+        if fire and card.status == "BUY":
             ps = self.state.pair(symbol)
             if engine.is_stale(ps.tick_age(), STALE_SECS):
                 log.info("F5: suppressing confirmed alert for %s — STALE (tick_age=%.0fs > %ds)",

@@ -239,6 +239,68 @@ def test_poll_fills_unfilled_cancel_opens_nothing(tmp_path, monkeypatch):
     conn.close()
 
 
+def test_poll_fills_partial_uses_terminal_volume_after_cancel(tmp_path, monkeypatch):
+    """FINDING 4: on a partial-while-resting fill, size the position and stop off the
+    volume re-read AFTER the cancel settles — more can fill between the first query and
+    the cancel landing, so the first snapshot would be short."""
+    conn = _conn(tmp_path)
+    oid = _seed_pending(conn, "OENTRY-P")
+    q = iter([
+        {"status": "open", "vol_exec": "0.05"},        # partial, still resting (snapshot)
+        {"status": "canceled", "vol_exec": "0.08"},    # settled: 0.08 filled before cancel
+    ])
+    monkeypatch.setattr(ex_mod.broker, "query_order", lambda t: next(q))
+    cancels = []
+    monkeypatch.setattr(ex_mod.broker, "cancel_order", lambda t: cancels.append(t) or {"count": 1})
+    stops = []
+    monkeypatch.setattr(ex_mod.broker, "private",
+                        lambda ep, p=None, **kw: (stops.append(p) or {"txid": ["OSTOP-P"]}))
+    e = _exec(conn, mode="live")
+    e.poll_fills()
+    status, vol, stop_txid = conn.execute(
+        "SELECT status,volume,stop_txid FROM orders WHERE id=?", (oid,)).fetchone()
+    assert status == "open"
+    assert abs(vol - 0.08) < 1e-9              # terminal volume, NOT the 0.05 snapshot
+    assert cancels == ["OENTRY-P"]
+    assert stop_txid == "OSTOP-P"
+    assert stops and float(stops[0]["volume"]) == 0.08   # stop sized to the settled fill
+    conn.close()
+
+
+def test_poll_fills_partial_cancel_failure_stays_pending(tmp_path, monkeypatch):
+    """FINDING 4: a FAILED cancel must NOT transition the row — flipping to 'open'
+    would orphan the still-resting remainder (poll_fills only revisits 'pending')."""
+    conn = _conn(tmp_path)
+    oid = _seed_pending(conn, "OENTRY-Q")
+    monkeypatch.setattr(ex_mod.broker, "query_order", lambda t: {"status": "open", "vol_exec": "0.05"})
+    monkeypatch.setattr(ex_mod.broker, "cancel_order", lambda t: None)   # cancel FAILS
+    calls = []
+    monkeypatch.setattr(ex_mod.broker, "private", lambda ep, p=None, **kw: calls.append(p) or {"txid": ["X"]})
+    _exec(conn, mode="live").poll_fills()
+    status, stop_txid = conn.execute("SELECT status,stop_txid FROM orders WHERE id=?", (oid,)).fetchone()
+    assert status == "pending"                # remainder not orphaned; will retry
+    assert stop_txid is None                  # no stop rested against an unsettled order
+    assert calls == []                        # nothing placed
+    conn.close()
+
+
+def test_poll_fills_partial_not_terminal_after_cancel_stays_pending(tmp_path, monkeypatch):
+    """FINDING 4: cancel accepted but the order is not terminal yet -> do not transition
+    (it can still fill); converge on a later cycle."""
+    conn = _conn(tmp_path)
+    oid = _seed_pending(conn, "OENTRY-R")
+    monkeypatch.setattr(ex_mod.broker, "query_order", lambda t: {"status": "open", "vol_exec": "0.05"})
+    monkeypatch.setattr(ex_mod.broker, "cancel_order", lambda t: {"count": 1})
+    calls = []
+    monkeypatch.setattr(ex_mod.broker, "private", lambda ep, p=None, **kw: calls.append(p) or {"txid": ["X"]})
+    _exec(conn, mode="live").poll_fills()
+    status, stop_txid = conn.execute("SELECT status,stop_txid FROM orders WHERE id=?", (oid,)).fetchone()
+    assert status == "pending"
+    assert stop_txid is None
+    assert calls == []
+    conn.close()
+
+
 def test_validate_mode_builds_order_without_executing(tmp_path, monkeypatch):
     conn = _conn(tmp_path)
     captured = {}

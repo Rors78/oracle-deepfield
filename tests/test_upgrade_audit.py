@@ -123,6 +123,43 @@ def test_A2_alert_falls_back_to_close_when_tick_stale(tmp_path, monkeypatch):
     conn.close()
 
 
+# ── Finding 2: a duplicate close (WS + clock-close watchdog) fires ONCE ───────
+
+def test_finding2_duplicate_close_does_not_double_fire(tmp_path, monkeypatch):
+    """The WS feed and the clock-close watchdog both emit CandleClosed for the same
+    bar -> must fire the alert/exec EXACTLY ONCE. Critically, the bar is already
+    closed=1 (the clock-close path upserts closed=1 BEFORE calling handle_candle_closed),
+    so a fix keyed on flip_closed's rowcount would wrongly fire ZERO times and silently
+    suppress orders on quiet pairs. Assert once, not zero."""
+    conn = store.connect(str(tmp_path / "t.db"))
+    now = int(time.time())
+    _seed_minimal(conn, now)
+    ing = Ingest(conn, AppState(), profile=FULL)
+    ing.handle_tick(_fresh_tick(10.0))          # fresh tick so the alert isn't stale-suppressed
+
+    class Card:
+        status = "BUY"; price = 10.0; score = 5; denom = 7; required = 5; fired = ["x"]
+    monkeypatch.setattr(engine, "evaluate", lambda *a, **k: Card())
+    fires = []
+    monkeypatch.setattr(ing, "_maybe_alert", lambda sym, card, kind: fires.append((sym, kind)))
+
+    ts = now - (now % 86400)                     # a daily boundary
+    store.upsert_candle(conn, SYM, 1440, ts, 10, 11, 9, 10, 50, closed=1)   # already flipped closed
+    conn.commit()
+    ev = events.CandleClosed(SYM, 1440, ts)
+    ing.handle_candle_closed(ev)                 # first sight of this bar -> fires (even though closed=1)
+    ing.handle_candle_closed(ev)                 # same bar again (WS/watchdog dup) -> no re-fire
+    assert fires == [(SYM, "confirmed")]         # exactly one — not zero (suppression), not two (dup)
+
+    # a genuinely new bar for the same interval DOES fire again (per-close cadence intact)
+    ts2 = ts + 86400
+    store.upsert_candle(conn, SYM, 1440, ts2, 10, 11, 9, 10, 50, closed=1)
+    conn.commit()
+    ing.handle_candle_closed(events.CandleClosed(SYM, 1440, ts2))
+    assert fires == [(SYM, "confirmed"), (SYM, "confirmed")]
+    conn.close()
+
+
 # ── A3: the single writer must never die ─────────────────────────────────────
 
 def test_A3_writer_survives_poisoned_event(tmp_path):

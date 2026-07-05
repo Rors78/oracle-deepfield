@@ -20,6 +20,7 @@ import base64
 import hashlib
 import hmac
 import logging
+import threading
 import urllib.parse
 import urllib.request
 
@@ -33,6 +34,11 @@ KEYFILES = [os.path.expanduser("~/.deepfield_keys"), os.path.expanduser("~/.hydr
 NONCE_FILE = os.path.expanduser("~/.deepfield_nonce")
 
 _LAST_NONCE = 0
+# _next_nonce is a read-modify-write on _LAST_NONCE + a write to NONCE_FILE, and
+# private() runs concurrently from several threads (per-alert dispatch, poll_fills,
+# equity refresh). Without this lock two threads can mint the SAME microsecond nonce
+# -> one call rejected 'EAPI:Invalid nonce', and the file write can tear (Finding 7).
+_NONCE_LOCK = threading.Lock()
 _KEY = None
 _SECRET = None
 _KEY_SRC = None
@@ -64,27 +70,28 @@ def _next_nonce():
     """Strictly-increasing, restart-safe (hydra pattern): seed from
     max(clock, persisted+1), persist every call."""
     global _LAST_NONCE
-    n = int(time.time() * 1_000_000)
-    if _LAST_NONCE == 0:
+    with _NONCE_LOCK:                       # serialize the whole RMW + file write
+        n = int(time.time() * 1_000_000)
+        if _LAST_NONCE == 0:
+            try:
+                p = int((open(NONCE_FILE).read().strip() or "0"))
+                # Persisted high-water beats a stale/backward wall clock — NO upper cap.
+                # A VM-snapshot restore / NTP step-back makes the clock < the last nonce
+                # Kraken saw; the old 1h window skipped this and wedged ALL private calls
+                # (Invalid nonce) while clobbering the good high-water. Always trust p.
+                if p >= n:
+                    n = p + 1
+            except Exception:
+                pass
+        if n <= _LAST_NONCE:
+            n = _LAST_NONCE + 1
+        _LAST_NONCE = n
         try:
-            p = int((open(NONCE_FILE).read().strip() or "0"))
-            # Persisted high-water beats a stale/backward wall clock — NO upper cap.
-            # A VM-snapshot restore / NTP step-back makes the clock < the last nonce
-            # Kraken saw; the old 1h window skipped this and wedged ALL private calls
-            # (Invalid nonce) while clobbering the good high-water. Always trust p.
-            if p >= n:
-                n = p + 1
+            with open(NONCE_FILE, "w") as f:
+                f.write(str(n))
         except Exception:
             pass
-    if n <= _LAST_NONCE:
-        n = _LAST_NONCE + 1
-    _LAST_NONCE = n
-    try:
-        with open(NONCE_FILE, "w") as f:
-            f.write(str(n))
-    except Exception:
-        pass
-    return str(n)
+        return str(n)
 
 
 def sign(path, postdata, nonce, secret_b64):
