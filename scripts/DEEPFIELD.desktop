@@ -1,0 +1,10 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=ORACLE DEEPFIELD
+Comment=Live Kraken cycle-bottom trading bot
+Exec=terminator -T "ORACLE DEEPFIELD" -x /home/golden/oracle-deepfield/scripts/deepfield-desktop.sh
+Icon=/home/golden/icons/Oracle.png
+Terminal=false
+Categories=Finance;Utility;
+StartupNotify=true
