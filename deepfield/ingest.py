@@ -56,6 +56,11 @@ class Ingest:
                                   # edge must be tracked explicitly — flip_closed's rowcount
                                   # can't be trusted (upsert_candle already set closed=1 on
                                   # the clock-close/late-update path). Fire once per NEW bar.
+        self._boot_buys = None    # set of symbols BUY at BOOT (first startup_sweep). The
+                                  # one-shot arm may fire ONLY these — otherwise a reconciler
+                                  # resweep / 'f'-key that flips a symbol to BUY mid-session
+                                  # would fire a live order from a path documented alert-silent
+                                  # (Finding 3). None until the boot sweep populates it.
         if config.EXEC_MODE != "off":
             from . import executor as executor_mod
             self.executor = executor_mod.Executor(conn)
@@ -167,12 +172,20 @@ class Ingest:
         Also used by `--once` and after reconciler repairs. No alerts fire here:
         this is not a live transition, just publishing already-true state (F10
         cooldown is keyed off real confirmed-BUY *events*)."""
+        buys = set()
         for p in config.PAIRS:
             symbol = p["ws"]
             weekly, daily = store.load_weekly_daily_closed(self.conn, symbol)
             card = engine.evaluate(symbol, weekly, daily, self.profile, provisional=False)
             self.state.pair(symbol).confirmed = card
             self._compute_tranche(symbol, card)
+            if card.status == "BUY":
+                buys.add(symbol)
+        # The FIRST sweep (boot) defines which symbols the one-shot arm may fire. Later
+        # sweeps (hourly reconciler / 'f'-key) republish state but must NOT expand it —
+        # a symbol they flip to BUY only fires through a real close, never the boot arm.
+        if self._boot_buys is None:
+            self._boot_buys = buys
         self._recompute_regime()
 
     # ── §5(b) clock-close fallback ───────────────────────────────────────────
@@ -334,7 +347,11 @@ class Ingest:
         under the operator's cooldown-off/no-blockers stance."""
         card = ps.confirmed
         if (symbol in self._armed_buys or card is None or card.status != "BUY"
-                or engine.is_stale(ps.tick_age(), STALE_SECS)):
+                or engine.is_stale(ps.tick_age(), STALE_SECS)
+                # Only symbols that were BUY at BOOT may boot-arm. A symbol that became
+                # BUY later (reconciler resweep / 'f'-key) is NOT here, so the quiet
+                # resweep stays quiet; its real close fires it instead (Finding 3).
+                or self._boot_buys is None or symbol not in self._boot_buys):
             return
         self._armed_buys.add(symbol)   # one-shot: never retry this symbol on later ticks
         log.info("startup-arm: %s already confirmed BUY %d/%d — firing on first fresh tick",

@@ -160,6 +160,56 @@ def test_finding2_duplicate_close_does_not_double_fire(tmp_path, monkeypatch):
     conn.close()
 
 
+# ── Finding 3: reconciler resweep must not fire the boot arm ──────────────────
+
+_TEST_PAIRS = [{"rest": "XTEST", "wsname": "TEST/USD", "ws": "TEST/USD",
+                "display": "TEST", "ordermin": 1, "costmin": 0.5}]
+
+
+class _NotBuy:  status = "HOLD"; price = 10.0; score = 1; denom = 7; required = 5; fired = []
+class _Buy:     status = "BUY";  price = 10.0; score = 5; denom = 7; required = 5; fired = ["x"]
+
+
+def test_finding3_reconciler_resweep_stays_quiet(tmp_path, monkeypatch):
+    """A symbol that becomes BUY only via a reconciler resweep (or 'f'-key) must NOT
+    fire the one-shot boot arm — that path is documented alert-silent. Only symbols BUY
+    at BOOT may arm."""
+    conn = store.connect(str(tmp_path / "t.db"))
+    _seed_minimal(conn, int(time.time()))
+    monkeypatch.setattr("deepfield.ingest.config.PAIRS", _TEST_PAIRS)
+    ing = Ingest(conn, AppState(), profile=FULL)
+    monkeypatch.setattr(ing, "_recompute_regime", lambda: None)
+
+    monkeypatch.setattr(engine, "evaluate", lambda *a, **k: _NotBuy())
+    ing.startup_sweep()                          # boot: nothing BUY -> boot snapshot empty
+
+    fires = []
+    monkeypatch.setattr(ing, "_maybe_alert", lambda s, c, kind: fires.append(s))
+    monkeypatch.setattr(engine, "evaluate", lambda *a, **k: _Buy())
+    ing.startup_sweep()                          # reconciler resweep flips TEST -> BUY
+    ing.handle_tick(_fresh_tick(10.0))           # first fresh tick -> arm evaluated
+    assert fires == []                           # not BUY at boot -> arm stays quiet
+    conn.close()
+
+
+def test_finding3_boot_time_buy_still_arms(tmp_path, monkeypatch):
+    """The legitimate case is preserved: a symbol BUY at boot fires the arm on its
+    first fresh tick."""
+    conn = store.connect(str(tmp_path / "t.db"))
+    _seed_minimal(conn, int(time.time()))
+    monkeypatch.setattr("deepfield.ingest.config.PAIRS", _TEST_PAIRS)
+    ing = Ingest(conn, AppState(), profile=FULL)
+    monkeypatch.setattr(ing, "_recompute_regime", lambda: None)
+    monkeypatch.setattr(engine, "evaluate", lambda *a, **k: _Buy())
+    ing.startup_sweep()                          # boot: TEST is BUY -> in boot snapshot
+
+    fires = []
+    monkeypatch.setattr(ing, "_maybe_alert", lambda s, c, kind: fires.append(s))
+    ing.handle_tick(_fresh_tick(10.0))           # first fresh tick -> arm fires
+    assert fires == ["TEST/USD"]
+    conn.close()
+
+
 # ── A3: the single writer must never die ─────────────────────────────────────
 
 def test_A3_writer_survives_poisoned_event(tmp_path):

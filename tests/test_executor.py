@@ -5,6 +5,8 @@ test can place a real order — paper and off are the only self-contained modes.
 """
 import os
 import time
+import json
+import datetime
 
 import pytest
 
@@ -298,6 +300,102 @@ def test_poll_fills_partial_not_terminal_after_cancel_stays_pending(tmp_path, mo
     assert status == "pending"
     assert stop_txid is None
     assert calls == []
+    conn.close()
+
+
+def _seed_pending_ts(conn, txid, ts_iso, vol=0.1):
+    cur = conn.execute(
+        "INSERT INTO orders(symbol,margin_pair,volume,leverage,stop,txid,status,ts) "
+        "VALUES(?,?,?,?,?,?, 'pending', ?)", (SYM, "XBTUSD:BTNL", vol, 10, 90.0, txid, ts_iso))
+    conn.commit()
+    return cur.lastrowid
+
+
+def test_poll_fills_expires_stale_unfilled_bid(tmp_path, monkeypatch):
+    """FINDING 5: an unfilled post-only bid older than ENTRY_TTL_SECS is canceled so
+    stale bids don't pile up against Kraken's open-order cap and crowd out stops."""
+    conn = _conn(tmp_path)
+    old = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=2)).isoformat()
+    oid = _seed_pending_ts(conn, "OLD-BID", old)
+    monkeypatch.setattr(config, "ENTRY_TTL_SECS", 86400)          # 1 day
+    q = iter([{"status": "open", "vol_exec": "0"},                # still resting, unfilled
+              {"status": "canceled", "vol_exec": "0"}])           # terminal after cancel
+    monkeypatch.setattr(ex_mod.broker, "query_order", lambda t: next(q))
+    cancels = []
+    monkeypatch.setattr(ex_mod.broker, "cancel_order", lambda t: cancels.append(t) or {"count": 1})
+    calls = []
+    monkeypatch.setattr(ex_mod.broker, "private", lambda ep, p=None, **kw: calls.append(p) or {"txid": ["X"]})
+    _exec(conn, mode="live").poll_fills()
+    status, stop_txid = conn.execute("SELECT status,stop_txid FROM orders WHERE id=?", (oid,)).fetchone()
+    assert status == "canceled"           # stale bid expired
+    assert cancels == ["OLD-BID"]
+    assert stop_txid is None and calls == []   # no position opened, no stop placed
+    conn.close()
+
+
+def test_poll_fills_keeps_fresh_unfilled_bid(tmp_path, monkeypatch):
+    """A fresh unfilled bid within TTL is left resting (patient bottom bid)."""
+    conn = _conn(tmp_path)
+    fresh = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    oid = _seed_pending_ts(conn, "FRESH-BID", fresh)
+    monkeypatch.setattr(config, "ENTRY_TTL_SECS", 86400)
+    monkeypatch.setattr(ex_mod.broker, "query_order", lambda t: {"status": "open", "vol_exec": "0"})
+    cancels = []
+    monkeypatch.setattr(ex_mod.broker, "cancel_order", lambda t: cancels.append(t) or {"count": 1})
+    _exec(conn, mode="live").poll_fills()
+    assert conn.execute("SELECT status FROM orders WHERE id=?", (oid,)).fetchone()[0] == "pending"
+    assert cancels == []                  # left resting, not canceled
+    conn.close()
+
+
+def test_poll_fills_ttl_disabled_keeps_old_bid(tmp_path, monkeypatch):
+    """ENTRY_TTL_SECS=0 disables expiry — an old unfilled bid is left alone."""
+    conn = _conn(tmp_path)
+    old = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=30)).isoformat()
+    oid = _seed_pending_ts(conn, "ANCIENT-BID", old)
+    monkeypatch.setattr(config, "ENTRY_TTL_SECS", 0)
+    monkeypatch.setattr(ex_mod.broker, "query_order", lambda t: {"status": "open", "vol_exec": "0"})
+    cancels = []
+    monkeypatch.setattr(ex_mod.broker, "cancel_order", lambda t: cancels.append(t) or {"count": 1})
+    _exec(conn, mode="live").poll_fills()
+    assert conn.execute("SELECT status FROM orders WHERE id=?", (oid,)).fetchone()[0] == "pending"
+    assert cancels == []
+    conn.close()
+
+
+def test_verify_records_realized_pnl_on_stop_exit_bucketed_by_close(tmp_path, monkeypatch):
+    """FINDING 6: a stop-triggered close records realized P&L from Kraken execution
+    records, bucketed by CLOSE date. The entry was 3 days ago; the loss must still count
+    toward TODAY's realized_pnl_since (the loss caps ask a realization-date question)."""
+    conn = _conn(tmp_path)
+    three_days_ago = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=3)).isoformat()
+    cur = conn.execute(
+        "INSERT INTO orders(symbol,margin_pair,volume,leverage,stop,txid,stop_txid,status,ts,entry) "
+        "VALUES(?,?,?,?,?,?,?, 'open', ?, ?)",
+        (SYM, "XBTUSD:BTNL", 0.1, 10, 90.0, "OENTRY", "OSTOP", three_days_ago, 100.0))
+    conn.commit()
+    oid = cur.lastrowid
+    monkeypatch.setattr(ex_mod.broker, "open_positions", lambda: {})     # pair flat -> row unbacked
+
+    def fake_qo(txid):
+        if txid == "OSTOP":                                             # stop triggered (sell exit)
+            return {"status": "closed", "vol_exec": "0.1", "cost": "9.0", "fee": "0.02"}
+        if txid == "OENTRY":                                            # entry buy fill
+            return {"status": "closed", "vol_exec": "0.1", "cost": "10.0", "fee": "0.03"}
+        return None
+    monkeypatch.setattr(ex_mod.broker, "query_order", fake_qo)
+    monkeypatch.setattr(ex_mod.broker, "cancel_order", lambda t: {"count": 1})
+    monkeypatch.setattr(ex_mod.broker, "private", lambda *a, **k: None)
+    _exec(conn, mode="live").verify_open_stops()
+
+    status, err = conn.execute("SELECT status,error FROM orders WHERE id=?", (oid,)).fetchone()
+    assert status == "closed"
+    obj = json.loads(err)
+    # pnl = (stop_cost - stop_fee) - (entry_cost + entry_fee) = (9.0-0.02) - (10.0+0.03) = -1.05
+    assert abs(obj["pnl"] - (-1.05)) < 1e-6 and obj["exit"] == "stop" and "closed_ts" in obj
+    now = datetime.datetime.now(datetime.timezone.utc)
+    day0 = now.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+    assert abs(store.realized_pnl_since(conn, day0) - (-1.05)) < 1e-6   # counts toward TODAY
     conn.close()
 
 

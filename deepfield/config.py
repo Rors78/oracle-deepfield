@@ -116,6 +116,11 @@ ENTRY_ORDERTYPE = "limit"           # post-only maker ONLY (no market entries). 
 POST_ONLY_SLIP_PCT = 0.001          # bid this far BELOW last so the post-only maker can't
                                     # cross the ask (a crossing post-only is rejected -> silent
                                     # no-fill). 10bps ~= a patient bottom bid; negligible cost.
+ENTRY_TTL_SECS = 86400              # cancel a still-unfilled post-only entry bid after this
+                                    # long (default 1 day) so stale bids don't pile up against
+                                    # Kraken's open-order cap and crowd out protective stops
+                                    # (Finding 5). Fills are unaffected (a filled bid is 'open',
+                                    # not 'pending'), so stacking still works. 0 = never expire.
 MARGIN_CAP_PCT = 0.90               # a single position may post at most this frac of free margin
 
 # Risk rails (deterministic hard limits, from GoldenEye — NOT learners).

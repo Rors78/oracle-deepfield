@@ -22,6 +22,7 @@ on min-sizing (EXEC_SIZE_MODE), NOT the rails; protective stops ARE placed
 genuinely warrant scrutiny (sizing/rounding, the pending->open->stopped machine).
 """
 import os
+import json
 import math
 import logging
 import datetime
@@ -40,6 +41,22 @@ def _round_down(x, decimals):
 
 def _round_price(x, decimals):
     return round(x, decimals)
+
+
+def _age_secs(ts_iso):
+    """Seconds since an ISO-8601 order timestamp; 0.0 (treated as never-stale) if the
+    value is missing or unparseable, so a bad ts can never trigger a cancel."""
+    try:
+        t = datetime.datetime.fromisoformat(ts_iso)
+        if t.tzinfo is None:
+            t = t.replace(tzinfo=datetime.timezone.utc)
+        return (datetime.datetime.now(datetime.timezone.utc) - t).total_seconds()
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _entry_ttl_expired(ts_iso):
+    return config.ENTRY_TTL_SECS > 0 and _age_secs(ts_iso) > config.ENTRY_TTL_SECS
 
 
 class Executor:
@@ -297,9 +314,9 @@ class Executor:
         if self.mode != "live":
             return
         rows = self.conn.execute(
-            "SELECT id, symbol, margin_pair, volume, leverage, stop, txid "
+            "SELECT id, symbol, margin_pair, volume, leverage, stop, txid, ts "
             "FROM orders WHERE status='pending'").fetchall()
-        for oid, sym, mpair, vol, lev, stop, txid in rows:
+        for oid, sym, mpair, vol, lev, stop, txid, ts in rows:
             o = broker.query_order(txid) if txid else None
             if o is None:
                 continue                        # transient query failure — retry next cycle
@@ -309,23 +326,29 @@ class Executor:
             except (TypeError, ValueError):
                 vol_exec = 0.0
             if status not in ("closed", "canceled", "expired"):
-                if vol_exec <= 0:
-                    continue                    # unfilled + resting — patient bid, leave it
-                # PARTIAL fill while still resting = a real position forming. Cancel the
-                # remainder so it can't keep filling past our size/stop. Two hazards
-                # (Finding 4): more can fill between the first query and the cancel
-                # landing, and the cancel itself can FAIL. So NEVER transition until the
-                # order is TERMINAL with a settled volume — flipping to 'open' early would
-                # (a) size the position/stop off a stale snapshot, or (b) on a failed
-                # cancel, orphan a still-resting remainder (poll_fills only revisits
-                # 'pending'). On any failure/uncertainty leave it pending and converge next cycle.
+                # Two reasons to act on a still-resting order: a PARTIAL fill (a real
+                # position forming), or a stale UNFILLED bid past its TTL (Finding 5 —
+                # else post-only bids pile up against Kraken's open-order cap). Both
+                # cancel the order and resolve to its TERMINAL state before any DB
+                # transition. Hazards (Finding 4): more can fill between the query and
+                # the cancel landing, and the cancel itself can FAIL — so NEVER transition
+                # until terminal with a settled volume (flipping to 'open' early would
+                # size off a stale snapshot, or on a failed cancel orphan a still-resting
+                # remainder — poll_fills only revisits 'pending'). On any failure/
+                # uncertainty leave it pending and converge next cycle.
+                if vol_exec > 0:
+                    log.info("FILL %s: partial %.6g while resting — canceling remainder", sym, vol_exec)
+                elif _entry_ttl_expired(ts):
+                    log.info("EXPIRE %s: entry bid unfilled past TTL (%.0fs) — canceling stale post-only bid",
+                             sym, _age_secs(ts))
+                else:
+                    continue                    # unfilled + resting, within TTL — patient bid
                 if broker.cancel_order(txid) is None:
-                    log.warning("FILL %s: partial %.6g but cancel FAILED — leaving pending, retry next cycle",
-                                sym, vol_exec)
+                    log.warning("FILL %s: cancel FAILED — leaving pending, retry next cycle", sym)
                     continue
                 o = broker.query_order(txid)
                 if o is None:
-                    log.info("FILL %s: partial, cancel sent — awaiting terminal confirm next cycle", sym)
+                    log.info("FILL %s: cancel sent — awaiting terminal confirm next cycle", sym)
                     continue
                 status = o.get("status")
                 if status not in ("closed", "canceled", "expired"):
@@ -419,7 +442,7 @@ class Executor:
         # Oldest-first: when part of a pair's stack has closed out, surviving open
         # volume is allocated to the earliest rows; the newest (now-unbacked) rows retire.
         rows = self.conn.execute(
-            "SELECT id, symbol, margin_pair, volume, leverage, stop, stop_txid "
+            "SELECT id, symbol, margin_pair, volume, leverage, stop, stop_txid, txid "
             "FROM orders WHERE status='open' ORDER BY id").fetchall()
 
         # PASS 1 — classify each row against its pair's DEFINITE open-volume budget and
@@ -427,7 +450,7 @@ class Executor:
         # reductions here, so resting-stop volume can never transiently exceed open vol.
         budget = {}
         backed = []
-        for oid, sym, mpair, vol, lev, stop, stop_txid in rows:
+        for oid, sym, mpair, vol, lev, stop, stop_txid, entry_txid in rows:
             key = (sym, mpair)
             if key not in budget:
                 budget[key] = _pair_open_volume(sym)
@@ -444,7 +467,12 @@ class Executor:
                     broker.cancel_order(stop_txid)
                     log.warning("startup: %s order %d unbacked (pair open %.8g < %.8g) — "
                                 "canceled orphan stop %s", sym, oid, budget[key], volf, stop_txid)
-                self.conn.execute("UPDATE orders SET status='closed' WHERE id=?", (oid,))
+                # Finding 6: if the stop actually EXECUTED, record realized P&L (from
+                # Kraken's own execution records) bucketed by close time, so the daily/
+                # weekly loss caps see real stop-outs. Manual/unknown closes stay unrecorded.
+                pnl_json = self._stop_exit_pnl_json(sym, oid, entry_txid, o)
+                self.conn.execute("UPDATE orders SET status='closed', error=COALESCE(?, error) WHERE id=?",
+                                  (pnl_json, oid))
                 self.conn.commit()
                 log.info("startup: %s order %d not backed by open volume — closed, no re-place", sym, oid)
                 continue
@@ -479,6 +507,37 @@ class Executor:
                 log.info("PROTECT %s: re-placed stop @ %s (%s)", sym, stop, res["txid"][0])
             else:
                 log.error("PROTECT %s: re-place FAILED — position may be UNPROTECTED", sym)
+
+    def _stop_exit_pnl_json(self, sym, oid, entry_txid, stop_order):
+        """Realized P&L for a STOP-triggered close, from Kraken's own execution records:
+        proceeds (stop-sell cost - fee) minus cost basis (entry-buy cost + fee). Returns a
+        JSON string {'pnl','exit','closed_ts'} or None. None when the exit isn't a settled
+        stop (manual close / liquidation / query failure) — those stay unrecorded and
+        realized_pnl_since ignores them; loss caps care about stop-outs, so this is aligned.
+        LIMITATION: rollover/financing fees are NOT included, so a held leveraged loss is
+        slightly understated (the cap trips marginally late). Best-effort: never raises
+        into the close path."""
+        try:
+            if not (stop_order and stop_order.get("status") == "closed"):
+                return None
+            s_cost = float(stop_order.get("cost", 0) or 0)
+            s_fee = float(stop_order.get("fee", 0) or 0)
+            if float(stop_order.get("vol_exec", 0) or 0) <= 0 or s_cost <= 0:
+                return None
+            eo = broker.query_order(entry_txid) if entry_txid else None
+            if not eo:
+                return None
+            e_cost = float(eo.get("cost", 0) or 0)
+            e_fee = float(eo.get("fee", 0) or 0)
+            if e_cost <= 0:
+                return None
+            pnl = (s_cost - s_fee) - (e_cost + e_fee)
+            now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+            log.info("PNL %s: order %d realized $%.4f (stop exit)", sym, oid, pnl)
+            return json.dumps({"pnl": round(pnl, 8), "exit": "stop", "closed_ts": now})
+        except Exception:
+            log.exception("PNL record failed for order %d (closing anyway)", oid)
+            return None
 
     def _rest_stop(self, symbol, margin_pair, stop_px, volume, leverage, order_id, paper):
         if not config.PROTECTIVE_STOP:

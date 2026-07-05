@@ -164,9 +164,14 @@ def committed_position_count(conn):
 
 
 def realized_pnl_since(conn, since_iso):
+    """Realized P&L for positions CLOSED since `since_iso`. Buckets by the close time
+    (error.closed_ts), NOT the entry ts — the daily/weekly loss caps ask "how much did
+    I lose since day0/wk0", a realization-date question (a trade entered days ago and
+    stopped out today must count toward today). Rows without a recorded pnl/closed_ts
+    (manual closes, unresolved) contribute nothing."""
     row = conn.execute(
         "SELECT COALESCE(SUM(CAST(json_extract(error,'$.pnl') AS REAL)),0) FROM orders "
-        "WHERE ts >= ? AND status='closed'", (since_iso,),
+        "WHERE status='closed' AND json_extract(error,'$.closed_ts') >= ?", (since_iso,),
     ).fetchone()
     return row[0] if row else 0.0
 
