@@ -102,7 +102,10 @@ async def _exec_state_refresh(appstate, conn, ing, interval=15):
                         return float(balance[key]) if balance else None
                     except (TypeError, ValueError, KeyError):
                         return None
-                equity, margin_used, free_margin = _bf("e"), _bf("m"), _bf("mf")
+                # equity via the SHARED extractor (e->eb->tb) so the dashboard, rails,
+                # peak, and the order path can never disagree on the sizing denominator.
+                equity = broker.equity(balance)
+                margin_used, free_margin = _bf("m"), _bf("mf")
                 if equity:
                     ex._update_peak(equity)      # DB write, back on the loop
             else:

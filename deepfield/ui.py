@@ -636,8 +636,12 @@ def render_positions(appstate, w):
         sym = p["symbol"]
         ps = appstate.pairs.get(sym)
         cur = ps.last_tick.last if (ps and ps.last_tick) else None
-        # P&L is leverage-independent per unit: (price - entry) * volume.
-        pnl = (cur - p["entry"]) * p["volume"] if cur else None
+        # P&L is leverage-independent per unit: (price - entry) * volume. Guard
+        # None values (not just missing keys) — a NULL numeric column must never
+        # crash the whole frame (UI-never-crashes invariant).
+        entry, vol = p.get("entry"), p.get("volume")
+        pnl = ((cur - entry) * vol
+               if None not in (cur, entry, vol) else None)
         if pnl is not None:
             total_pnl += pnl
         t = Text(f"  {DISPLAY.get(sym, sym):<5}", style=f"bold {SILVER}")
@@ -682,9 +686,10 @@ def render_account(appstate, w):
     for p in positions:
         ps = appstate.pairs.get(p["symbol"])
         cur = ps.last_tick.last if (ps and ps.last_tick) else None
-        if cur:
-            pnl += (cur - p["entry"]) * p["volume"]
-        margin += p.get("margin", 0.0)
+        e_, v_ = p.get("entry"), p.get("volume")
+        if None not in (cur, e_, v_):
+            pnl += (cur - e_) * v_
+        margin += (p.get("margin") or 0.0)    # guard None, not just missing key
     e = Text("  DEEPFIELD  ", style=GRAY)
     e.append(f"{len(positions)} pos", style=CYAN)
     e.append(f" · margin ${margin:,.2f}", style=SILVER)

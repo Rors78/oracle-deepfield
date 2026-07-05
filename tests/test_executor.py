@@ -180,7 +180,7 @@ def test_live_entry_is_pending_with_no_stop(tmp_path, monkeypatch):
     conn = _conn(tmp_path, ordermin=0.1)
     orders = []
 
-    def fake_private(ep, p=None):
+    def fake_private(ep, p=None, **kw):
         if "TradeBalance" in ep:
             return {"e": "1000"}                 # rails equity
         orders.append(p)
@@ -205,7 +205,7 @@ def test_poll_fills_promotes_filled_and_rests_stop(tmp_path, monkeypatch):
     conn = _conn(tmp_path)
     seq = []
     monkeypatch.setattr(ex_mod.broker, "private",
-                        lambda ep, p=None: (seq.append(p) or {"txid": ["OSTOP-1"]}))
+                        lambda ep, p=None, **kw: (seq.append(p) or {"txid": ["OSTOP-1"]}))
     monkeypatch.setattr(ex_mod.broker, "query_order",
                         lambda txid: {"status": "closed", "vol_exec": "0.1"})
     e = _exec(conn, mode="live")
@@ -223,7 +223,7 @@ def test_poll_fills_promotes_filled_and_rests_stop(tmp_path, monkeypatch):
 def test_poll_fills_unfilled_cancel_opens_nothing(tmp_path, monkeypatch):
     conn = _conn(tmp_path)
     calls = []
-    monkeypatch.setattr(ex_mod.broker, "private", lambda ep, p=None: calls.append(p))
+    monkeypatch.setattr(ex_mod.broker, "private", lambda ep, p=None, **kw: calls.append(p))
     monkeypatch.setattr(ex_mod.broker, "query_order",
                         lambda txid: {"status": "canceled", "vol_exec": "0"})
     e = _exec(conn, mode="live")
@@ -256,4 +256,60 @@ def test_validate_mode_builds_order_without_executing(tmp_path, monkeypatch):
     assert captured["params"]["oflags"] == "post"
     row = conn.execute("SELECT status FROM orders WHERE id=?", (oid,)).fetchone()
     assert row[0] == "validated"
+    conn.close()
+
+
+# ── code-review hardening regressions ─────────────────────────────────────────
+
+def test_rails_block_when_live_equity_unknown(tmp_path):
+    """Live TradeBalance failure -> equity None -> must BLOCK (kill-switch can't be
+    evaluated, and min-size sizing ignores equity so it would otherwise slip through)."""
+    conn = _conn(tmp_path)
+    ok, reason = _exec(conn, mode="live").rails_ok(None)
+    assert not ok and "equity unavailable" in reason
+    conn.close()
+
+
+def test_cap_counts_pending_limits(tmp_path, monkeypatch):
+    """A resting 'pending' entry limit counts toward MAX_OPEN_POSITIONS (it will fill)."""
+    conn = _conn(tmp_path)
+    monkeypatch.setattr(config, "MAX_OPEN_POSITIONS", 1)
+    conn.execute("INSERT INTO orders(symbol,status) VALUES('X/USD','pending')")
+    conn.commit()
+    ok, reason = _exec(conn).rails_ok(1000.0)
+    assert not ok and "max open positions" in reason
+    conn.close()
+
+
+def test_post_only_entry_prices_below_last(tmp_path, monkeypatch):
+    """Post-only maker BUY must be priced below last so it can't cross the ask."""
+    conn = _conn(tmp_path, ordermin=0.1)
+    orders = []
+
+    def fake_private(ep, p=None, **kw):
+        if "TradeBalance" in ep:
+            return {"e": "1000"}
+        orders.append(p)
+        return {"txid": ["O-1"]}
+
+    monkeypatch.setattr(ex_mod.broker, "private", fake_private)
+    _exec(conn, mode="live").place_entry(SYM, 100.0, Card(low_52w=92.0))
+    assert orders[0]["oflags"] == "post"
+    assert float(orders[0]["price"]) < 100.0      # bid below last -> rests as maker
+    conn.close()
+
+
+def test_verify_open_stops_skips_when_positions_unavailable(tmp_path, monkeypatch):
+    """Transient OpenPositions failure must NOT abandon a real open position."""
+    conn = _conn(tmp_path)
+    conn.execute("INSERT INTO orders(symbol,margin_pair,volume,leverage,stop,stop_txid,status) "
+                 "VALUES(?,?,?,?,?,?, 'open')", (SYM, "XBTUSD:BTNL", 0.1, 10, 90.0, "OSTOP"))
+    conn.commit()
+    sent = []
+    monkeypatch.setattr(ex_mod.broker, "open_positions", lambda: None)     # API failure
+    monkeypatch.setattr(ex_mod.broker, "private", lambda *a, **k: sent.append(a) or None)
+    monkeypatch.setattr(ex_mod.broker, "query_order", lambda t: sent.append(t) or None)
+    _exec(conn, mode="live").verify_open_stops()
+    assert conn.execute("SELECT status FROM orders WHERE symbol=?", (SYM,)).fetchone()[0] == "open"
+    assert sent == []          # nothing queried, nothing (re-)placed
     conn.close()

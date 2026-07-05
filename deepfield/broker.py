@@ -68,7 +68,11 @@ def _next_nonce():
     if _LAST_NONCE == 0:
         try:
             p = int((open(NONCE_FILE).read().strip() or "0"))
-            if n < p < n + 3_600_000_000:
+            # Persisted high-water beats a stale/backward wall clock — NO upper cap.
+            # A VM-snapshot restore / NTP step-back makes the clock < the last nonce
+            # Kraken saw; the old 1h window skipped this and wedged ALL private calls
+            # (Invalid nonce) while clobbering the good high-water. Always trust p.
+            if p >= n:
                 n = p + 1
         except Exception:
             pass
@@ -90,9 +94,12 @@ def sign(path, postdata, nonce, secret_b64):
     return base64.b64encode(hmac.new(secret, path.encode() + sha256, hashlib.sha512).digest()).decode()
 
 
-def private(endpoint, params=None):
+def private(endpoint, params=None, idempotent=True):
     """Signed POST to a Kraken private endpoint. Returns 'result' dict or None.
-    Retries nonce/rate errors with a fresh higher nonce (hydra pattern)."""
+    Retries nonce/rate ERRORS (from a received response — the request did NOT
+    execute) with a fresh higher nonce. idempotent=False (AddOrder/CancelOrder):
+    a NETWORK exception is NOT retried, because the order may already have landed
+    and a blind resend would DUPLICATE it (a duplicate stop can open a short)."""
     key, secret, _ = load_keys()
     if not key or not secret:
         log.error("no Kraken API keys (looked in %s) — cannot send %s", KEYFILES, endpoint)
@@ -127,19 +134,23 @@ def private(endpoint, params=None):
             return data.get("result")
         except Exception as e:
             log.warning("private API attempt %d failed: %s", attempt + 1, e)
+            if not idempotent:
+                log.error("%s not retried after network error — may or may not have "
+                          "landed; caller must NOT blind-resend", endpoint)
+                return None
             time.sleep(2)
     return None
 
 
-def trade_balance():
-    """Account equity in USD (TradeBalance 'e' = balance + unrealized net PnL),
-    or None. This is the '2% of portfolio' denominator, live from Kraken."""
-    r = private("/0/private/TradeBalance", {"asset": "ZUSD"})
-    if not r:
+def equity(balance):
+    """Account equity in USD from a TradeBalance result: 'e' (balance + unrealized
+    net PnL), falling back to 'eb'/'tb'; first >0 wins, else None. ONE definition
+    so the dashboard, rails, peak, and the order path can never disagree."""
+    if not balance:
         return None
     for k in ("e", "eb", "tb"):
         try:
-            v = float(r.get(k))
+            v = float(balance.get(k))
             if v > 0:
                 return v
         except (TypeError, ValueError):
@@ -147,9 +158,23 @@ def trade_balance():
     return None
 
 
+def trade_balance():
+    """Live account equity in USD, or None."""
+    return equity(private("/0/private/TradeBalance", {"asset": "ZUSD"}))
+
+
 def open_positions():
-    """Open margin positions dict (or {}). Used for max-positions + orphan checks."""
-    return private("/0/private/OpenPositions") or {}
+    """Open margin positions dict, {} if none, or None on API FAILURE (callers must
+    distinguish 'no positions' from 'could not check' — treating a failed check as
+    'no positions' would abandon/mis-handle real open longs)."""
+    return private("/0/private/OpenPositions")
+
+
+def cancel_order(txid):
+    """Cancel an order by txid. Non-idempotent transport (no blind resend)."""
+    if not txid:
+        return None
+    return private("/0/private/CancelOrder", {"txid": txid}, idempotent=False)
 
 
 def trade_balance_full():

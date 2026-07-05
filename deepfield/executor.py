@@ -64,7 +64,15 @@ class Executor:
         """Deterministic hard limits. (ok: bool, reason: str)."""
         if os.path.exists(config.HALT_FILE):
             return False, f"HALT file present ({config.HALT_FILE})"
-        n = store.open_position_count(self.conn)
+        # Fail-safe: in live mode an unknown equity means the kill-switch cannot be
+        # evaluated — do NOT trade blind (min-size sizing ignores equity, so without
+        # this the drawdown halt would be silently bypassed on a TradeBalance failure).
+        if self.mode == "live" and equity is None:
+            return False, "equity unavailable — cannot verify kill-switch (blocking)"
+        # Cap counts committed exposure: filled positions AND resting entry limits
+        # (a 'pending' limit will become a position — counting only 'open' lets many
+        # rest under the cap and fill together, breaching MAX_OPEN_POSITIONS).
+        n = store.committed_position_count(self.conn)
         if n >= config.MAX_OPEN_POSITIONS:
             return False, f"max open positions ({n}/{config.MAX_OPEN_POSITIONS})"
         try:
@@ -210,7 +218,12 @@ class Executor:
 
         margin_pair = config.MARGIN_PAIR[symbol]
         tick = config.MARGIN_TICK_DECIMALS.get(symbol, 2)
-        px = _round_price(entry_price, tick)
+        if config.ENTRY_ORDERTYPE == "limit":
+            # Post-only maker BUY must not cross the ask, or Kraken rejects it and
+            # the entry silently never rests. Bid just below last so it always rests.
+            px = _round_price(entry_price * (1 - config.POST_ONLY_SLIP_PCT), tick)
+        else:
+            px = _round_price(entry_price, tick)
         stop_px = _round_price(stop, tick)
         vol = sizing["volume"]
         log.info("EXEC %s [%s] %.6g @ %s x%d lev · stop %s · notional $%.2f margin $%.2f risk $%.2f%s",
@@ -254,7 +267,7 @@ class Executor:
         # limit is NOT a position — do not rest a stop yet (a stop with no position
         # would open a short) and do not count it as open. poll_fills() promotes
         # it to 'open' and rests the protective stop only once Kraken confirms fill.
-        res = broker.private("/0/private/AddOrder", params)
+        res = broker.private("/0/private/AddOrder", params, idempotent=False)
         if res and res.get("txid"):
             row["txid"] = res["txid"][0]
             row["status"] = "pending"
@@ -285,8 +298,16 @@ class Executor:
             except (TypeError, ValueError):
                 vol_exec = 0.0
             if status not in ("closed", "canceled", "expired"):
-                continue                        # still resting — patient bid, leave it
-            if vol_exec > 0:                     # filled (fully, or partial then done)
+                if vol_exec > 0:            # PARTIAL fill while still resting = a real
+                    # position. Cancel the remainder so it can't grow past the stop,
+                    # then protect what filled.
+                    broker.cancel_order(txid)
+                    self.conn.execute("UPDATE orders SET status='open', volume=? WHERE id=?", (vol_exec, oid))
+                    self.conn.commit()
+                    log.info("FILL %s: partial %.6g while resting — canceled remainder, resting stop", sym, vol_exec)
+                    self._rest_stop(sym, mpair, stop, vol_exec, lev, oid, paper=False)
+                continue                        # else unfilled + resting — patient bid, leave it
+            if vol_exec > 0:                     # terminal + filled (fully, or partial then done)
                 self.conn.execute("UPDATE orders SET status='open', volume=? WHERE id=?", (vol_exec, oid))
                 self.conn.commit()
                 log.info("FILL %s: %.6g filled — position open, resting stop", sym, vol_exec)
@@ -299,15 +320,20 @@ class Executor:
 
     def verify_open_stops(self):
         """On live restart: confirm each open position's protective stop is still
-        resting on Kraken; re-place if it's gone (kill-safety, hydra-parity). If
-        the stop FILLED, the position closed — mark the order closed instead."""
+        resting on Kraken; re-place if it's gone. CRITICAL SAFETY RULE: act ONLY on
+        DEFINITE exchange state. A transient API failure (None) is never treated as
+        'gone' — otherwise a blip would (a) abandon a real unprotected long, or
+        (b) re-place a stop that's actually resting -> two stops -> the second opens
+        a SHORT on the Non-ECP :BTNL book. On any uncertainty we leave the row
+        untouched and retry next restart."""
         if self.mode != "live":
             return
-        # Which pairs Kraken actually shows a position for RIGHT NOW. A stop-loss
-        # SELL for a pair with NO position would OPEN A SHORT on the Non-ECP :BTNL
-        # book when triggered — so re-placement is gated on this set (LONG-ONLY).
+        kr = broker.open_positions()
+        if kr is None:                                     # could not check -> do NOTHING
+            log.warning("startup: OpenPositions unavailable — skipping stop verification")
+            return
         open_ids = set()
-        for _pid, pos in (broker.open_positions() or {}).items():
+        for _pid, pos in kr.items():
             pr = str(pos.get("pair", ""))
             open_ids.add(pr)
             open_ids.add(pr.split(":")[0])
@@ -316,36 +342,44 @@ class Executor:
         def _has_position(sym, mpair):
             base = (mpair or "").split(":")[0]          # e.g. XBTUSD
             rest = rest_by_ws.get(sym, "")              # e.g. XXBTZUSD
-            return bool(open_ids) and any(
-                x and (x in open_ids or any(x in pid or pid in x for pid in open_ids))
-                for x in (base, rest))
+            return any(x and (x in open_ids or any(x in pid or pid in x for pid in open_ids))
+                       for x in (base, rest))
 
         rows = self.conn.execute(
             "SELECT id, symbol, margin_pair, volume, leverage, stop, stop_txid "
             "FROM orders WHERE status='open'").fetchall()
         for oid, sym, mpair, vol, lev, stop, stop_txid in rows:
+            has_pos = _has_position(sym, mpair)
             o = broker.query_order(stop_txid) if stop_txid else None
             status = (o or {}).get("status")
-            if status in ("open", "pending"):
-                continue                                   # still protected
-            # stop filled OR the position is simply gone -> close the order, and
-            # NEVER re-place (a stop with no position becomes a short).
-            if status == "closed" or not _has_position(sym, mpair):
+            # Position confirmed GONE (kr succeeded and doesn't list it): close the
+            # order, never re-place. This is a DEFINITE state (kr is not None here).
+            if not has_pos:
                 self.conn.execute("UPDATE orders SET status='closed' WHERE id=?", (oid,))
                 self.conn.commit()
-                log.info("startup: %s position gone (stop status=%s) — order %d closed, no re-place",
-                         sym, status, oid)
+                log.info("startup: %s not in OpenPositions — order %d closed, no re-place", sym, oid)
                 continue
-            log.warning("startup: %s stop not resting (status=%s) but position OPEN — re-placing", sym, status)
+            # Position IS open. Stop confirmed resting -> fine.
+            if status in ("open", "pending"):
+                continue
+            # Stop status UNKNOWN (query failed -> None) while the position is open:
+            # do NOT re-place blindly (it might already rest -> duplicate -> short).
+            if o is None:
+                log.warning("startup: %s position open but stop query failed — leaving as-is, retry next restart", sym)
+                continue
+            # Position open AND stop is DEFINITELY gone (closed/canceled/expired):
+            # re-place, once, non-idempotent transport (no blind resend duplicate).
+            log.warning("startup: %s position OPEN but stop %s — re-placing", sym, status)
             res = broker.private("/0/private/AddOrder", {
                 "pair": mpair, "type": "sell", "ordertype": "stop-loss",
-                "price": str(stop), "volume": str(vol), "leverage": str(lev), "trigger": "index"})
+                "price": str(stop), "volume": str(vol), "leverage": str(lev), "trigger": "index"},
+                idempotent=False)
             if res and res.get("txid"):
                 self.conn.execute("UPDATE orders SET stop_txid=? WHERE id=?", (res["txid"][0], oid))
                 self.conn.commit()
                 log.info("PROTECT %s: re-placed stop @ %s (%s)", sym, stop, res["txid"][0])
             else:
-                log.error("PROTECT %s: re-place FAILED — position closed, or UNPROTECTED", sym)
+                log.error("PROTECT %s: re-place FAILED — position may be UNPROTECTED", sym)
 
     def _rest_stop(self, symbol, margin_pair, stop_px, volume, leverage, order_id, paper):
         if not config.PROTECTIVE_STOP:
@@ -358,7 +392,7 @@ class Executor:
         params = {"pair": margin_pair, "type": "sell", "ordertype": "stop-loss",
                   "price": str(stop_px), "volume": str(volume),
                   "leverage": str(leverage), "trigger": "index"}  # :BTNL rejects 'last'
-        res = broker.private("/0/private/AddOrder", params)
+        res = broker.private("/0/private/AddOrder", params, idempotent=False)
         if res and res.get("txid"):
             self.conn.execute("UPDATE orders SET stop_txid=? WHERE id=?", (res["txid"][0], order_id))
             self.conn.commit()

@@ -47,6 +47,7 @@ class Ingest:
         # Execution is OFF unless EXEC_MODE flips (docs/RULINGS override). When
         # off, self.executor is None and the confirmed-BUY path is signal-only.
         self.executor = None
+        self._bg_tasks = set()   # strong refs so fire-and-forget dispatch isn't GC'd
         if config.EXEC_MODE != "off":
             from . import executor as executor_mod
             self.executor = executor_mod.Executor(conn)
@@ -320,7 +321,12 @@ class Ingest:
         except RuntimeError:
             self._dispatch(self.conn, *args)     # sync path (no event loop)
             return
-        asyncio.ensure_future(asyncio.to_thread(self._dispatch_threaded, *args))
+        # Hold a strong reference: asyncio only weakly tracks tasks, so an
+        # unreferenced ensure_future can be GC'd before it runs — dropping the
+        # alert/order. Keep it in a set until it completes.
+        task = asyncio.ensure_future(asyncio.to_thread(self._dispatch_threaded, *args))
+        self._bg_tasks.add(task)
+        task.add_done_callback(self._bg_tasks.discard)
 
     def _dispatch_threaded(self, *args):
         conn = store.connect(config.DB_PATH)     # thread-local connection

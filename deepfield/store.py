@@ -156,6 +156,13 @@ def open_position_count(conn):
     return conn.execute("SELECT COUNT(*) FROM orders WHERE status='open'").fetchone()[0]
 
 
+def committed_position_count(conn):
+    """Filled positions PLUS resting entry limits ('pending') — the count the
+    MAX_OPEN_POSITIONS rail must use, since every pending limit can still fill."""
+    return conn.execute(
+        "SELECT COUNT(*) FROM orders WHERE status IN ('open','pending')").fetchone()[0]
+
+
 def realized_pnl_since(conn, since_iso):
     row = conn.execute(
         "SELECT COALESCE(SUM(CAST(json_extract(error,'$.pnl') AS REAL)),0) FROM orders "

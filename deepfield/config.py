@@ -108,6 +108,9 @@ PROTECTIVE_STOP = True              # rest a real stop on the exchange (kill-saf
 ENTRY_ORDERTYPE = "limit"           # post-only maker ONLY (no market entries). A resting
                                     # limit is recorded status='pending' and promoted to
                                     # 'open' only when the fill monitor confirms it filled.
+POST_ONLY_SLIP_PCT = 0.001          # bid this far BELOW last so the post-only maker can't
+                                    # cross the ask (a crossing post-only is rejected -> silent
+                                    # no-fill). 10bps ~= a patient bottom bid; negligible cost.
 MARGIN_CAP_PCT = 0.90               # a single position may post at most this frac of free margin
 
 # Risk rails (deterministic hard limits, from GoldenEye — NOT learners):
