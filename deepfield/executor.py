@@ -243,6 +243,16 @@ class Executor:
         if sizing is None:
             log.warning("EXEC %s: sizing produced nothing (equity=%s)", symbol, equity)
             return None
+        # Per-order notional ceiling (Finding 8): a checked bound on blast radius. A
+        # valid min order is ~$3-8, so this only ever trips on a corrupt pairs row or a
+        # flipped size mode producing an order orders-of-magnitude too large. Refuse it
+        # (never halt the bot); the loud ERROR is the audit trail.
+        ceiling = config.EXEC_MAX_ORDER_NOTIONAL_USD
+        if ceiling > 0 and sizing["notional"] > ceiling:
+            log.error("EXEC %s REFUSED: order notional $%.2f exceeds ceiling $%.2f — not sending "
+                      "(sanity guard, not a rail; check the pairs row / EXEC_SIZE_MODE)",
+                      symbol, sizing["notional"], ceiling)
+            return None
 
         margin_pair = config.MARGIN_PAIR[symbol]
         tick = config.MARGIN_TICK_DECIMALS.get(symbol, 2)

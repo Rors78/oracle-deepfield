@@ -399,6 +399,35 @@ def test_verify_records_realized_pnl_on_stop_exit_bucketed_by_close(tmp_path, mo
     conn.close()
 
 
+def test_notional_ceiling_refuses_oversize_order(tmp_path, monkeypatch):
+    """FINDING 8: an order whose notional exceeds the ceiling is REFUSED and never sent
+    (even in paper) — the guard against a corrupt pairs row / flipped size mode."""
+    conn = _conn(tmp_path)
+    monkeypatch.setattr(config, "EXEC_MAX_ORDER_NOTIONAL_USD", 0.25)   # below the ~$0.50 min order
+    e = _exec(conn, mode="paper")
+    assert e.place_entry(SYM, 100.0, Card(low_52w=92.0)) is None
+    assert conn.execute("SELECT COUNT(*) FROM orders").fetchone()[0] == 0   # nothing recorded/sent
+    conn.close()
+
+
+def test_notional_ceiling_allows_normal_min_order(tmp_path, monkeypatch):
+    """A normal min-size order is far under the ceiling and places fine."""
+    conn = _conn(tmp_path)
+    monkeypatch.setattr(config, "EXEC_MAX_ORDER_NOTIONAL_USD", 50.0)
+    e = _exec(conn, mode="paper")
+    assert e.place_entry(SYM, 100.0, Card(low_52w=92.0)) is not None
+    conn.close()
+
+
+def test_notional_ceiling_zero_disables(tmp_path, monkeypatch):
+    """0 disables the ceiling entirely (no order is ever refused on notional)."""
+    conn = _conn(tmp_path)
+    monkeypatch.setattr(config, "EXEC_MAX_ORDER_NOTIONAL_USD", 0)
+    e = _exec(conn, mode="paper")
+    assert e.place_entry(SYM, 100.0, Card(low_52w=92.0)) is not None
+    conn.close()
+
+
 def test_validate_mode_builds_order_without_executing(tmp_path, monkeypatch):
     conn = _conn(tmp_path)
     captured = {}

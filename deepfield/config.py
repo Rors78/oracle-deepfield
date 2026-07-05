@@ -102,6 +102,15 @@ EXEC_SIZE_MODE = os.environ.get("DEEPFIELD_EXEC_SIZE", "min")   # min | risk
 RISK_PCT = 0.02
 PAPER_PORTFOLIO_USD = 1000.0        # equity used for sizing math in paper/off
 
+# Per-order sanity ceiling (Finding 8): refuse any single order whose NOTIONAL
+# (volume x entry — the leveraged position size, i.e. the blast radius) exceeds this.
+# NOT a rail: it never halts the bot and never shrinks a valid min-size order (min
+# notionals run ~$3-8). It converts "a corrupt `pairs` row or a flipped EXEC_SIZE_MODE
+# silently changes the blast radius" into a refused order + a loud log — making
+# min-sizing a CHECKED bound, not just a config knob. 0 = disabled; raise it if you
+# deliberately move to larger risk-mode sizing.
+EXEC_MAX_ORDER_NOTIONAL_USD = 50.0
+
 # Stop: weekly support (bottom-thesis invalidation), clamped to a sane band so a
 # razor-thin stop can't blow up position size and a far one can't dust it.
 STOP_MODE = "support"               # support | pct
