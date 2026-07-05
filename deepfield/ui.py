@@ -655,6 +655,49 @@ def render_positions(appstate, w):
     return Group(head, *rows)
 
 
+# ── region: account (fills the wide layout's bottom-left) ────────────────────
+
+def render_account(appstate, w):
+    ex = appstate.exec
+    if ex.get("mode", "off") == "off":
+        return None
+    bal = ex.get("balance") or {}
+    eq, free, used = ex.get("equity"), ex.get("free_margin"), ex.get("margin_used")
+    lines = [Text("▸ ACCOUNT", style=f"bold {CYAN}")]
+    t = Text("  equity ", style=GRAY)
+    t.append(f"${eq:,.2f}" if eq is not None else "---", style=f"bold {WHITE}")
+    t.append("   free ", style=GRAY)
+    t.append(f"${free:,.2f}" if free is not None else "---", style=GREEN)
+    t.append("   used ", style=GRAY)
+    t.append(f"${used:,.2f}" if used is not None else "---", style=SILVER)
+    ml = bal.get("ml")
+    if ml:
+        try:
+            t.append(f"   margin lvl {float(ml):,.0f}%", style=GRAY)
+        except (TypeError, ValueError):
+            pass
+    lines.append(t)
+    positions = ex.get("positions", [])
+    pnl = margin = 0.0
+    for p in positions:
+        ps = appstate.pairs.get(p["symbol"])
+        cur = ps.last_tick.last if (ps and ps.last_tick) else None
+        if cur:
+            pnl += (cur - p["entry"]) * p["volume"]
+        margin += p.get("margin", 0.0)
+    e = Text("  DEEPFIELD  ", style=GRAY)
+    e.append(f"{len(positions)} pos", style=CYAN)
+    e.append(f" · margin ${margin:,.2f}", style=SILVER)
+    e.append("  ·  open P&L ", style=GRAY)
+    e.append(f"{'+' if pnl >= 0 else ''}${pnl:,.2f}", style=GREEN if pnl >= 0 else RED)
+    if ex.get("halt"):
+        e.append("   ⛔ HALTED", style=f"bold {RED}")
+    elif not ex.get("rails_ok", True):
+        e.append(f"   ⛔ {ex.get('rails_reason','')}", style=f"bold {RED}")
+    lines.append(e)
+    return Group(*lines)
+
+
 # ── region: forming (provisional BUYs one close from confirming) ─────────────
 
 def render_forming(appstate, w):
@@ -704,7 +747,11 @@ def render_frame_wide(appstate, conn, total_width, show_keys=False):
         render_btc_pulse(appstate, full),
         render_regime(appstate, full),
     )
-    left = Group(render_main_table(appstate, left_w), render_table_summary(appstate, left_w))
+    left_parts = [render_main_table(appstate, left_w), render_table_summary(appstate, left_w)]
+    acct = render_account(appstate, left_w)
+    if acct is not None:
+        left_parts += [Text(""), _sep(left_w), acct]
+    left = Group(*left_parts)
 
     right_parts = [render_champion(appstate, right_w)]
     for r in (render_positions(appstate, right_w), render_forming(appstate, right_w)):

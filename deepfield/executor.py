@@ -262,6 +262,36 @@ class Executor:
         row["error"] = "no txid from AddOrder"
         return store.insert_order(self.conn, row)
 
+    def verify_open_stops(self):
+        """On live restart: confirm each open position's protective stop is still
+        resting on Kraken; re-place if it's gone (kill-safety, hydra-parity). If
+        the stop FILLED, the position closed — mark the order closed instead."""
+        if self.mode != "live":
+            return
+        rows = self.conn.execute(
+            "SELECT id, symbol, margin_pair, volume, leverage, stop, stop_txid "
+            "FROM orders WHERE status='open'").fetchall()
+        for oid, sym, mpair, vol, lev, stop, stop_txid in rows:
+            o = broker.query_order(stop_txid) if stop_txid else None
+            status = (o or {}).get("status")
+            if status in ("open", "pending"):
+                continue                                   # still protected
+            if status == "closed":
+                self.conn.execute("UPDATE orders SET status='closed' WHERE id=?", (oid,))
+                self.conn.commit()
+                log.info("startup: %s stop FILLED — position closed (order %d)", sym, oid)
+                continue
+            log.warning("startup: %s stop not resting (status=%s) — re-placing", sym, status)
+            res = broker.private("/0/private/AddOrder", {
+                "pair": mpair, "type": "sell", "ordertype": "stop-loss",
+                "price": str(stop), "volume": str(vol), "leverage": str(lev), "trigger": "index"})
+            if res and res.get("txid"):
+                self.conn.execute("UPDATE orders SET stop_txid=? WHERE id=?", (res["txid"][0], oid))
+                self.conn.commit()
+                log.info("PROTECT %s: re-placed stop @ %s (%s)", sym, stop, res["txid"][0])
+            else:
+                log.error("PROTECT %s: re-place FAILED — position closed, or UNPROTECTED", sym)
+
     def _rest_stop(self, symbol, margin_pair, stop_px, volume, leverage, order_id, paper):
         if not config.PROTECTIVE_STOP:
             return

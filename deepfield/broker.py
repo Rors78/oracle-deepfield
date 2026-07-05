@@ -152,6 +152,20 @@ def open_positions():
     return private("/0/private/OpenPositions") or {}
 
 
+def trade_balance_full():
+    """Full TradeBalance result dict (e=equity, m=margin used, mf=free margin,
+    ml=margin level) or None."""
+    return private("/0/private/TradeBalance", {"asset": "ZUSD"})
+
+
+def query_order(txid):
+    """Order info dict for a txid (has 'status': open|closed|canceled|...) or None."""
+    if not txid:
+        return None
+    r = private("/0/private/QueryOrders", {"txid": txid})
+    return (r or {}).get(txid)
+
+
 def setup_raw_log(log_dir):
     """Route the RAW order audit trail to its own file (append), 5MB x 3."""
     from logging.handlers import RotatingFileHandler

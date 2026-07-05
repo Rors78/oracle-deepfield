@@ -74,14 +74,23 @@ async def _exec_state_refresh(appstate, conn, ing, interval=15):
     while True:
         try:
             mode = config.EXEC_MODE
+            balance = None
+            margin_used = free_margin = None
             if ex is None:
                 equity = None
             elif mode == "live":
-                equity = await asyncio.to_thread(broker.trade_balance)
+                balance = await asyncio.to_thread(broker.trade_balance_full)
+                try:
+                    equity = float(balance["e"]) if balance else None
+                    margin_used = float(balance["m"]) if balance else None
+                    free_margin = float(balance["mf"]) if balance else None
+                except (TypeError, ValueError, KeyError):
+                    equity = None
                 if equity:
                     ex._update_peak(equity)      # DB write, back on the loop
             else:
                 equity = config.PAPER_PORTFOLIO_USD
+                free_margin, margin_used = equity, 0.0
             rails_ok, reason = ex.rails_ok(equity) if ex else (True, "")
             positions = [
                 {"symbol": r[0], "entry": r[1], "stop": r[2], "volume": r[3],
@@ -94,6 +103,7 @@ async def _exec_state_refresh(appstate, conn, ing, interval=15):
                 "mode": mode, "equity": equity, "open_count": len(positions),
                 "positions": positions, "rails_ok": rails_ok, "rails_reason": reason,
                 "halt": os.path.exists(config.HALT_FILE), "updated": _t.time(),
+                "balance": balance, "margin_used": margin_used, "free_margin": free_margin,
             }
             for sym, ps in list(appstate.pairs.items()):
                 card = ps.confirmed
@@ -151,8 +161,9 @@ def _startup(debug, announce=False):
             kr = broker.open_positions()
             ours = store.open_position_count(conn)
             log.info("startup position check: ledger open=%d · Kraken open positions=%d", ours, len(kr))
+            ing.executor.verify_open_stops()   # re-place any missing protective stops
         except Exception:
-            log.exception("startup position check failed")
+            log.exception("startup position/stop check failed")
     log.info("startup sweep complete: %d pairs, regime=%s",
              len(config.PAIRS), appstate.regime.label if appstate.regime else "?")
     return conn, appstate, ing
