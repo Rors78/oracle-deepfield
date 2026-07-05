@@ -48,6 +48,8 @@ class Ingest:
         # off, self.executor is None and the confirmed-BUY path is signal-only.
         self.executor = None
         self._bg_tasks = set()   # strong refs so fire-and-forget dispatch isn't GC'd
+        self._armed_buys = set()  # symbols already-BUY at startup that have fired their
+                                  # one-shot boot arm this session (see handle_tick)
         if config.EXEC_MODE != "off":
             from . import executor as executor_mod
             self.executor = executor_mod.Executor(conn)
@@ -68,6 +70,7 @@ class Ingest:
         # where "Live entry" and "Tranche" showed two different prices.
         if ps.confirmed is not None:
             self._compute_tranche(ev.symbol, ps.confirmed)
+            self._maybe_arm_startup_buy(ev.symbol, ps)
 
     def handle_candle_update(self, ev: events.CandleUpdate):
         closed = 1 if time.time() >= ev.interval_begin + ev.interval * 60 else 0
@@ -295,6 +298,29 @@ class Ingest:
         if PROVISIONAL_ALERTS and card.status == "BUY":
             self._maybe_alert(symbol, card, kind="provisional")
         return card
+
+    def _maybe_arm_startup_buy(self, symbol, ps):
+        """Fire a symbol that is ALREADY a confirmed BUY when this process starts.
+
+        The alert/exec path is edge-triggered on a live candle *close*
+        (_recompute_confirmed). startup_sweep() publishes the confirmed cards but
+        deliberately does NOT fire — so a symbol sitting at BUY when the bot
+        (re)starts would never place an order until its next daily/weekly close
+        (up to 7 days). This one-shot arm closes that gap: on the first fresh tick
+        for such a symbol, run the same _maybe_alert path a close would. Fired at
+        most once per symbol per process (self._armed_buys); real closes re-fire
+        independently. F10 cooldown still applies (with REALERT_HOURS=0 it fires;
+        set >0 to let a recent alert suppress the boot re-fire). NOTE: because it
+        re-arms every launch, each restart re-fires every open BUY — intended
+        under the operator's cooldown-off/no-blockers stance."""
+        card = ps.confirmed
+        if (symbol in self._armed_buys or card is None or card.status != "BUY"
+                or engine.is_stale(ps.tick_age(), STALE_SECS)):
+            return
+        self._armed_buys.add(symbol)   # one-shot: never retry this symbol on later ticks
+        log.info("startup-arm: %s already confirmed BUY %d/%d — firing on first fresh tick",
+                 symbol, card.score, card.denom)
+        self._maybe_alert(symbol, card, kind="confirmed")
 
     def _maybe_alert(self, symbol, card, kind):
         now = time.time()

@@ -50,7 +50,12 @@ STALE_SECS = 180           # F5: tick_age beyond this -> STALE, alerts suppresse
 DANGER_DRSI = 30           # §8: danger tag + tier boundary alignment
 
 # --- Alerting ---
-REALERT_HOURS = 24         # F10: per-symbol cooldown before re-alert
+# OPERATOR OVERRIDE: F10 cooldown OFF ("no blockers"). 0 makes should_alert()
+# always true (now-last >= 0), so a confirmed BUY re-alerts AND re-places a live
+# order on every daily/weekly close while it stays BUY — full pyramid/stacking on
+# the same symbol (there is no separate dedupe; rails are also off). Set >0 to
+# re-arm the per-symbol wait (e.g. 24 = the old once-a-day guard).
+REALERT_HOURS = 0          # F10: per-symbol cooldown before re-alert (0 = disabled)
 PROVISIONAL_ALERTS = False # invariant 7: provisional is display-only unless True
 
 # --- Conviction multipliers (F8): score relative to required threshold ---
