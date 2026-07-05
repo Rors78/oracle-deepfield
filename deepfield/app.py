@@ -130,7 +130,9 @@ async def _hourly_reconciler(ing):
 
 def _startup(debug, announce=False):
     """Shared by run_live and run_once: warm backfill -> DB -> startup sweep."""
+    from . import broker
     setup_logging(debug=debug)
+    broker.setup_raw_log(config.LOG_DIR)   # RAW order req/resp -> its own audit file
     if announce:
         print("DEEPFIELD warming up — backfilling candle gap (throttled REST)...", flush=True)
     # log=print would flood stdout ahead of every --once/--simple frame; route
@@ -142,6 +144,15 @@ def _startup(debug, announce=False):
     if announce:
         print("DEEPFIELD sweeping confirmed scores...", flush=True)
     ing.startup_sweep()
+    # Persistence: on a live restart, surface any drift between our open-orders
+    # ledger and what Kraken actually shows (a stop may have filled while down).
+    if config.EXEC_MODE == "live" and ing.executor is not None:
+        try:
+            kr = broker.open_positions()
+            ours = store.open_position_count(conn)
+            log.info("startup position check: ledger open=%d · Kraken open positions=%d", ours, len(kr))
+        except Exception:
+            log.exception("startup position check failed")
     log.info("startup sweep complete: %d pairs, regime=%s",
              len(config.PAIRS), appstate.regime.label if appstate.regime else "?")
     return conn, appstate, ing
