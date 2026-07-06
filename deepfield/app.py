@@ -199,6 +199,13 @@ async def _exec_state_refresh(appstate, conn, ing, interval=15):
             day0 = now.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
             wk0 = (now - datetime.timedelta(days=now.weekday())).replace(
                 hour=0, minute=0, second=0, microsecond=0).isoformat()
+
+            def _realized(since):        # display-only — never let it blank the snapshot
+                try:
+                    return store.realized_pnl_since(conn, since)
+                except Exception:
+                    log.exception("realized_pnl_since failed (display value only)")
+                    return 0.0
             appstate.exec = {
                 "mode": mode, "equity": equity, "open_count": len(positions),
                 "positions": positions, "pending": pending,
@@ -207,8 +214,8 @@ async def _exec_state_refresh(appstate, conn, ing, interval=15):
                 "balance": balance, "margin_used": margin_used, "free_margin": free_margin,
                 "by_pair": _build_by_pair(conn, appstate),
                 "journal_tail": store.recent_journal(conn, 200),
-                "realized_day": store.realized_pnl_since(conn, day0),
-                "realized_week": store.realized_pnl_since(conn, wk0),
+                "realized_day": _realized(day0),
+                "realized_week": _realized(wk0),
                 "capacity": _snapshot_capacity(conn, appstate, free_margin),
                 "last_recon": store.meta_get(conn, "last_recon"),
             }

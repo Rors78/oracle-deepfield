@@ -704,34 +704,35 @@ def render_book(appstate, w, height):
     rec = _parse_recon(appstate.exec.get("last_recon"))
     per_pair = rec.get("per_pair", {}) if rec else {}
     by_pair = appstate.exec.get("by_pair", {})
-    lines = [Text("BOOK  ", style=f"bold {INK}"),
-             Text("open positions & resting orders, grouped per pair", style=INK), _sep(w)]
+    head = [Text("BOOK  ", style=f"bold {INK}"),
+            Text("open positions & resting orders, grouped per pair", style=INK), _sep(w)]
     syms = [s for s in PAIR_LIST
             if by_pair.get(s, {}).get("fills") or by_pair.get(s, {}).get("pendings")]
     if not syms:
-        lines.append(Text("  (no open positions or resting orders)", style=INK))
-        return Group(*lines)
+        head.append(Text("  (no open positions or resting orders)", style=INK))
+        return Group(*head)
+    lines = []                               # body rows — windowed by book_scroll
     for sym in syms:
         v = _pair_view(appstate, sym, now)
-        head = Text("▍ ", style=f"dim {THESIS}")
-        head.append(f"{DISPLAY.get(sym, sym)}", style=f"bold {PRICE}")
-        head.append(f"  {len(v['fills'])}f", style=QTY)
-        head.append(f" · {v['vol_sum']:g} vol", style=QTY)
-        head.append("  · ø ", style=INK)
-        head.append(_fmt_price(v["avg_entry"]), style=PRICE)
-        head.append("  · uP&L ", style=INK)
-        head.append(_fmt_usd(v["pnl"]), style=GAIN if (v["pnl"] or 0) >= 0 else LOSS)
-        head.append("  · stop ", style=INK)
-        head.append(_fmt_price(v["stop"]), style=RISK)
+        ph = Text("▍ ", style=f"dim {THESIS}")          # per-pair header (NOT the outer `head`)
+        ph.append(f"{DISPLAY.get(sym, sym)}", style=f"bold {PRICE}")
+        ph.append(f"  {len(v['fills'])}f", style=QTY)
+        ph.append(f" · {v['vol_sum']:g} vol", style=QTY)
+        ph.append("  · ø ", style=INK)
+        ph.append(_fmt_price(v["avg_entry"]), style=PRICE)
+        ph.append("  · uP&L ", style=INK)
+        ph.append(_fmt_usd(v["pnl"]), style=GAIN if (v["pnl"] or 0) >= 0 else LOSS)
+        ph.append("  · stop ", style=INK)
+        ph.append(_fmt_price(v["stop"]), style=RISK)
         if v["stop"] and v["avg_entry"]:
-            head.append(f" {(v['stop'] / v['avg_entry'] - 1) * 100:+.1f}%", style=RISK)
+            ph.append(f" {(v['stop'] / v['avg_entry'] - 1) * 100:+.1f}%", style=RISK)
         pp = per_pair.get(sym)
         if pp is not None:
             coherent = pp.get("stops", 0) >= pp.get("rows", 0)
-            head.append("   ", style=INK)
-            head.append("▣ coherent" if coherent else "▢ MISMATCH",
-                        style=HEALTH if coherent else f"bold {RISK}")
-        lines.append(head)
+            ph.append("   ", style=INK)
+            ph.append("▣ coherent" if coherent else "▢ MISMATCH",
+                      style=HEALTH if coherent else f"bold {RISK}")
+        lines.append(ph)
         price = v["price"]
         for idx, f in enumerate(reversed(v["fills"]), start=1):
             upnl = ((price - (f["entry"] or 0.0)) * (f["vol"] or 0.0)) if price is not None else None
@@ -751,7 +752,15 @@ def render_book(appstate, w, height):
             row.append("  resting post-only", style=ATTN)
             lines.append(row)
         lines.append(Text(""))
-    return Group(*lines)
+    # window the body by book_scroll (,/. keys); clamp so you can't scroll to void
+    visible = max(6, height - len(head) - 1)
+    scroll = min(max(0, appstate.book_scroll), max(0, len(lines) - visible))
+    window = lines[scroll:scroll + visible]
+    if len(lines) > scroll + visible:
+        window.append(Text(f"  ({len(lines) - scroll - visible} more)  ,/. scroll", style=INK))
+    if scroll > 0:
+        window.insert(0, Text(f"  (↑ {scroll} above)", style=INK))
+    return Group(*head, *window)
 
 
 # ── VIEW 3 · JOURNAL ─────────────────────────────────────────────────────────

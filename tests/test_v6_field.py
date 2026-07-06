@@ -115,6 +115,41 @@ def test_render_all_views_two_sizes_no_crash():
             assert max((len(l) for l in txt.split("\n")), default=0) <= w   # no h-overflow
 
 
+# ── BOOK ,/. scroll actually windows the body (not just a state int) ─────────
+
+def test_book_renders_title_and_all_pairs():
+    """Guards the header-shadow bug the live run surfaced: the BOOK title must
+    render, and with ample height BOTH pairs' headers + a fill from each appear
+    (nothing windowed away)."""
+    st = AppState()
+    st.exec = dict(st.exec); st.exec["by_pair"] = {}
+    _seed(st, "LTC/USD", 7, price=46.0)
+    _seed(st, "SUI/USD", 8, price=0.74)
+    st.view = 2
+    txt = ui.export_frame_text(st, width=200, height=54)
+    assert txt.lstrip().startswith("BOOK")             # title present (was clobbered by shadow)
+    assert "LTC" in txt and "SUI" in txt               # both pair headers
+    assert "7f" in txt and "8f" in txt                 # both fill counts
+    assert txt.count("live") >= 15                      # 7 + 8 fill rows all rendered
+    assert "more)" not in txt                           # everything fits, nothing windowed
+
+
+def test_book_scroll_windows_body():
+    st = AppState()
+    st.exec = dict(st.exec); st.exec["by_pair"] = {}
+    _seed(st, "SUI/USD", 30)
+    st.view = 2
+    st.book_scroll = 0
+    top = ui.export_frame_text(st, width=160, height=20)
+    assert top.lstrip().startswith("BOOK")             # title still first even when windowed
+    assert "more)" in top                               # windowed → overflow marker
+    assert "(↑" not in top                              # nothing scrolled off the top yet
+    st.book_scroll = 12
+    scrolled = ui.export_frame_text(st, width=160, height=20)
+    assert "(↑ 12 above)" in scrolled                   # render consumed book_scroll
+    assert scrolled != top
+
+
 # ── #6 recon mismatch: header MISMATCH + BOOK ▢ on the offending pair ─────────
 
 def test_recon_mismatch_header_and_book():

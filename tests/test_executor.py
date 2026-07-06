@@ -225,6 +225,27 @@ def test_poll_fills_promotes_filled_and_rests_stop(tmp_path, monkeypatch):
     conn.close()
 
 
+def test_realized_pnl_ignores_nonjson_error(tmp_path):
+    """A manual close writes plain text into the polymorphic `error` column
+    ('closed manually by operator'); json_extract would raise 'malformed JSON'
+    and crash the query (and the exec snapshot + rails). realized_pnl_since must
+    skip such rows and still sum the JSON stop-exit rows. Regression for the bug
+    the live TUI surfaced."""
+    import json as _json
+    conn = _conn(tmp_path)
+    # a real stop-exit (JSON error) that should count
+    conn.execute("INSERT INTO orders(symbol,status,error) VALUES(?, 'closed', ?)",
+                 (SYM, _json.dumps({"pnl": -2.5, "exit": "stop",
+                                    "closed_ts": "2026-07-05T10:00:00+00:00"})))
+    # a manual close with PLAIN TEXT error — must not crash, contributes nothing
+    conn.execute("INSERT INTO orders(symbol,status,error) VALUES(?, 'closed', ?)",
+                 (SYM, "closed manually by operator"))
+    conn.commit()
+    got = store.realized_pnl_since(conn, "2026-07-05T00:00:00+00:00")
+    assert abs(got - (-2.5)) < 1e-9        # JSON row counted, plain-text row skipped (no crash)
+    conn.close()
+
+
 def test_journal_rows_emitted_on_order_fill_stop(tmp_path, monkeypatch):
     """v6 stage5: the money-path lifecycle narrates itself into the JOURNAL —
     a resting live entry emits 'order', a confirmed fill emits 'fill', the

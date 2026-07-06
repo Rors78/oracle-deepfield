@@ -191,10 +191,18 @@ def realized_pnl_since(conn, since_iso):
     (error.closed_ts), NOT the entry ts — the daily/weekly loss caps ask "how much did
     I lose since day0/wk0", a realization-date question (a trade entered days ago and
     stopped out today must count toward today). Rows without a recorded pnl/closed_ts
-    (manual closes, unresolved) contribute nothing."""
+    (manual closes, unresolved) contribute nothing.
+
+    The `error` column is polymorphic — JSON for stop-exit P&L, but plain text for
+    manual/other closes (e.g. 'closed manually by operator'). json_extract RAISES
+    'malformed JSON' on a non-JSON value, which crashes the whole query and every
+    caller (the rails loss caps AND the v6 exec snapshot). Guard with json_valid so
+    a plain-text row is simply skipped — matching the documented 'contributes
+    nothing' intent instead of exploding."""
     row = conn.execute(
         "SELECT COALESCE(SUM(CAST(json_extract(error,'$.pnl') AS REAL)),0) FROM orders "
-        "WHERE status='closed' AND json_extract(error,'$.closed_ts') >= ?", (since_iso,),
+        "WHERE status='closed' AND json_valid(error)=1 AND json_extract(error,'$.closed_ts') >= ?",
+        (since_iso,),
     ).fetchone()
     return row[0] if row else 0.0
 
