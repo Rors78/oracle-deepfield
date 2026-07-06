@@ -49,6 +49,13 @@ class AppState:
     started_ts: float = field(default_factory=time.time)
     paused: bool = False                           # 'p' key freezes the render loop
     pause_dirty: bool = False                      # one render pending after toggle
+    # v6 SURVEY view state — mutated ONLY by KeyController handlers; renderers read.
+    view: int = 1                                  # 1 FIELD · 2 BOOK · 3 JOURNAL
+    focus_symbol: str = None                       # selected strip (j/k/↑/↓)
+    expanded_symbol: str = None                    # the ONE accordion-expanded pair
+    ledger_scroll: int = 0                         # ,/. within an expanded ledger
+    book_scroll: int = 0                           # ,/. paging BOOK
+    journal_scroll: int = 0                        # ,/. paging JOURNAL
     # Interval boundaries are shared across all 15 pairs (Kraken anchors every
     # symbol's daily/weekly bars to the same UTC calendar boundary) — one pair's
     # forming-bar interval_begin is enough to drive the countdown region (§8).

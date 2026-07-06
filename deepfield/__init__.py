@@ -6,5 +6,5 @@ operator places.
 """
 
 # F11 — single VERSION constant, used everywhere incl. the REST User-Agent.
-VERSION = "5.0.0"
+VERSION = "6.0.0"
 USER_AGENT = f"OracleDeepfield/{VERSION}"

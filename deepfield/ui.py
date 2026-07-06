@@ -1,66 +1,58 @@
-"""rich Live TUI — AMOLED flight-telemetry. SPEC §8, invariant 5.
+"""DEEPFIELD v6 · THE SURVEY — rich Live TUI. Three full-screen views.
 
-Reads engine-published state ONLY; never re-implements a formula.
+A long exposure of dark sky: idle pairs render compressed, watch pairs brighter,
+confirmed BUYs and open positions in full detail. Detail is EARNED, so the frame
+can never overflow. One spatial language — the year-band: every pair drawn on its
+52-week range, so "buy near the yearly low" is visible geometrically.
 
-Auto-adjusting + auto-centering: the frame re-measures the terminal every
-render (tmux/window resizes picked up live), caps the content column at
-CONTENT_MAX, centers it in wider terminals, and sheds table columns gracefully
-at narrow widths (AGE -> 24h -> DRSI -> WRSI) instead of degrading into rich's
-lossy `$44…` ellipsis truncation. Below ~50 cols, `--simple` is the tool.
+Three laws (SPEC identity):
+1. Resolution follows relevance.  2. One spatial language: the year-band.
+3. Color is a legend, not decoration — every data CATEGORY owns one hue,
+   used for that category everywhere (see PALETTE).
 
-Color is information, not decoration: status colors the symbol and status
-cells; stale rows dim wholesale; the provisional cell turns amber only when a
-provisional BUY is forming that confirmed hasn't ratified yet; D-RSI tiers
-align to DANGER_DRSI per §8.
+Renderers are PURE AppState readers (invariant 5): they read the exec snapshot
+(app._exec_state_refresh) and never touch sqlite/broker. The `conn` argument is
+kept only for signature compatibility; nothing in the render path uses it.
 """
 import time
 import asyncio
 import datetime
+import json
 from zoneinfo import ZoneInfo
 
-from rich import box
-from rich.align import Align
 from rich.console import Console, Group
-from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 from rich.live import Live
 
-from . import store
 from . import engine
 from . import config
 from . import VERSION
-from .signals import FIRED, NOT, NA
 
 DENVER = ZoneInfo("America/Denver")
 
-GOLD = "color(220)"
-AMBER = "color(214)"
-GREEN = "color(82)"
-LIME = "color(118)"
-CYAN = "color(51)"
-RED = "color(196)"
-ORANGE = "color(208)"
-PURPLE = "color(141)"
-GRAY = "color(240)"
-DIM_LINE = "color(236)"
-DARK_GOLD = "color(94)"
-SILVER = "grey70"
-WHITE = "white"
-
-CONTENT_MAX = 96      # cap the dashboard column; center it in wider terminals
-CONTENT_MIN = 42
+# ── PALETTE — the category legend (truecolor hex; §2) ────────────────────────
+PRICE = "#E7ECF0"      # steel  — all prices, measured values
+TIME = "#6FB3D2"       # sky    — clocks, countdowns, ages, TTLs, timestamps
+QTY = "#A98FD6"        # violet — volume, fill/pos counts, margin, notional, capacity
+THESIS = "#C9A85C"     # brass  — scores, BUY, detections, fill dots, ✓
+GAIN = "#57B98A"       # green  — positive P&L / 24hΔ, up cursor
+LOSS = "#D45D5D"       # red    — negative P&L / 24hΔ, down cursor
+RISK = "#E0483E"       # alarm  — stops, proximity, HALT, MISMATCH, UNPROTECTED
+HEALTH = "#4FBFA3"     # teal   — link, recon, coherence, live fills, rails ok
+ATTN = "#E09B4C"       # amberorange — STALE, pending/○ bids, EXPIRE, warnings
+INK = "#6B747C"        # graphite — labels, units, chrome (LABELS ONLY, never data)
+FAINT = "#3E454C"      # idle rows, band tracks, separators
+IND = "#8FD1C6"        # soft cyan — W/D-RSI values + trend arrows
+SEL_BG = "on #141920"  # selected strip background
 
 DISPLAY = {p["ws"]: p["display"] for p in config.PAIRS}
 PAIR_LIST = [p["ws"] for p in config.PAIRS]
 
-STATUS_SHORT = {"BUY": "BUY", "WATCH": "WCH", "---": "---", "STALE": "STALE"}
-STATUS_STYLE = {"BUY": f"bold {GREEN}", "WATCH": GOLD, "STALE": RED, "---": GRAY}
-REGIME_STYLE = {"BULL": GREEN, "BEAR": RED, "RECOVERY": AMBER, "UNKNOWN": GRAY}
-REGIME_NOTE = {"BULL": "above & rising W-EMA200", "BEAR": "below W-EMA200",
-               "RECOVERY": "above, EMA flattening", "UNKNOWN": "insufficient data"}
-CONVICTION_LABEL = {1.0: "STARTER 1x", 1.5: "SCALE 1.5x", 2.0: "FULL 2x"}
-LINK_STYLE = {"UP": GREEN, "PARTIAL": AMBER, "DOWN": RED}
+KIND_TAG_STYLE = {   # JOURNAL / latest tag hues by category
+    "detect": THESIS, "fill": HEALTH, "order": PRICE, "stop": f"dim {RISK}",
+    "recon": HEALTH, "expire": ATTN, "sys": INK,
+}
 
 
 # ── formatting helpers ───────────────────────────────────────────────────────
@@ -73,6 +65,12 @@ def _fmt_price(p):
     if p >= 1:
         return f"${p:.2f}"
     return f"${p:.4f}"
+
+
+def _fmt_usd(v):
+    if v is None:
+        return "---"
+    return f"+${v:,.2f}" if v >= 0 else f"-${abs(v):,.2f}"
 
 
 def _fmt_age(secs):
@@ -97,138 +95,128 @@ def _fmt_days_hm(secs):
     d, rem = divmod(secs, 86400)
     h, rem2 = divmod(rem, 3600)
     m, _ = divmod(rem2, 60)
-    if d > 0:
-        return f"{d}d {h:02d}:{m:02d}"
-    return f"{h:02d}:{m:02d}"
+    return f"{d}d {h:02d}:{m:02d}" if d > 0 else f"{h:02d}:{m:02d}"
 
 
 def _local_short(ts_iso):
-    """UTC ISO ledger timestamp -> operator-local short form."""
     try:
         dt = datetime.datetime.fromisoformat(ts_iso)
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=datetime.timezone.utc)
         return dt.astimezone(DENVER).strftime("%m-%d %H:%M")
     except Exception:
-        return ts_iso[:16]
+        return (ts_iso or "")[:16]
 
 
-def _sep(w):
-    return Text("─" * w, style=DIM_LINE)
+def _local_hm(ts_iso):
+    try:
+        dt = datetime.datetime.fromisoformat(ts_iso)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=datetime.timezone.utc)
+        return dt.astimezone(DENVER).strftime("%H:%M")
+    except Exception:
+        return "--:--"
 
 
-def _mini_bar(fraction, cells=10):
+def _local_hms(ts_iso):
+    try:
+        dt = datetime.datetime.fromisoformat(ts_iso)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=datetime.timezone.utc)
+        return dt.astimezone(DENVER).strftime("%H:%M:%S")
+    except Exception:
+        return "--:--:--"
+
+
+def _mini_bar(fraction, cells=6):
     fraction = max(0.0, min(1.0, fraction))
     filled = round(fraction * cells)
     return "▰" * filled + "▱" * (cells - filled)
 
 
-def _content_width(total):
-    return max(CONTENT_MIN, min(total - 2, CONTENT_MAX))
-
-
-# ── region 1: header ─────────────────────────────────────────────────────────
-
-def render_header(appstate, w):
-    now_local = datetime.datetime.now(DENVER)
-    now_utc = datetime.datetime.now(datetime.timezone.utc)
-    uptime = time.time() - appstate.started_ts
-
-    g = Table.grid(expand=True)
-    g.add_column(justify="left")
-    g.add_column(justify="center")
-    g.add_column(justify="right")
-
-    left = Text()
-    left.append("◈ DEEPFIELD ", style=f"bold {GOLD}")
-    left.append(f"v{VERSION}", style=DARK_GOLD)
-
-    mid = Text(f"{now_local.strftime('%H:%M:%S')} MT · {now_utc.strftime('%H:%M:%S')} UTC", style=SILVER)
-    right = Text(f"up {_fmt_hms(uptime)}", style=GRAY)
-    g.add_row(left, mid, right)
-
-    status = appstate.link_status()
-    line2 = Text()
-    line2.append(f"LINK {status}", style=f"bold {LINK_STYLE[status]}")
-    if appstate.links:
-        line2.append("  ", style=GRAY)
-        for name in sorted(appstate.links):
-            up = appstate.links[name].get("up", False)
-            line2.append("●", style=GREEN if up else RED)
-            line2.append(f"{name[:1]} ", style=GRAY)
-    rc = appstate.total_reconnects() if appstate.links else appstate.reconnect_count
-    line2.append(f"· reconnects {rc} ", style=AMBER if rc else GRAY)
-    line2.append(f"· RECON {appstate.recon_repairs}", style=AMBER if appstate.recon_repairs else GRAY)
-    if appstate.paused:
-        line2.append("   ⏸ PAUSED", style=f"bold {AMBER}")
-    return Group(g, line2, render_exec_line(appstate))
-
-
-EXEC_MODE_STYLE = {"off": GRAY, "paper": CYAN, "validate": AMBER, "live": GREEN}
-
-
-def render_exec_line(appstate):
-    ex = appstate.exec
-    mode = ex.get("mode", "off")
+def _dots(score, denom):
+    """Score as filled/hollow dots — brass fired, faint not (THESIS)."""
+    score = max(0, int(score or 0))
+    denom = max(score, int(denom or 0))
     t = Text()
-    if mode == "off":
-        t.append("EXEC off", style=GRAY)
-        t.append("  · signal-only (place trades yourself)", style=GRAY)
-        return t
-    dot = RED if (ex.get("halt") or not ex.get("rails_ok", True)) else EXEC_MODE_STYLE.get(mode, GRAY)
-    t.append("● ", style=dot)
-    t.append(f"EXEC {mode.upper()}", style=f"bold {EXEC_MODE_STYLE.get(mode, GRAY)}")
-    eq = ex.get("equity")
-    if eq is not None:
-        t.append(f" · equity ${eq:,.2f}", style=SILVER)
-    t.append(f" · pos {ex.get('open_count', 0)}/{config.MAX_OPEN_POSITIONS}", style=SILVER)
-    if ex.get("halt"):
-        t.append("  ⛔ HALTED (deepfield.HALT_ENTRIES)", style=f"bold {RED}")
-    elif not ex.get("rails_ok", True):
-        t.append(f"  ⛔ {ex.get('rails_reason', 'blocked')}", style=f"bold {RED}")
-    else:
-        t.append("  rails OK", style=GREEN)
+    t.append("●" * score, style=THESIS)
+    t.append("○" * (denom - score), style=FAINT)
     return t
 
 
-# ── region 2: countdowns ─────────────────────────────────────────────────────
+def _sep(w):
+    return Text("─" * max(1, w), style=FAINT)
 
-def _countdown_cell(label, begin, interval_secs, fmt, now):
+
+# ── the year-band — the signature (§ FIELD) ──────────────────────────────────
+
+def _band_col(price, lo, hi, band_w):
+    """Linear price→column over [lo, hi]. The load-bearing math (acceptance #2):
+    a fill at the 52w low lands in column 0; at the 52w high, the last column.
+    Out-of-range clamps to the ends; a degenerate range returns None."""
+    if price is None or lo is None or hi is None or hi <= lo or band_w <= 0:
+        return None
+    frac = (price - lo) / (hi - lo)
+    frac = 0.0 if frac < 0 else (1.0 if frac > 1 else frac)
+    return int(round(frac * (band_w - 1)))
+
+
+def _proximity(now_price, stop):
+    """True when price sits within 3% ABOVE the stop — the pair is one wick from
+    being swept. Promotes to the fault tier and paints the band segment red."""
+    if not (now_price and stop and stop > 0):
+        return False
+    r = (now_price - stop) / stop
+    return -0.01 <= r < 0.03
+
+
+def _render_band(lo, hi, band_w, *, fills=(), pendings=(), stop=None,
+                 now_price=None, avg_entry=None, faint=False):
+    """A Text of exactly band_w cells. Layers, later overwrites earlier:
+    track ─ FAINT → proximity segment RISK → stop ┊ RISK → pending ○ ATTN →
+    fill • THESIS → cursor ▼ (GAIN≥ø-entry / LOSS below / steel no-pos)."""
+    cells = [["─", FAINT] for _ in range(max(0, band_w))]
+    if not cells or lo is None or hi is None or hi <= lo:
+        return Text("─" * max(1, band_w), style=FAINT)
+
+    def col(p):
+        return _band_col(p, lo, hi, band_w)
+
+    cur_col = col(now_price)
+    stop_col = col(stop)
+    if _proximity(now_price, stop) and stop_col is not None and cur_col is not None:
+        for i in range(min(stop_col, cur_col), max(stop_col, cur_col) + 1):
+            cells[i] = ["─", RISK]
+    if stop_col is not None:
+        cells[stop_col] = ["┊", RISK]
+    for p in pendings:
+        c = col(p)
+        if c is not None:
+            cells[c] = ["○", ATTN]
+    for p in fills:
+        c = col(p)
+        if c is not None:
+            cells[c] = ["•", THESIS]
+    if cur_col is not None:
+        if avg_entry is None:
+            cur_style = PRICE
+        elif now_price >= avg_entry:
+            cur_style = GAIN
+        else:
+            cur_style = LOSS
+        cells[cur_col] = ["▼", cur_style]
+
     t = Text()
-    t.append(f"{label} ", style=f"bold {SILVER}")
-    if begin is None:
-        t.append("closes ?", style=GRAY)
-        return t
-    left = begin + interval_secs - now
-    frac = (now - begin) / interval_secs
-    if left <= 0:
-        t.append("closing… ", style=f"bold {AMBER}")
-        t.append("(confirming)", style=GRAY)
-        return t
-    # Urgency: structure updates imminent -> amber under 1h, red under 10m.
-    urgent = RED if left < 600 else (AMBER if left < 3600 else CYAN)
-    t.append(_mini_bar(frac) + " ", style=urgent)
-    t.append(f"{frac * 100:3.0f}%  ", style=GRAY)
-    t.append("closes ", style=GRAY)
-    t.append(fmt(left), style=f"bold {urgent}")
+    for ch, style in cells:
+        t.append(ch, style=("dim " + style) if faint else style)
     return t
 
 
-def _fmt_cd(remaining):
-    """Cooldown remaining, compact."""
-    remaining = max(0, int(remaining))
-    if remaining >= 86400:
-        return f"{remaining // 86400}d{(remaining % 86400) // 3600}h"
-    if remaining >= 3600:
-        return f"{remaining // 3600}h{(remaining % 3600) // 60}m"
-    if remaining >= 60:
-        return f"{remaining // 60}m"
-    return f"{remaining}s"
-
+# ── derived pair meta (pure) ─────────────────────────────────────────────────
 
 def _actionable(ps, now):
     """A BUY the bot would act on right now: confirmed BUY, not stale, not on
-    cooldown. This is the single most important derived state on the screen."""
+    cooldown. Preserved from v5 — still the single most important derived state."""
     card = ps.confirmed if ps else None
     if not card or card.status != "BUY":
         return False
@@ -237,602 +225,606 @@ def _actionable(ps, now):
     return ps.cooldown_until <= now
 
 
-def render_countdowns(appstate, w):
-    now = time.time()
-    g = Table.grid(expand=True)
-    g.add_column(justify="left")
-    g.add_column(justify="right")
-    g.add_row(
-        _countdown_cell("DAILY", appstate.daily_interval_begin, 86400, _fmt_hms, now),
-        _countdown_cell("WEEKLY", appstate.weekly_interval_begin, 604800, _fmt_days_hm, now),
-    )
-    return g
+def _pair_view(appstate, sym, now):
+    """Everything a strip/band needs for one pair, read from AppState only."""
+    ps = appstate.pairs.get(sym)
+    card = ps.confirmed if ps else None
+    tick = ps.last_tick if ps else None
+    price = tick.last if tick else (card.price if card else None)
+    age = ps.tick_age(now) if ps else float("inf")
+    stale = engine.is_stale(age, config.STALE_SECS)
+    bp = appstate.exec.get("by_pair", {}).get(sym, {})
+    fills = bp.get("fills", [])
+    pendings = bp.get("pendings", [])
+    vol_sum = bp.get("vol_sum", 0.0)
+    avg_entry = bp.get("avg_entry")
+    stop = bp.get("stop")
+    has_fills = bool(fills)
+    is_buy = bool(card and card.status == "BUY" and not stale)
+    prox = has_fills and _proximity(price, stop)
+    pnl = None
+    if has_fills and price is not None:
+        pnl = sum((price - (f["entry"] or 0.0)) * (f["vol"] or 0.0) for f in fills)
+    return {
+        "ps": ps, "card": card, "tick": tick, "price": price, "age": age,
+        "stale": stale, "fills": fills, "pendings": pendings, "vol_sum": vol_sum,
+        "avg_entry": avg_entry, "stop": stop, "has_fills": has_fills,
+        "is_buy": is_buy, "prox": prox, "pnl": pnl,
+        "lo": card.low_52w if card else None, "hi": card.high_52w if card else None,
+    }
 
 
-# ── region 3: BTC pulse ──────────────────────────────────────────────────────
-
-def render_btc_pulse(appstate, w):
-    ps = appstate.pairs.get("BTC/USD")
-    t = Text()
-    if ps is None or ps.last_tick is None:
-        t.append("BTC LIVE  unavailable", style=GRAY)
-        return t
-    tick = ps.last_tick
-    chg_style = GREEN if tick.change_pct >= 0 else RED
-    t.append("BTC ", style=f"bold {GOLD}")
-    t.append(f"{_fmt_price(tick.last)}  ", style=f"bold {WHITE}")
-    t.append(f"{tick.change_pct:+.1f}%", style=chg_style)
-    t.append(f"   24h H {_fmt_price(tick.high24)} · L {_fmt_price(tick.low24)}", style=SILVER)
-    levels = config.LEVELS.get("BTC/USD", [])
-    if levels and w >= 64:
-        parts = [f"{label} {(tick.last - price) / price * 100:+.1f}%" for label, price in levels]
-        t.append("   " + " · ".join(parts), style=GRAY)
-    return t
+def _tier(v):
+    """Attention tier (§ FIELD sort): 0 proximity fault · 1 BUY · 2 position
+    w/o BUY · 3 watch · 4 idle."""
+    card = v["card"]
+    if v["prox"]:
+        return 0
+    if v["is_buy"]:
+        return 1
+    if v["has_fills"]:
+        return 2
+    if card and (card.status == "WATCH" or card.score >= 3):
+        return 3
+    return 4
 
 
-# ── region 4: regime ─────────────────────────────────────────────────────────
-
-def _drsi_tier(drsi):
-    """Tier boundaries aligned to DANGER_DRSI per §8 (30 / 45)."""
-    if drsi is None:
-        return SILVER, ""
-    if drsi < config.DANGER_DRSI:
-        return RED, " ⚠ knife-catch zone"
-    if drsi < config.DANGER_DRSI + 15:
-        return GOLD, " recovering"
-    return SILVER, ""
-
-
-def render_regime(appstate, w):
-    r = appstate.regime
-    t = Text()
-    if r is None:
-        t.append("BTC regime: unknown (awaiting startup sweep / first close)", style=GRAY)
-        return t
-    t.append("BTC ", style=SILVER)
-    t.append(f"{r.label} ", style=f"bold {REGIME_STYLE.get(r.label, GRAY)}")
-    if w >= 62:
-        t.append(f"({REGIME_NOTE.get(r.label, '')})  ", style=GRAY)
-    drsi_style, drsi_tag = _drsi_tier(r.daily_rsi)
-    drsi = f"{r.daily_rsi:.0f}" if r.daily_rsi is not None else "---"
-    mrsi = f"{r.monthly_rsi:.0f}" if r.monthly_rsi is not None else "---"
-    t.append("D-RSI ", style=GRAY)
-    t.append(drsi, style=f"bold {drsi_style}")
-    if drsi_tag:
-        t.append(drsi_tag, style=drsi_style)
-    t.append("  M-RSI ", style=GRAY)
-    t.append(mrsi, style=SILVER)
-    return t
-
-
-# ── region 5: main table (adaptive columns) ──────────────────────────────────
-
-def _columns_for(w):
-    cols = ["SYM", "SCR", "PROV", "WRSI", "DRSI", "PRICE", "24hΔ", "AGE", "ST"]
-    if w < 76:
-        cols.remove("AGE")
-    if w < 68:
-        cols.remove("24hΔ")
-    if w < 60:
-        cols.remove("DRSI")
-    if w < 54:
-        cols.remove("WRSI")
-    return cols
-
-
-def _wrsi_cell(card):
-    if not card or card.weekly_rsi is None:
-        return Text("---", style=GRAY)
-    t = Text(f"{card.weekly_rsi:.0f}", style=SILVER)
-    if card.wrsi_ref is not None:
-        up = card.weekly_rsi > card.wrsi_ref
-        t.append("↑" if up else "↓", style=GREEN if up else RED)
-    return t
-
-
-def render_main_table(appstate, w):
-    cols = _columns_for(w)
-    table = Table(box=None, expand=True, width=w, pad_edge=False,
-                  show_edge=False, header_style=f"bold {SILVER}")
-    justify = {"SYM": "left", "ST": "center"}
-    for col in cols:
-        table.add_column(col, justify=justify.get(col, "right"), no_wrap=True)
-
-    def sort_key(sym):
-        ps = appstate.pairs.get(sym)
-        card = ps.confirmed if ps else None
-        return (-(card.score if card else -1), sym)
-
-    now_mono = time.monotonic()
-    now = time.time()
-    for sym in sorted(PAIR_LIST, key=sort_key):
-        ps = appstate.pairs.get(sym)
-        card = ps.confirmed if ps else None
-        prov = ps.provisional if ps else None
-        tick = ps.last_tick if ps else None
-        age = ps.tick_age() if ps else float("inf")
-        stale = engine.is_stale(age, config.STALE_SECS)
-        status = "STALE" if stale else (card.status if card else "---")
-        st_style = STATUS_STYLE.get(status, GRAY)
-        # A cooldown-gated BUY is NOT actionable — show it amber so a gated BUY
-        # never reads as "the bot will act on this" (the audit's #1 finding).
-        st_label = STATUS_SHORT.get(status, status)
-        gated = bool(ps and status == "BUY" and ps.cooldown_until > now)
-        if gated:
-            st_style = AMBER
-            st_label = "BUY⏳"
-
-        # PROV cell: `~` marks the provisional/pace-adjusted evaluation (RULINGS
-        # Q4 — sig6 is pace-adjusted or floored "either way"). Amber when a
-        # provisional BUY is forming that confirmed hasn't ratified.
-        if prov:
-            prov_style = "dim"
-            if prov.status == "BUY" and (not card or card.status != "BUY"):
-                prov_style = f"bold {AMBER}"
-            prov_cell = Text(f"~{prov.score}/{prov.denom}", style=prov_style)
-        else:
-            prov_cell = Text("···", style="dim")
-
-        price_style = WHITE
-        if ps and now_mono < ps.flash_until:
-            price_style = f"bold {GREEN}" if ps.flash_color == "green" else f"bold {RED}"
-
-        cells = {
-            "SYM": Text(DISPLAY.get(sym, sym), style=st_style),
-            "SCR": Text(f"{card.score}/{card.denom}" if card else "---",
-                        style=SILVER if card else GRAY),
-            "PROV": prov_cell,
-            "WRSI": _wrsi_cell(card),
-            "DRSI": Text(f"{card.daily_rsi:.0f}" if card and card.daily_rsi is not None else "---",
-                         style=SILVER),
-            "PRICE": Text(_fmt_price(tick.last if tick else (card.price if card else None)),
-                          style=price_style),
-            "24hΔ": Text(f"{tick.change_pct:+.1f}%" if tick else "---",
-                         style=(GREEN if tick and tick.change_pct >= 0 else RED) if tick else GRAY),
-            "AGE": Text(_fmt_age(age), style=GRAY),
-            "ST": Text(st_label, style=st_style),
-        }
-        table.add_row(*[cells[c] for c in cols], style="dim" if stale else None)
-    return table
-
-
-def render_table_summary(appstate, w):
-    """One-line actionability roll-up under the table — the 'what do I do now'
-    answer: BUYs the bot would act on this instant vs gated/stale."""
-    now = time.time()
-    buys = watches = idle = actionable = gated = 0
-    for sym in PAIR_LIST:
-        ps = appstate.pairs.get(sym)
-        card = ps.confirmed if ps else None
-        if not card:
-            continue
-        if card.status == "BUY":
-            buys += 1
-            if _actionable(ps, now):
-                actionable += 1
-            elif ps.cooldown_until > now:
-                gated += 1
-        elif card.status == "WATCH":
-            watches += 1
-        else:
-            idle += 1
-    t = Text()
-    t.append(f"{buys} BUY", style=f"bold {GREEN}" if buys else GRAY)
-    t.append(f" · {watches} watch · {idle} idle", style=GRAY)
-    t.append("      ", style=GRAY)
-    if actionable:
-        t.append(f"▸ {actionable} ACTIONABLE NOW", style=f"bold {GREEN}")
-    else:
-        t.append("▸ nothing actionable", style=GRAY)
-    if gated:
-        t.append(f"  · {gated} on cooldown", style=AMBER)
-    return t
-
-
-# ── champion selection (RULINGS Q1) ─────────────────────────────────────────
-
-def _pick_champion(appstate):
-    candidates = []
-    for sym in PAIR_LIST:
-        ps = appstate.pairs.get(sym)
-        card = ps.confirmed if ps else None
-        if card and card.status == "BUY":
-            candidates.append((sym, ps, card))
-    if not candidates:
-        return None
-    # Operator ruling (supersedes RULINGS Q1's pure score order): feature the BUY
-    # you can ACT ON. An actionable BUY (fresh, not on cooldown) is champion over a
-    # higher-score one that's gated/stale — otherwise the card headlines something
-    # the bot won't touch. Within each group, the old order holds: score -> nearest
-    # 52w-low -> alphabetical. If none are actionable, the top gated BUY still shows
-    # (with its ⏳/⛔ status), so nothing is hidden.
-    now = time.time()
-    candidates.sort(key=lambda item: (
-        0 if _actionable(item[1], now) else 1,
-        -item[2].score,
-        item[2].pct_above_low if item[2].pct_above_low is not None else float("inf"),
-        item[0],
-    ))
-    return candidates[0]
-
-
-# ── region 6: champion card ──────────────────────────────────────────────────
-
-def _score_bar(score, denom, required):
-    style = GREEN if score > required else GOLD
-    return Text("█" * (score * 2) + "░" * ((denom - score) * 2), style=style)
-
-
-def _champion_exec_lines(appstate, sym, ps, card):
-    """The REAL leveraged order the executor would place — not the spot tranche —
-    plus honest gating status (position open / cooldown / rails / armed)."""
-    lines = []
-    ex = appstate.exec
-    plan = ps.exec_plan
-    if plan is None:
-        lines.append(Text("  ORDER  sizing… (awaiting equity + price)", style=GRAY))
-        return lines
-    o = Text("  ORDER ", style=GRAY)
-    o.append(f"{plan['volume']:g} {DISPLAY.get(sym, sym)}", style=f"bold {CYAN}")
-    o.append(f" @ {plan['leverage']}x", style=f"bold {GOLD}")
-    o.append(f" · margin ${plan['margin']:,.2f}", style=CYAN)
-    o.append(f" · notional ${plan['notional']:,.2f}", style=GRAY)
-    if plan.get("size_mode") == "min":
-        o.append("  · MIN SIZE", style=GREEN)
-    else:
-        o.append(f" · risk ${plan['actual_risk']:,.2f} ({config.RISK_PCT*100:.0f}%)", style=SILVER)
-    lines.append(o)
-    entry = plan.get("entry") or 0
-    stp = plan.get("stop") or 0
-    s = Text("  Stop ", style=GRAY)
-    s.append(_fmt_price(stp), style=f"bold {RED}")
-    if entry and stp:
-        s.append(f"  ({(stp/entry - 1)*100:+.1f}%)", style=GRAY)
-    if plan.get("floored_to_min") and plan.get("size_mode") == "risk":
-        s.append("  ⚠ floored to Kraken min (risk > 2%)", style=AMBER)
-    lines.append(s)
-    # gating — why it will or won't act
-    now = time.time()
-    in_position = any(p["symbol"] == sym for p in ex.get("positions", []))
-    g = Text("  ", style=GRAY)
-    if in_position:
-        g.append("● POSITION OPEN", style=f"bold {GREEN}")
-    elif ex.get("halt"):
-        g.append("⛔ HALTED — deepfield.HALT_ENTRIES present", style=f"bold {RED}")
-    elif not ex.get("rails_ok", True):
-        g.append(f"⛔ BLOCKED — {ex.get('rails_reason', '')}", style=f"bold {RED}")
-    elif ps.cooldown_until > now:
-        g.append(f"⏳ COOLDOWN {_fmt_cd(ps.cooldown_until - now)} — will not re-enter", style=f"bold {AMBER}")
-    else:
-        g.append(f"▸ ARMED ({ex.get('mode','?').upper()}) — fires on confirmed BUY", style=f"bold {GREEN}")
-    lines.append(g)
-    return lines
-
-
-def render_champion(appstate, w):
-    picked = _pick_champion(appstate)
-    if picked is None:
-        return Text("No active BUY candidates this scan.", style=GRAY)
-    sym, ps, card = picked
-    disp = DISPLAY.get(sym, sym)
-    lines = []
-
-    live_price = ps.last_tick.last if ps.last_tick else None
-    entry = Text("  Entry ", style=GRAY)
-    entry.append(_fmt_price(live_price) if live_price else "--- (no tick)", style=f"bold {WHITE}")
-    entry.append(" live" if live_price else "", style=GREEN)
-    entry.append("   ·   last close ", style=GRAY)
-    entry.append(_fmt_price(card.price), style=SILVER)
-    lines.append(entry)
-
-    ex = appstate.exec
-    if ex.get("mode", "off") == "off" and ps.tranche:
-        # signal-only: the spot-DCA tranche is the manual recommendation
-        tr = ps.tranche
-        t = Text("  Buy (spot) ", style=GRAY)
-        t.append(f"{tr.qty:g} {disp}", style=f"bold {CYAN}")
-        t.append(f"  ≈ ${tr.qty * tr.price:,.2f}", style=CYAN)
-        t.append(f" · {CONVICTION_LABEL.get(tr.mult, f'{tr.mult:g}x')}", style=GOLD)
-        lines.append(t)
-    else:
-        lines.extend(_champion_exec_lines(appstate, sym, ps, card))
-
-    rng = Text("  W-Support ", style=GRAY)
-    rng.append(_fmt_price(card.low_52w), style=SILVER)
-    if card.low_52w and card.high_52w:
-        rng.append("   ·   52w ", style=GRAY)
-        rng.append(_fmt_price(card.low_52w), style=RED)
-        rng.append(" — ", style=GRAY)
-        rng.append(_fmt_price(card.high_52w), style=GREEN)
-        if card.pct_above_low is not None:
-            rng.append(f"  (+{card.pct_above_low:.0f}% above low)", style=GRAY)
-    lines.append(rng)
-
-    sc = Text("  Score ", style=GRAY)
-    sc.append_text(_score_bar(card.score, card.denom, card.required))
-    sc.append(f"  {card.score}/{card.denom}", style=f"bold {GOLD}")
-    sc.append(f" · required {card.required}", style=GRAY)
-    lines.append(sc)
-
-    for r in card.results:
-        row = Text("   ")
-        if r.state == FIRED:
-            row.append("✓ ", style=LIME)
-            row.append(r.name, style=LIME)
-        elif r.state == NA:
-            row.append("· ", style=GRAY)
-            row.append(f"{r.name}  N/A — {r.reason}", style=GRAY)
-        else:
-            row.append("□ ", style=GRAY)
-            row.append(r.name, style=SILVER)
-            gap = card.gap.get(r.slot)
-            if gap:
-                row.append(f"  ·  {gap}", style="dim")
-        lines.append(row)
-
-    return Panel(Group(*lines), width=w, box=box.SQUARE, border_style=DARK_GOLD,
-                 title=Text(f"★ CHAMPION · {disp}", style=f"bold {GOLD}"),
-                 title_align="left", padding=(0, 1))
-
-
-# ── region 7: closest-not-yet ────────────────────────────────────────────────
-
-def render_closest(appstate, w):
-    items = []
-    for sym in PAIR_LIST:
-        ps = appstate.pairs.get(sym)
-        card = ps.confirmed if ps else None
-        if card and card.status != "BUY" and card.score >= 2:
-            items.append((sym, card))
-    items.sort(key=lambda x: (-x[1].score, x[0]))
-    top3 = items[:3]
-    if not top3:
-        return Text("CLOSEST NOT YET · (none within range)", style=GRAY)
-    lines = [Text("▸ CLOSEST NOT YET", style=f"bold {PURPLE}")]
-    for sym, card in top3:
-        head = Text(f"  {DISPLAY.get(sym, sym):<5}", style=f"bold {SILVER}")
-        head.append(f"{card.score}/{card.denom}", style=SILVER)
-        head.append(f" · needs {max(0, card.required - card.score)} more", style=GRAY)
-        lines.append(head)
-        shown = 0
-        for r in card.results:
-            if shown >= 2:
-                break
-            if r.state == NOT and r.slot in card.gap:
-                lines.append(Text(f"     □ {r.name} → {card.gap[r.slot]}", style="dim"))
-                shown += 1
-    return Group(*lines)
-
-
-# ── region 8: alert tail ─────────────────────────────────────────────────────
-
-KIND_STYLE = {"confirmed": GREEN, "provisional": AMBER, "test": GRAY}
-
-
-def render_alert_tail(conn, w):
-    rows = store.recent_alerts(conn, 5)
-    lines = [Text("▸ ALERTS", style=f"bold {PURPLE}")]
-    if not rows:
-        lines.append(Text("  (none yet)", style=GRAY))
-    for ts, symbol, price, score, denom, signals, kind in rows:
-        t = Text(f"  {_local_short(ts)} MT  ", style=GRAY)
-        t.append(f"{symbol:<9}", style=SILVER)
-        t.append(f"{_fmt_price(price):>10}  ", style=WHITE)
-        t.append(f"{score}/{denom}  ", style=GOLD)
-        t.append(kind, style=KIND_STYLE.get(kind, GRAY))
-        lines.append(t)
-    return Group(*lines)
-
-
-# ── region: open positions (only when execution has any) ─────────────────────
-
-def render_positions(appstate, w):
-    positions = appstate.exec.get("positions", [])
-    if not positions:
-        return None
-    total_pnl = 0.0
+def _attention_sorted(appstate, now):
+    """Ordered [(sym, tier, view)] — faults, then BUYs (score desc), positions,
+    watch (score desc), idle (alpha)."""
     rows = []
-    for p in positions:
-        sym = p["symbol"]
-        ps = appstate.pairs.get(sym)
-        cur = ps.last_tick.last if (ps and ps.last_tick) else None
-        # P&L is leverage-independent per unit: (price - entry) * volume. Guard
-        # None values (not just missing keys) — a NULL numeric column must never
-        # crash the whole frame (UI-never-crashes invariant).
-        entry, vol = p.get("entry"), p.get("volume")
-        pnl = ((cur - entry) * vol
-               if None not in (cur, entry, vol) else None)
-        if pnl is not None:
-            total_pnl += pnl
-        t = Text(f"  {DISPLAY.get(sym, sym):<5}", style=f"bold {SILVER}")
-        t.append(f"{p['volume']:g}@{p['leverage']}x", style=CYAN)
-        t.append(f"  in {_fmt_price(p['entry'])}", style=SILVER)
-        t.append(f" now {_fmt_price(cur) if cur else '---'}", style=WHITE)
-        t.append(f"  stop {_fmt_price(p['stop'])}", style=RED)
-        if pnl is not None:
-            t.append(f"  {'+' if pnl >= 0 else ''}${pnl:,.2f}", style=GREEN if pnl >= 0 else RED)
-        t.append(f"  [{p['mode']}]", style=AMBER if p["mode"] == "paper" else GREEN)
-        rows.append(t)
-    head = Text(f"▸ POSITIONS ({len(positions)})", style=f"bold {CYAN}")
-    head.append(f"   unrealized {'+' if total_pnl >= 0 else ''}${total_pnl:,.2f}",
-                style=GREEN if total_pnl >= 0 else RED)
-    return Group(head, *rows)
+    for sym in PAIR_LIST:
+        v = _pair_view(appstate, sym, now)
+        rows.append((sym, _tier(v), v))
+
+    def key(item):
+        sym, tier, v = item
+        score = v["card"].score if v["card"] else -1
+        return (tier, -score, sym)
+    return sorted(rows, key=key)
 
 
-# ── region: account (fills the wide layout's bottom-left) ────────────────────
+def _resolution(tier, v):
+    """active (2 rows: data+band) · watch (1 row bare band) · idle (1 faint)."""
+    if tier in (0, 1, 2) or v["has_fills"] or v["is_buy"]:
+        return "active"
+    if tier == 3:
+        return "watch"
+    return "idle"
 
-def render_account(appstate, w):
+
+# ── VIEW 1 · FIELD — header ──────────────────────────────────────────────────
+
+def render_header(appstate, w):
+    now_local = datetime.datetime.now(DENVER)
+    now_utc = datetime.datetime.now(datetime.timezone.utc)
+    uptime = time.time() - appstate.started_ts
+
+    top = Table.grid(expand=True)
+    top.add_column(justify="left")
+    top.add_column(justify="right")
+    left = Text()
+    left.append("DEEPFIELD  ", style=f"bold {THESIS}")
+    left.append(f"survey · v{VERSION}", style=INK)
+    right = Text()
+    right.append(now_local.strftime("%a %b %d").lower() + " · ", style=INK)
+    right.append(now_local.strftime("%H:%M:%S"), style=TIME)
+    right.append(" mt · ", style=INK)
+    right.append(now_utc.strftime("%H:%M"), style=TIME)
+    right.append(" utc · up ", style=INK)
+    right.append(_fmt_hms(uptime), style=TIME)
+    top.add_row(left, right)
+
+    return Group(top, render_exec_line(appstate), _btc_regime_line(appstate), _sep(w))
+
+
+def render_exec_line(appstate):
+    """Header status line: link · recon · stops · exec · equity · day P&L · pos ·
+    bids · halt. (Name kept from v5 for the dashboard test hook.)"""
     ex = appstate.exec
-    if ex.get("mode", "off") == "off":
+    t = Text()
+    t.append("link ", style=INK)
+    if appstate.links:
+        for name in sorted(appstate.links):
+            up = appstate.links[name].get("up", False)
+            t.append("●", style=HEALTH if up else RISK)
+    else:
+        t.append("··", style=INK)
+    # recon (boot-time stamp — labeled honestly)
+    t.append(" · recon ", style=INK)
+    rec = _parse_recon(ex.get("last_recon"))
+    if rec is None:
+        t.append("?", style=INK)
+    elif rec.get("all_ok"):
+        t.append("ok ", style=HEALTH)
+        t.append(_local_hm(rec.get("ts")), style=TIME)
+    else:
+        t.append("▢ MISMATCH", style=f"bold {RISK}")
+    if rec is not None:
+        rows = sum(p.get("rows", 0) for p in rec.get("per_pair", {}).values())
+        stops = sum(p.get("stops", 0) for p in rec.get("per_pair", {}).values())
+        t.append(" · ", style=INK)
+        t.append(f"{stops}/{rows} stops", style=HEALTH if stops >= rows else RISK)
+    mode = ex.get("mode", "off")
+    t.append(" · ", style=INK)
+    if mode == "off":
+        t.append("exec off", style=INK)
+        t.append(" · signal-only", style=INK)
+        return t
+    t.append("exec ", style=INK)
+    t.append(mode.upper(), style=f"bold {THESIS}")
+    eq = ex.get("equity")
+    if eq is not None:
+        t.append(" · equity ", style=INK)
+        t.append(f"${eq:,.2f}", style=PRICE)
+    upnl = _open_pnl(appstate)
+    rpnl = ex.get("realized_day", 0.0) or 0.0
+    t.append(" · day ", style=INK)
+    t.append(_fmt_usd(upnl), style=GAIN if upnl >= 0 else LOSS)
+    t.append("u / ", style=INK)
+    t.append(_fmt_usd(rpnl), style=GAIN if rpnl >= 0 else LOSS)
+    t.append("r", style=INK)
+    t.append(" · ", style=INK)
+    t.append(f"{ex.get('open_count', 0)} pos", style=QTY)
+    t.append(" · ", style=INK)
+    t.append(f"{len(ex.get('pending', []))} bids", style=QTY)
+    t.append(" · halt ", style=INK)
+    if ex.get("halt"):
+        t.append("● HALTED", style=f"bold {RISK}")
+    elif not ex.get("rails_ok", True):
+        t.append(f"● {ex.get('rails_reason', 'blocked')}", style=f"bold {RISK}")
+    else:
+        t.append("—", style=INK)
+    return t
+
+
+def _btc_regime_line(appstate):
+    now = time.time()
+    t = Text()
+    t.append_text(_countdown("DAILY", appstate.daily_interval_begin, 86400, _fmt_hms, now))
+    t.append("    ")
+    t.append_text(_countdown("WEEKLY", appstate.weekly_interval_begin, 604800, _fmt_days_hm, now))
+    t.append("    ")
+    ps = appstate.pairs.get("BTC/USD")
+    if ps and ps.last_tick:
+        tick = ps.last_tick
+        t.append("BTC ", style=INK)
+        t.append(_fmt_price(tick.last), style=PRICE)
+        t.append(f" {tick.change_pct:+.1f}%", style=GAIN if tick.change_pct >= 0 else LOSS)
+    r = appstate.regime
+    if r is not None:
+        t.append(" · ", style=INK)
+        t.append((r.label or "?").lower(), style=INK)
+        note = _REGIME_NOTE.get(r.label)
+        if note:
+            t.append(f" · {note}", style=INK)
+        if r.daily_rsi is not None:
+            t.append(" · d-rsi ", style=INK)
+            t.append(f"{r.daily_rsi:.0f}", style=IND)
+    return t
+
+
+_REGIME_NOTE = {"BULL": "above & rising w-ema200", "BEAR": "below w-ema200",
+                "RECOVERY": "above, ema flattening", "NEUTRAL": "ema flat"}
+
+
+def _countdown(label, begin, interval_secs, fmt, now):
+    t = Text()
+    t.append(f"{label} ", style=INK)
+    if begin is None:
+        t.append("closes ?", style=INK)
+        return t
+    left = begin + interval_secs - now
+    frac = (now - begin) / interval_secs
+    if left <= 0:
+        t.append("closing…", style=ATTN)
+        return t
+    t.append(_mini_bar(frac) + " ", style=TIME)
+    t.append(f"{frac * 100:3.0f}% ", style=INK)
+    t.append(fmt(left), style=TIME)
+    return t
+
+
+def _parse_recon(raw):
+    if not raw:
         return None
-    bal = ex.get("balance") or {}
-    eq, free, used = ex.get("equity"), ex.get("free_margin"), ex.get("margin_used")
-    lines = [Text("▸ ACCOUNT", style=f"bold {CYAN}")]
-    t = Text("  equity ", style=GRAY)
-    t.append(f"${eq:,.2f}" if eq is not None else "---", style=f"bold {WHITE}")
-    t.append("   free ", style=GRAY)
-    t.append(f"${free:,.2f}" if free is not None else "---", style=GREEN)
-    t.append("   used ", style=GRAY)
-    t.append(f"${used:,.2f}" if used is not None else "---", style=SILVER)
-    ml = bal.get("ml")
-    if ml:
-        try:
-            t.append(f"   margin lvl {float(ml):,.0f}%", style=GRAY)
-        except (TypeError, ValueError):
-            pass
-    lines.append(t)
-    positions = ex.get("positions", [])
-    pnl = margin = 0.0
-    for p in positions:
+    try:
+        return json.loads(raw)
+    except Exception:
+        return None
+
+
+def _open_pnl(appstate):
+    total = 0.0
+    for p in appstate.exec.get("positions", []):
         ps = appstate.pairs.get(p["symbol"])
         cur = ps.last_tick.last if (ps and ps.last_tick) else None
         e_, v_ = p.get("entry"), p.get("volume")
         if None not in (cur, e_, v_):
-            pnl += (cur - e_) * v_
-        margin += (p.get("margin") or 0.0)    # guard None, not just missing key
-    e = Text("  DEEPFIELD  ", style=GRAY)
-    e.append(f"{len(positions)} pos", style=CYAN)
-    e.append(f" · margin ${margin:,.2f}", style=SILVER)
-    e.append("  ·  open P&L ", style=GRAY)
-    e.append(f"{'+' if pnl >= 0 else ''}${pnl:,.2f}", style=GREEN if pnl >= 0 else RED)
-    if ex.get("halt"):
-        e.append("   ⛔ HALTED", style=f"bold {RED}")
-    elif not ex.get("rails_ok", True):
-        e.append(f"   ⛔ {ex.get('rails_reason','')}", style=f"bold {RED}")
-    lines.append(e)
-    pending = ex.get("pending", [])
-    if pending:
-        r = Text("  RESTING  ", style=GRAY)
-        r.append(f"{len(pending)} limit(s) awaiting fill: ", style=AMBER)
-        r.append(", ".join(f"{p['volume']:g} {DISPLAY.get(p['symbol'], p['symbol'])}@{_fmt_price(p['entry'])}"
-                           for p in pending[:3]), style=SILVER)
-        lines.append(r)
-    return Group(*lines)
+            total += (cur - e_) * v_
+    return total
 
 
-# ── region: forming (provisional BUYs one close from confirming) ─────────────
+# ── VIEW 1 · FIELD — strips + accordion ──────────────────────────────────────
 
-def render_forming(appstate, w):
-    """What flips at the next close — provisional BUYs the confirmed layer hasn't
-    ratified yet, and the signal that would make each fire. The 'watch this' list."""
-    now = time.time()
-    items = []
-    for sym in PAIR_LIST:
-        ps = appstate.pairs.get(sym)
-        prov = ps.provisional if ps else None
-        card = ps.confirmed if ps else None
-        if prov and prov.status == "BUY" and (not card or card.status != "BUY"):
-            items.append((sym, prov, card))
-    if not items:
-        return None
-    lines = [Text("▸ FORMING (provisional BUY — confirms at close)", style=f"bold {AMBER}")]
-    for sym, prov, card in items:
-        # the signals provisional has that confirmed doesn't
-        conf_fired = {r.name for r in card.results if r.state == FIRED} if card else set()
-        flip = [r.name for r in prov.results if r.state == FIRED and r.name not in conf_fired]
-        t = Text(f"  {DISPLAY.get(sym, sym):<5}", style=f"bold {AMBER}")
-        t.append(f"~{prov.score}/{prov.denom}", style=AMBER)
-        if card:
-            t.append(f" (confirmed {card.score}/{card.denom})", style=GRAY)
-        if flip:
-            t.append("  needs to hold: " + ", ".join(flip[:2]), style=SILVER)
-        lines.append(t)
-    return Group(*lines)
+def _strip_state(v, now):
+    ps, card = v["ps"], v["card"]
+    if v["prox"]:
+        return "NEAR-STOP", RISK
+    if v["stale"]:
+        return "STALE", ATTN
+    if v["is_buy"]:
+        if ps and ps.cooldown_until > now:
+            return "BUY⏳", ATTN
+        return "BUY", THESIS
+    if v["has_fills"]:                 # money on the table outranks a faded thesis
+        return "HOLD", HEALTH
+    if card and card.status == "WATCH":
+        return "WCH", TIME
+    return "idle", FAINT
 
 
-# ── frame assembly + Live loop ───────────────────────────────────────────────
+_STRIP_COLS = ((7, "left"), (9, "left"), (10, "right"), (8, "right"),
+               (11, "right"), (10, "right"), (10, "left"))
 
-WIDE_THRESHOLD = 150   # at/above this width, use the two-column dashboard
 
+def _field_strip(appstate, sym, tier, v, w, selected, now):
+    res = _resolution(tier, v)
+    disp = DISPLAY.get(sym, sym)
+    st_label, st_style = _strip_state(v, now)
 
-def render_frame_wide(appstate, conn, total_width, show_keys=False):
-    """Full-screen two-column layout for wide terminals: pairs on the left,
-    champion + positions + forming + closest + alerts filling what would
-    otherwise be dead space on the right. Narrow terminals never reach here."""
-    full = min(total_width - 2, 236)
-    left_w = min(94, full * 52 // 100)
-    right_w = full - left_w - 2
+    if res == "idle":
+        band = _render_band(v["lo"], v["hi"], max(20, w - 22),
+                            now_price=v["price"], faint=True)
+        line = Text()
+        line.append(f"  {disp:<5} ", style=FAINT)
+        line.append_text(band)
+        line.append(f"  {st_label}", style=FAINT)
+        if selected:
+            line.stylize(SEL_BG)
+        return [line]
 
-    top = Group(
-        render_header(appstate, full), _sep(full),
-        render_countdowns(appstate, full),
-        render_btc_pulse(appstate, full),
-        render_regime(appstate, full),
+    # compact fixed-width columns (not full-bleed) — the band is the wide element
+    data = Table.grid(expand=False, padding=(0, 1, 0, 0))
+    for wdt, jst in _STRIP_COLS:
+        data.add_column(width=wdt, justify=jst, no_wrap=True)
+    sym_style = f"bold {THESIS}" if v["is_buy"] else PRICE
+    card = v["card"]
+    chg = v["tick"].change_pct if v["tick"] else None
+    pos_cell = (Text(f"{len(v['fills'])}f·{v['vol_sum']:g}", style=QTY)
+                if v["has_fills"] else Text("—", style=INK))
+    pnl_cell = (Text(_fmt_usd(v["pnl"]), style=GAIN if v["pnl"] >= 0 else LOSS)
+                if v["pnl"] is not None else Text("—", style=INK))
+    data.add_row(
+        Text(f"  {disp}", style=sym_style),
+        _dots(card.score, card.denom) if card else Text("—", style=INK),
+        Text(_fmt_price(v["price"]), style=PRICE),
+        (Text(f"{chg:+.1f}%", style=GAIN if chg >= 0 else LOSS)
+         if chg is not None else Text("—", style=INK)),
+        pos_cell, pnl_cell,
+        Text(st_label, style=st_style),
     )
-    left_parts = [render_main_table(appstate, left_w), render_table_summary(appstate, left_w)]
-    acct = render_account(appstate, left_w)
-    if acct is not None:
-        left_parts += [Text(""), _sep(left_w), acct]
-    left = Group(*left_parts)
+    rows = [data]
 
-    right_parts = [render_champion(appstate, right_w)]
-    for r in (render_positions(appstate, right_w), render_forming(appstate, right_w)):
-        if r is not None:
-            right_parts += [Text(""), r]
-    right_parts += [Text(""), render_alert_tail(conn, right_w)]
-    right = Group(*right_parts)
+    band_w = max(20, w - 24)
+    if res == "watch":
+        band = _render_band(v["lo"], v["hi"], band_w, now_price=v["price"])
+    else:
+        band = _render_band(v["lo"], v["hi"], band_w,
+                            fills=[f["entry"] for f in v["fills"]],
+                            pendings=[p["price"] for p in v["pendings"]],
+                            stop=v["stop"], now_price=v["price"], avg_entry=v["avg_entry"])
+    bline = Text("     ")
+    bline.append(f"{_fmt_price(v['lo']):>9} ", style=INK)
+    bline.append_text(band)
+    bline.append(f" {_fmt_price(v['hi']):<9}", style=INK)
+    rows.append(bline)
 
-    body = Table.grid(expand=False, padding=(0, 2, 0, 0))
-    body.add_column(width=left_w, vertical="top")
-    body.add_column(width=right_w, vertical="top")
-    body.add_row(left, right)
-
-    parts = [top, _sep(full), body]
-    if show_keys:
-        parts += [_sep(full), Text("q quit · p pause · f reconcile · a test-alert", style=DIM_LINE)]
-    return Group(*parts)
-
-
-def render_frame(appstate, conn, total_width=100, show_keys=False):
-    if total_width >= WIDE_THRESHOLD:
-        return render_frame_wide(appstate, conn, total_width, show_keys)
-    w = _content_width(total_width)
-    parts = [
-        render_header(appstate, w), _sep(w),
-        render_countdowns(appstate, w), _sep(w),
-        render_btc_pulse(appstate, w),
-        render_regime(appstate, w), _sep(w),
-        render_main_table(appstate, w),
-        render_table_summary(appstate, w), _sep(w),
-        render_champion(appstate, w),
-    ]
-    positions = render_positions(appstate, w)
-    if positions is not None:
-        parts += [_sep(w), positions]
-    forming = render_forming(appstate, w)
-    if forming is not None:
-        parts += [_sep(w), forming]
-    parts += [
-        render_alert_tail(conn, w),
-    ]
-    if show_keys:
-        hint = Table.grid(expand=True)
-        hint.add_column(justify="center")
-        hint.add_row(Text("q quit · p pause · f reconcile · a test-alert", style=DIM_LINE))
-        parts += [_sep(w), hint]
-    group = Group(*parts)
-    # Auto-centering: the content column floats centered in wider terminals.
-    return Align.center(group, width=w) if total_width > w else group
+    if selected:
+        for r in rows:
+            if isinstance(r, Text):
+                r.stylize(SEL_BG)
+    return rows
 
 
-def export_frame_text(appstate, conn, width=80):
-    """Proof helper: a static export of one live frame."""
-    console = Console(width=width, record=True, color_system="256")
-    console.print(render_frame(appstate, conn, total_width=width))
-    return console.export_text()
+def _expansion(appstate, sym, v, w):
+    """THESIS (left) + LEDGER (right) block under the focused strip."""
+    grid = Table.grid(expand=True, padding=(0, 2, 0, 0))
+    grid.add_column(width=max(30, w * 42 // 100), vertical="top")
+    grid.add_column(vertical="top")
+    grid.add_row(_thesis_block(appstate, sym, v), _ledger_block(appstate, sym, v))
+    return grid
 
 
-async def run_ui(appstate, conn, hz=None, show_keys=False):
+def _thesis_block(appstate, sym, v):
+    from .signals import FIRED
+    card = v["card"]
+    lines = []
+    head = Text("  THESIS", style=INK)
+    if card:
+        head.append(f"  ·  {card.score}/{card.denom} · required {card.required}", style=INK)
+    lines.append(head)
+    if card and card.results:
+        names = [(r.name, r.state == FIRED) for r in card.results]
+        for i in range(0, len(names), 2):
+            row = Text("   ")
+            for name, fired in names[i:i + 2]:
+                row.append("✓ " if fired else "· ", style=THESIS if fired else FAINT)
+                row.append(f"{name:<22}", style=PRICE if fired else INK)
+            lines.append(row)
+    note = Text("   ", style=INK)
+    if v["stop"] is not None:
+        note.append(f"stop {_fmt_price(v['stop'])}", style=RISK)
+        note.append(" · support-invalidation", style=INK)
+    ps = v["ps"]
+    if ps and ps.exec_plan:
+        pl = ps.exec_plan
+        note.append("  · next ", style=INK)
+        note.append(f"{pl.get('volume', 0):g}", style=QTY)
+        note.append(" @ ", style=INK)
+        note.append(_fmt_price(pl.get("entry")), style=PRICE)
+    lines.append(note)
+    return Group(*lines)
+
+
+_LEDGER_COLS = ((4, "right"), (9, "right"), (11, "right"), (11, "right"),
+                (11, "right"), (10, "right"), (7, "left"))
+
+
+def _ledger_block(appstate, sym, v):
+    lines = [Text(f"  LEDGER · {DISPLAY.get(sym, sym)}", style=INK)]
+    fills = list(reversed(v["fills"]))          # newest first
+    price = v["price"]
+    scroll = max(0, appstate.ledger_scroll)
+    window = fills[scroll:scroll + 10]
+    hdr = Table.grid(expand=True, padding=(0, 1, 0, 0))
+    for wdt, jst in _LEDGER_COLS:
+        hdr.add_column(width=wdt, justify=jst, no_wrap=True)
+    hdr.add_row(*[Text(h, style=INK) for h in
+                  ("#", "vol", "entry", "now", "uP&L", "stop", "state")])
+    lines.append(hdr)
+    for idx, f in enumerate(window, start=scroll + 1):
+        upnl = ((price - (f["entry"] or 0.0)) * (f["vol"] or 0.0)) if price is not None else None
+        tbl = Table.grid(expand=True, padding=(0, 1, 0, 0))
+        for wdt, jst in _LEDGER_COLS:
+            tbl.add_column(width=wdt, justify=jst, no_wrap=True)
+        tbl.add_row(
+            Text(str(idx), style=INK),
+            Text(f"{f['vol']:g}", style=QTY),
+            Text(_fmt_price(f["entry"]), style=PRICE),
+            Text(_fmt_price(price), style=PRICE),
+            (Text(_fmt_usd(upnl), style=GAIN if upnl >= 0 else LOSS)
+             if upnl is not None else Text("—", style=INK)),
+            Text(_fmt_price(f["stop"]), style=RISK),
+            Text("live", style=HEALTH),
+        )
+        lines.append(tbl)
+    for p in v["pendings"][:3]:
+        pl = Text("   ○ ", style=ATTN)
+        pl.append(f"{p['vol']:g}", style=QTY)
+        pl.append(" @ ", style=INK)
+        pl.append(_fmt_price(p["price"]), style=PRICE)
+        pl.append("  resting post-only", style=ATTN)
+        lines.append(pl)
+    if len(fills) > scroll + 10:
+        lines.append(Text(f"   ({len(fills) - scroll - 10} more)  ,/. scroll", style=INK))
+    if v["has_fills"]:
+        sig = Text("   Σ ", style=INK)
+        sig.append(f"{len(fills)}f·{v['vol_sum']:g}", style=f"bold {QTY}")
+        sig.append("  ø ", style=INK)
+        sig.append(_fmt_price(v["avg_entry"]), style=PRICE)
+        sig.append("  uP&L ", style=INK)
+        sig.append(_fmt_usd(v["pnl"]), style=f"bold {GAIN if (v['pnl'] or 0) >= 0 else LOSS}")
+        if v["stop"] and v["avg_entry"]:
+            away = (v["stop"] / v["avg_entry"] - 1) * 100
+            sig.append(f"  stop {away:+.1f}%", style=RISK)
+        lines.append(sig)
+    return Group(*lines)
+
+
+def render_field(appstate, w, height):
+    now = time.time()
+    ordered = _attention_sorted(appstate, now)
+    if appstate.focus_symbol not in [s for s, _, _ in ordered]:
+        appstate.focus_symbol = ordered[0][0] if ordered else None
+
+    header = render_header(appstate, w)
+    footer = render_footer(appstate, w)
+    budget = max(6, height - 9)          # minus header(4) + sep(1) + footer(2) + keybar(1) + margin
+
+    body = []
+    used = 0
+    for sym, tier, v in ordered:
+        selected = (sym == appstate.focus_symbol)
+        strip = _field_strip(appstate, sym, tier, v, w, selected, now)
+        cost = len(strip)
+        exp_block = None
+        if sym == appstate.expanded_symbol:
+            exp_block = _expansion(appstate, sym, v, w)
+            cost += 12
+        if used + cost > budget and body:
+            break
+        body.extend(strip)
+        if exp_block is not None:
+            body.append(exp_block)
+        used += cost
+    return Group(header, Group(*body), _sep(w), footer)
+
+
+def render_footer(appstate, w):
+    ex = appstate.exec
+    used = ex.get("margin_used")
+    free = ex.get("free_margin")
+    bal = ex.get("balance") or {}
+    try:
+        lvl = float(bal.get("ml")) if bal.get("ml") else None
+    except (TypeError, ValueError):
+        lvl = None
+    m = Text("margin ", style=INK)
+    if used is not None and free is not None and (used + free) > 0:
+        frac = used / (used + free)
+        m.append("▕" + _mini_bar(frac, 10) + "▏ ", style=QTY)
+        m.append(f"${used:,.2f}", style=QTY)
+        m.append(" used · ", style=INK)
+        m.append(f"${free:,.2f}", style=QTY)
+        m.append(" free", style=INK)
+    else:
+        m.append("—", style=INK)
+    if lvl is not None:
+        lvl_style = HEALTH if lvl > 500 else (ATTN if lvl >= 150 else RISK)
+        m.append("  · lvl ", style=INK)
+        m.append(f"{lvl:,.0f}%", style=lvl_style)
+    cap = ex.get("capacity")
+    if cap is not None:
+        m.append("    capacity ≈ ", style=INK)
+        m.append(f"{cap}", style=QTY)
+        m.append(" min-fills", style=INK)
+
+    latest = Text("latest ", style=INK)
+    tail = ex.get("journal_tail", [])[:3]
+    if not tail:
+        latest.append("— (quiet)", style=INK)
+    for ts, kind, symbol, text in tail:
+        latest.append(" · ", style=INK)
+        latest.append(_local_hm(ts) + " ", style=TIME)
+        latest.append((kind or "") + " ", style=KIND_TAG_STYLE.get(kind, INK))
+        latest.append(f"{symbol or ''} {text or ''}"[:40], style=FAINT)
+    return Group(m, latest, _keybar())
+
+
+def _keybar():
+    return Text("1 field · 2 book · 3 journal · j/k select · enter expand · ,/. scroll · "
+                "q quit · p pause · f reconcile", style=FAINT)
+
+
+# ── VIEW 2 · BOOK ────────────────────────────────────────────────────────────
+
+def render_book(appstate, w, height):
+    now = time.time()
+    rec = _parse_recon(appstate.exec.get("last_recon"))
+    per_pair = rec.get("per_pair", {}) if rec else {}
+    by_pair = appstate.exec.get("by_pair", {})
+    lines = [Text("BOOK  ", style=f"bold {INK}"),
+             Text("open positions & resting orders, grouped per pair", style=INK), _sep(w)]
+    syms = [s for s in PAIR_LIST
+            if by_pair.get(s, {}).get("fills") or by_pair.get(s, {}).get("pendings")]
+    if not syms:
+        lines.append(Text("  (no open positions or resting orders)", style=INK))
+        return Group(*lines)
+    for sym in syms:
+        v = _pair_view(appstate, sym, now)
+        head = Text("▍ ", style=f"dim {THESIS}")
+        head.append(f"{DISPLAY.get(sym, sym)}", style=f"bold {PRICE}")
+        head.append(f"  {len(v['fills'])}f", style=QTY)
+        head.append(f" · {v['vol_sum']:g} vol", style=QTY)
+        head.append("  · ø ", style=INK)
+        head.append(_fmt_price(v["avg_entry"]), style=PRICE)
+        head.append("  · uP&L ", style=INK)
+        head.append(_fmt_usd(v["pnl"]), style=GAIN if (v["pnl"] or 0) >= 0 else LOSS)
+        head.append("  · stop ", style=INK)
+        head.append(_fmt_price(v["stop"]), style=RISK)
+        if v["stop"] and v["avg_entry"]:
+            head.append(f" {(v['stop'] / v['avg_entry'] - 1) * 100:+.1f}%", style=RISK)
+        pp = per_pair.get(sym)
+        if pp is not None:
+            coherent = pp.get("stops", 0) >= pp.get("rows", 0)
+            head.append("   ", style=INK)
+            head.append("▣ coherent" if coherent else "▢ MISMATCH",
+                        style=HEALTH if coherent else f"bold {RISK}")
+        lines.append(head)
+        price = v["price"]
+        for idx, f in enumerate(reversed(v["fills"]), start=1):
+            upnl = ((price - (f["entry"] or 0.0)) * (f["vol"] or 0.0)) if price is not None else None
+            row = Text(f"    #{idx:<3}", style=INK)
+            row.append(f"{f['vol']:g}@{f['lev']}x ", style=QTY)
+            row.append(f"{_fmt_price(f['entry']):>10}", style=PRICE)
+            row.append(f" now {_fmt_price(price):>10}", style=PRICE)
+            row.append(f"  {_fmt_usd(upnl):>9}", style=GAIN if (upnl or 0) >= 0 else LOSS)
+            row.append(f"  stop {_fmt_price(f['stop'])}", style=RISK)
+            row.append("  live", style=HEALTH)
+            lines.append(row)
+        for p in v["pendings"]:
+            row = Text("    ○   ", style=ATTN)
+            row.append(f"{p['vol']:g}", style=QTY)
+            row.append(" @ ", style=INK)
+            row.append(_fmt_price(p["price"]), style=PRICE)
+            row.append("  resting post-only", style=ATTN)
+            lines.append(row)
+        lines.append(Text(""))
+    return Group(*lines)
+
+
+# ── VIEW 3 · JOURNAL ─────────────────────────────────────────────────────────
+
+def render_journal(appstate, w, height):
+    tail = appstate.exec.get("journal_tail", [])
+    lines = [Text("JOURNAL  ", style=f"bold {INK}"),
+             Text("the system, narrating itself — newest first", style=INK), _sep(w)]
+    if not tail:
+        lines.append(Text("  (no events yet)", style=INK))
+        return Group(*lines)
+    scroll = max(0, appstate.journal_scroll)
+    window = tail[scroll:scroll + max(6, height - 6)]
+    last_day = None
+    for ts, kind, symbol, text in window:
+        try:
+            dt = datetime.datetime.fromisoformat(ts)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=datetime.timezone.utc)
+            day = dt.astimezone(DENVER).strftime("%A · %B %d").upper()
+        except Exception:
+            day = None
+        if day and day != last_day:
+            lines.append(Text(f"  {day}", style=INK))
+            last_day = day
+        row = Text("  ")
+        row.append(_local_hms(ts) + "  ", style=TIME)
+        row.append(f"{(kind or '').upper():<8}", style=KIND_TAG_STYLE.get(kind, INK))
+        if symbol:
+            row.append(symbol + " ", style=PRICE)
+        row.append(text or "", style=FAINT)
+        lines.append(row)
+    if len(tail) > scroll + len(window):
+        lines.append(Text(f"  ({len(tail) - scroll - len(window)} older)  ,/. scroll", style=INK))
+    return Group(*lines)
+
+
+# ── frame dispatch + Live loop ───────────────────────────────────────────────
+
+def render_frame(appstate, conn=None, total_width=120, height=54, show_keys=False):
+    w = min(total_width - 1, 236)
+    view = getattr(appstate, "view", 1)
+    if view == 2:
+        return render_book(appstate, w, height)
+    if view == 3:
+        return render_journal(appstate, w, height)
+    return render_field(appstate, w, height)
+
+
+def export_frame_text(appstate, conn=None, width=120, height=54, styles=False):
+    """Proof helper: a static export of one live frame (read-only). Renders to an
+    in-memory buffer (never echoes to stdout) and returns the INTRINSIC height of
+    the frame — no screen padding — so acceptance #1 can grep the true row count.
+    styles=True keeps the ANSI for a visual dump."""
+    import io
+    console = Console(width=width, record=True, color_system="truecolor",
+                      file=io.StringIO())
+    console.print(render_frame(appstate, conn, total_width=width, height=height))
+    return console.export_text(styles=styles)
+
+
+async def run_ui(appstate, conn=None, hz=None, show_keys=False):
     hz = hz or config.RENDER_HZ
     console = Console()
     with Live(console=console, screen=True, auto_refresh=False) as live:
         while True:
             if appstate.paused:
                 if appstate.pause_dirty:
-                    live.update(render_frame(appstate, conn, console.width, show_keys), refresh=True)
+                    live.update(render_frame(appstate, conn, console.width, console.height, show_keys),
+                                refresh=True)
                     appstate.pause_dirty = False
                 await asyncio.sleep(0.1)
                 continue
-            # console.width re-measured every frame -> auto-adjusts to resizes.
-            live.update(render_frame(appstate, conn, console.width, show_keys), refresh=True)
+            live.update(render_frame(appstate, conn, console.width, console.height, show_keys),
+                        refresh=True)
             await asyncio.sleep(1.0 / hz)

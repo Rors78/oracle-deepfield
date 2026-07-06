@@ -65,11 +65,13 @@ def test_actionable_false_when_stale():
 
 def test_exec_line_off_vs_live():
     st = AppState()
-    assert "EXEC off" in ui.render_exec_line(st).plain
-    st.exec = {"mode": "live", "equity": 1234.5, "open_count": 2, "positions": [],
-               "rails_ok": True, "rails_reason": "", "halt": False, "updated": 0.0}
+    assert "exec off" in ui.render_exec_line(st).plain           # v6 header status line
+    st.exec = dict(st.exec)
+    st.exec.update({"mode": "live", "equity": 1234.5, "open_count": 2,
+                    "positions": [], "pending": [], "rails_ok": True,
+                    "rails_reason": "", "halt": False})
     line = ui.render_exec_line(st).plain
-    assert "EXEC LIVE" in line and "$1,234.50" in line and "pos 2/" in line
+    assert "exec LIVE" in line and "$1,234.50" in line and "2 pos" in line
 
 
 def test_exec_line_shows_halt():
@@ -79,65 +81,72 @@ def test_exec_line_shows_halt():
     assert "HALTED" in ui.render_exec_line(st).plain
 
 
-def test_frame_renders_with_exec_and_positions(tmp_path):
+def _tick(last, chg=0.5):
+    return type("T", (), {"last": last, "change_pct": chg})()
+
+
+def _bp(sym, entry, stop, vol, lev=10):
+    return {sym: {"fills": [{"id": 1, "ts": "2026-07-05T00:00:00+00:00", "vol": vol,
+                             "lev": lev, "entry": entry, "stop": stop}],
+                  "pendings": [], "vol_sum": vol, "avg_entry": entry,
+                  "upnl": None, "stop": stop}}
+
+
+def test_frame_renders_position_in_field_and_book(tmp_path):
+    """v6: an open position renders on the FIELD band (fills • + cursor) and in
+    BOOK (per-fill ledger). Exec mode + counts show in the header status line."""
     conn = store.connect(str(tmp_path / "t.db"))
     st = AppState()
+    now = time.time()
     ps = st.pair(SYM)
-    ps.confirmed = Card()
-    ps.cooldown_until = time.time() + 3600     # gated
-    ps.exec_plan = {"volume": 5.0, "leverage": 10, "margin": 24.0, "notional": 240.0,
-                    "actual_risk": 20.0, "stop": 58000.0, "entry": 63000.0,
-                    "floored_to_min": False, "capped": False}
-    # position on a DIFFERENT symbol, so the gated champion shows COOLDOWN (a
-    # position on the champion itself would correctly show POSITION OPEN instead).
-    st.exec = {"mode": "paper", "equity": 1000.0, "open_count": 1,
-               "positions": [{"symbol": "ETH/USD", "entry": 1800.0, "stop": 1600.0,
-                              "volume": 0.5, "leverage": 10, "margin": 90.0, "mode": "paper"}],
-               "rails_ok": True, "rails_reason": "", "halt": False, "updated": time.time()}
-    txt = ui.export_frame_text(st, conn, width=110)
-    assert "EXEC PAPER" in txt
-    assert "ORDER" in txt and "@ 10x" in txt
-    assert "COOLDOWN" in txt            # gated BUY (no position) reads as gated
-    assert "POSITIONS (1)" in txt
+    ps.confirmed = Card()                     # BUY, low_52w 58000, high_52w 130000
+    ps.last_tick = _tick(63000.0); ps.last_tick_ts = now
+    st.exec = dict(st.exec)
+    st.exec.update({"mode": "live", "equity": 1000.0, "open_count": 1,
+                    "positions": [{"symbol": SYM, "entry": 61000.0, "stop": 58000.0,
+                                   "volume": 0.01, "leverage": 10, "margin": 24.0, "mode": "live"}],
+                    "pending": [], "by_pair": _bp(SYM, 61000.0, 58000.0, 0.01),
+                    "rails_ok": True, "rails_reason": "", "halt": False})
+    st.view = 1
+    field = ui.export_frame_text(st, conn, width=200, height=54)
+    assert "exec LIVE" in field and "BTC" in field and "1 pos" in field
+    st.view = 2
+    book = ui.export_frame_text(st, conn, width=200, height=54)
+    assert "BTC" in book and "61,000" in book and "live" in book   # entry + live state
     conn.close()
 
 
-def test_champion_prefers_actionable_over_higher_score_gated():
-    """Operator ruling: an actionable lower-score BUY beats a gated higher-score
-    one for the champion card (so the card headlines what the bot will act on)."""
+def test_field_sort_buys_before_watch_by_score():
+    """v6 attention sort: BUYs lead (score desc), watch follows, idle last."""
     st = AppState()
     now = time.time()
-    tick = type("T", (), {"last": 1.0})()
-    # LTC: higher score (5) but GATED (cooldown)
-    ltc = st.pair("LTC/USD")
-    ltc.confirmed = Card(status="BUY"); ltc.confirmed.score = 5
-    ltc.cooldown_until = now + 3600
-    ltc.last_tick = tick; ltc.last_tick_ts = now
-    # SUI: lower score (4) but ACTIONABLE (fresh, no cooldown)
-    sui = st.pair("SUI/USD")
-    sui.confirmed = Card(status="BUY"); sui.confirmed.score = 4
-    sui.cooldown_until = 0.0
-    sui.last_tick = tick; sui.last_tick_ts = now
-    picked = ui._pick_champion(st)
-    assert picked is not None and picked[0] == "SUI/USD"   # actionable wins
-    # sanity: if SUI were also gated, the higher-score LTC would win
-    sui.cooldown_until = now + 3600
-    assert ui._pick_champion(st)[0] == "LTC/USD"
+    for sym, status, score in (("LTC/USD", "BUY", 5), ("SUI/USD", "BUY", 4),
+                               ("ADA/USD", "WATCH", 3), ("XRP/USD", "---", 0)):
+        ps = st.pair(sym)
+        ps.confirmed = Card(status=status); ps.confirmed.score = score
+        ps.last_tick = _tick(1.0); ps.last_tick_ts = now
+    ordered = [s for s, _, _ in ui._attention_sorted(st, now)]
+    assert ordered.index("LTC/USD") < ordered.index("SUI/USD")      # BUY score desc
+    assert ordered.index("SUI/USD") < ordered.index("ADA/USD")      # BUY before watch
+    assert ordered.index("ADA/USD") < ordered.index("XRP/USD")      # watch before idle
 
 
-def test_champion_shows_position_open_when_in_position(tmp_path):
+def test_field_hold_state_for_position_without_buy(tmp_path):
+    """A held position whose thesis is no longer a BUY reads as HOLD (teal), not
+    idle — the money is still on the table."""
     conn = store.connect(str(tmp_path / "t.db"))
     st = AppState()
+    now = time.time()
     ps = st.pair(SYM)
-    ps.confirmed = Card()
-    ps.cooldown_until = time.time() + 3600
-    ps.exec_plan = {"volume": 5.0, "leverage": 10, "margin": 24.0, "notional": 240.0,
-                    "actual_risk": 20.0, "stop": 58000.0, "entry": 63000.0,
-                    "floored_to_min": False, "capped": False}
-    st.exec = {"mode": "live", "equity": 1000.0, "open_count": 1,
-               "positions": [{"symbol": SYM, "entry": 63000.0, "stop": 58000.0,
-                              "volume": 5.0, "leverage": 10, "margin": 24.0, "mode": "live"}],
-               "rails_ok": True, "rails_reason": "", "halt": False, "updated": time.time()}
-    txt = ui.export_frame_text(st, conn, width=110)
-    assert "POSITION OPEN" in txt        # in-position takes precedence over cooldown
+    ps.confirmed = Card(status="WATCH")       # no longer a BUY
+    ps.last_tick = _tick(63000.0); ps.last_tick_ts = now
+    st.exec = dict(st.exec)
+    st.exec.update({"mode": "live", "equity": 1000.0, "open_count": 1,
+                    "positions": [{"symbol": SYM, "entry": 61000.0, "stop": 58000.0,
+                                   "volume": 0.01, "leverage": 10, "margin": 24.0, "mode": "live"}],
+                    "pending": [], "by_pair": _bp(SYM, 61000.0, 58000.0, 0.01),
+                    "rails_ok": True, "halt": False})
+    st.view = 1
+    txt = ui.export_frame_text(st, conn, width=200, height=54)
+    assert "HOLD" in txt
     conn.close()
