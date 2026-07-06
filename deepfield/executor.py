@@ -357,9 +357,9 @@ class Executor:
         if self.mode != "live":
             return
         rows = self.conn.execute(
-            "SELECT id, symbol, margin_pair, volume, leverage, stop, txid, ts "
+            "SELECT id, symbol, margin_pair, volume, leverage, stop, txid, ts, entry "
             "FROM orders WHERE status='pending'").fetchall()
-        for oid, sym, mpair, vol, lev, stop, txid, ts in rows:
+        for oid, sym, mpair, vol, lev, stop, txid, ts, entry in rows:
             o = broker.query_order(txid) if txid else None
             if o is None:
                 continue                        # transient query failure — retry next cycle
@@ -409,11 +409,75 @@ class Executor:
                 log.info("FILL %s: %.6g filled — position open, resting stop", sym, vol_exec)
                 self._journal("fill", sym, f"{vol_exec:.6g} filled @ {lev}x — position open")
                 self._rest_stop(sym, mpair, stop, vol_exec, lev, oid, paper=False)
+                # Continuous laddering: protection is secured above; now drop the next
+                # rung below the fill (isolated — a rung failure never unwinds the fill).
+                self._place_ladder_rung(sym, mpair, lev, stop, entry)
             else:
                 self.conn.execute("UPDATE orders SET status='canceled', error=? WHERE id=?",
                                   (f"entry {status}, unfilled", oid))
                 self.conn.commit()
                 log.info("ENTRY %s: %s unfilled — no position", sym, status)
+
+    def _place_ladder_rung(self, symbol, margin_pair, leverage, stop, filled_price):
+        """Continuous laddering (config.LADDER_CONTINUOUS): when a bid fills, drop the
+        NEXT post-only rung one LADDER_STEP_PCT below the fill — min-fill, SAME support
+        stop — so accumulation continues down toward the stop without waiting for a
+        candle close or a restart. Bounded by a NATURAL FLOOR: a rung that would land
+        at/under the stop is not placed. One resting rung per symbol. Fully isolated —
+        never raises into poll_fills, so the fill/stop just secured is never unwound."""
+        try:
+            if not config.LADDER_CONTINUOUS or self.mode != "live":
+                return
+            if os.path.exists(config.HALT_FILE):
+                log.info("LADDER %s: HALT present — no next rung", symbol)
+                return
+            if not filled_price or filled_price <= 0:
+                return
+            if store.has_pending_entry(self.conn, symbol):
+                return                                  # one resting rung per symbol
+            tick = config.MARGIN_TICK_DECIMALS.get(symbol, 2)
+            target = _round_price(filled_price * (1 - config.LADDER_STEP_PCT), tick)
+            if stop and target <= stop * (1 + config.LADDER_STOP_BUFFER):
+                log.info("LADDER %s: next rung @ %s would hit stop %s — ladder floor reached, holding",
+                         symbol, target, stop)
+                return
+            equity = self.portfolio_value()
+            ok, reason = self.rails_ok(equity)          # honor MAX_OPEN / drawdown / loss caps if on
+            if not ok:
+                log.info("LADDER %s: rails block next rung — %s", symbol, reason)
+                return
+            sizing = self.size(symbol, target, stop, leverage, equity)
+            if sizing is None:
+                log.warning("LADDER %s: sizing produced nothing — no rung", symbol)
+                return
+            ceiling = config.EXEC_MAX_ORDER_NOTIONAL_USD
+            if ceiling > 0 and sizing["notional"] > ceiling:
+                log.error("LADDER %s REFUSED: rung notional $%.2f exceeds ceiling $%.2f",
+                          symbol, sizing["notional"], ceiling)
+                return
+            vol = sizing["volume"]
+            params = {"pair": margin_pair, "type": "buy", "ordertype": "limit",
+                      "volume": str(vol), "leverage": str(leverage),
+                      "price": str(target), "oflags": "post"}   # post-only can't fill instantly
+            res = broker.private("/0/private/AddOrder", params, idempotent=False)
+            if not (res and res.get("txid")):
+                log.warning("LADDER %s: next rung AddOrder returned no txid (post-only reject on a "
+                            "gap-down, or transient) — ladder pauses, resumes on next fill/close", symbol)
+                return
+            row = {
+                "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                "symbol": symbol, "margin_pair": margin_pair, "side": "buy",
+                "ordertype": "limit", "mode": self.mode, "entry": target, "stop": stop,
+                "volume": vol, "leverage": leverage, "notional": sizing["notional"],
+                "margin": sizing["margin"], "risk_usd": sizing.get("actual_risk", 0.0),
+                "txid": res["txid"][0], "stop_txid": None, "status": "pending", "error": None,
+            }
+            store.insert_order(self.conn, row)
+            log.info("LADDER %s: next rung resting @ %s (%.6g) — one step below fill %s",
+                     symbol, target, vol, filled_price)
+            self._journal("order", symbol, f"ladder: next rung {vol:g} resting @ {target}")
+        except Exception:
+            log.exception("LADDER %s: place next rung failed (fill/stop unaffected)", symbol)
 
     def verify_open_stops(self):
         """On live restart: reconcile each pair's OPEN ledger rows and their

@@ -211,6 +211,102 @@ def _seed_pending(conn, txid="OENTRY", stop=90.0):
     return cur.lastrowid
 
 
+def _seed_pending_entry(conn, txid, entry, stop=90.0, vol=0.1):
+    """A resting entry WITH a fill/entry price — the ladder steps off this."""
+    cur = conn.execute(
+        "INSERT INTO orders(symbol,margin_pair,volume,leverage,stop,entry,txid,status,mode) "
+        "VALUES(?,?,?,?,?,?,?, 'pending','live')", (SYM, "XBTUSD:BTNL", vol, 10, stop, entry, txid))
+    conn.commit()
+    return cur.lastrowid
+
+
+def _ladder_private(sent):
+    """AddOrder mock: stop-loss -> OSTOP, ladder buy-limit -> ORUNG."""
+    def fp(ep, p=None, **kw):
+        sent.append(p)
+        if p and p.get("ordertype") == "stop-loss":
+            return {"txid": ["OSTOP-1"]}
+        return {"txid": ["ORUNG-1"]}
+    return fp
+
+
+def test_ladder_places_next_rung_on_fill(tmp_path, monkeypatch):
+    """v6: a fill drops the NEXT post-only rung one LADDER_STEP_PCT below the fill,
+    same support stop — accumulation continues without a candle close/restart."""
+    conn = _conn(tmp_path)
+    monkeypatch.setattr(config, "LADDER_CONTINUOUS", True)
+    monkeypatch.setattr(config, "LADDER_STEP_PCT", 0.01)
+    monkeypatch.setattr(ex_mod.broker, "trade_balance", lambda: 1000.0)
+    sent = []
+    monkeypatch.setattr(ex_mod.broker, "private", _ladder_private(sent))
+    monkeypatch.setattr(ex_mod.broker, "query_order", lambda t: {"status": "closed", "vol_exec": "0.1"})
+    e = _exec(conn, mode="live")
+    oid = _seed_pending_entry(conn, "OENTRY-L", entry=100.0, stop=90.0)
+    e.poll_fills()
+    assert conn.execute("SELECT status FROM orders WHERE id=?", (oid,)).fetchone()[0] == "open"
+    rung = conn.execute("SELECT entry, stop, status FROM orders WHERE txid='ORUNG-1'").fetchone()
+    assert rung is not None
+    assert abs(rung[0] - 99.0) < 1e-6           # 100 * (1 - 0.01)
+    assert abs(rung[1] - 90.0) < 1e-6           # SAME support stop
+    assert rung[2] == "pending"
+    assert any(p.get("type") == "buy" and p.get("oflags") == "post" for p in sent)   # post-only
+    conn.close()
+
+
+def test_ladder_holds_at_stop_floor(tmp_path, monkeypatch):
+    """The natural floor: a rung that would land at/under the stop is not placed."""
+    conn = _conn(tmp_path)
+    monkeypatch.setattr(config, "LADDER_CONTINUOUS", True)
+    monkeypatch.setattr(config, "LADDER_STEP_PCT", 0.01)
+    monkeypatch.setattr(ex_mod.broker, "trade_balance", lambda: 1000.0)
+    sent = []
+    monkeypatch.setattr(ex_mod.broker, "private", _ladder_private(sent))
+    monkeypatch.setattr(ex_mod.broker, "query_order", lambda t: {"status": "closed", "vol_exec": "0.1"})
+    e = _exec(conn, mode="live")
+    _seed_pending_entry(conn, "OENTRY-F", entry=90.5, stop=90.0)   # 90.5*0.99=89.6 <= stop
+    e.poll_fills()
+    assert conn.execute("SELECT COUNT(*) FROM orders WHERE status='pending'").fetchone()[0] == 0
+    assert all(p.get("ordertype") == "stop-loss" for p in sent)   # only the stop, no ladder rung
+    conn.close()
+
+
+def test_ladder_disabled_places_nothing(tmp_path, monkeypatch):
+    conn = _conn(tmp_path)
+    monkeypatch.setattr(config, "LADDER_CONTINUOUS", False)
+    monkeypatch.setattr(ex_mod.broker, "trade_balance", lambda: 1000.0)
+    sent = []
+    monkeypatch.setattr(ex_mod.broker, "private", _ladder_private(sent))
+    monkeypatch.setattr(ex_mod.broker, "query_order", lambda t: {"status": "closed", "vol_exec": "0.1"})
+    e = _exec(conn, mode="live")
+    oid = _seed_pending_entry(conn, "OENTRY-D", entry=100.0, stop=90.0)
+    e.poll_fills()
+    assert conn.execute("SELECT status FROM orders WHERE id=?", (oid,)).fetchone()[0] == "open"
+    assert conn.execute("SELECT COUNT(*) FROM orders WHERE status='pending'").fetchone()[0] == 0
+    conn.close()
+
+
+def test_ladder_failure_never_unwinds_fill(tmp_path, monkeypatch):
+    """Isolation: if the ladder rung's AddOrder blows up, the fill still promotes and
+    the protective stop still rests — laddering can never unwind secured protection."""
+    conn = _conn(tmp_path)
+    monkeypatch.setattr(config, "LADDER_CONTINUOUS", True)
+    monkeypatch.setattr(ex_mod.broker, "trade_balance", lambda: 1000.0)
+
+    def fp(ep, p=None, **kw):
+        if p and p.get("ordertype") == "stop-loss":
+            return {"txid": ["OSTOP-1"]}
+        raise RuntimeError("kraken down")     # the ladder buy-limit blows up
+    monkeypatch.setattr(ex_mod.broker, "private", fp)
+    monkeypatch.setattr(ex_mod.broker, "query_order", lambda t: {"status": "closed", "vol_exec": "0.1"})
+    e = _exec(conn, mode="live")
+    oid = _seed_pending_entry(conn, "OENTRY-X", entry=100.0, stop=90.0)
+    e.poll_fills()                            # must not raise
+    status, stop_txid = conn.execute(
+        "SELECT status, stop_txid FROM orders WHERE id=?", (oid,)).fetchone()
+    assert status == "open" and stop_txid == "OSTOP-1"
+    conn.close()
+
+
 def test_live_entry_is_pending_with_no_stop(tmp_path, monkeypatch):
     conn = _conn(tmp_path, ordermin=0.1)
     orders = []
