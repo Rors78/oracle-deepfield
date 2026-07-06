@@ -206,6 +206,12 @@ async def _exec_state_refresh(appstate, conn, ing, interval=15):
                 except Exception:
                     log.exception("realized_pnl_since failed (display value only)")
                     return 0.0
+            # live stop coverage: open rows carrying a resting stop txid (header
+            # safety-reading number — tracks the live book, not the boot recon stamp)
+            scov = conn.execute(
+                "SELECT COUNT(*), COALESCE(SUM(CASE WHEN stop_txid IS NOT NULL "
+                "AND stop_txid<>'' THEN 1 ELSE 0 END),0) FROM orders WHERE status='open'"
+            ).fetchone()
             appstate.exec = {
                 "mode": mode, "equity": equity, "open_count": len(positions),
                 "positions": positions, "pending": pending,
@@ -218,6 +224,7 @@ async def _exec_state_refresh(appstate, conn, ing, interval=15):
                 "realized_week": _realized(wk0),
                 "capacity": _snapshot_capacity(conn, appstate, free_margin),
                 "last_recon": store.meta_get(conn, "last_recon"),
+                "stops_total": scov[0], "stops_covered": scov[1],
             }
             for sym, ps in list(appstate.pairs.items()):
                 card = ps.confirmed

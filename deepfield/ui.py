@@ -70,7 +70,9 @@ def _fmt_price(p):
 def _fmt_usd(v):
     if v is None:
         return "---"
-    return f"+${v:,.2f}" if v >= 0 else f"-${abs(v):,.2f}"
+    if round(v, 2) == 0:            # zero carries no sign (honesty fix)
+        return "$0.00"
+    return f"+${v:,.2f}" if v > 0 else f"-${abs(v):,.2f}"
 
 
 def _fmt_age(secs):
@@ -330,7 +332,15 @@ def render_exec_line(appstate):
             t.append("●", style=HEALTH if up else RISK)
     else:
         t.append("··", style=INK)
-    # recon (boot-time stamp — labeled honestly)
+    # LIVE stop coverage — open rows carrying a resting stop txid, refreshed every
+    # 15s. This is the safety-reading number; a fill landing between reconciles must
+    # not read as a fault, so it tracks the live book, not the boot stamp.
+    stot, scov = ex.get("stops_total"), ex.get("stops_covered")
+    if stot is not None:
+        t.append(" · ", style=INK)
+        t.append(f"stops {scov}/{stot}", style=HEALTH if scov >= stot else f"bold {RISK}")
+    # recon = the DEEPER boot-time invariant check (Kraken volume reconcile), shown
+    # separately as its own stamp so it isn't confused with live coverage.
     t.append(" · recon ", style=INK)
     rec = _parse_recon(ex.get("last_recon"))
     if rec is None:
@@ -340,11 +350,6 @@ def render_exec_line(appstate):
         t.append(_local_hm(rec.get("ts")), style=TIME)
     else:
         t.append("▢ MISMATCH", style=f"bold {RISK}")
-    if rec is not None:
-        rows = sum(p.get("rows", 0) for p in rec.get("per_pair", {}).values())
-        stops = sum(p.get("stops", 0) for p in rec.get("per_pair", {}).values())
-        t.append(" · ", style=INK)
-        t.append(f"{stops}/{rows} stops", style=HEALTH if stops >= rows else RISK)
     mode = ex.get("mode", "off")
     t.append(" · ", style=INK)
     if mode == "off":
@@ -357,13 +362,14 @@ def render_exec_line(appstate):
     if eq is not None:
         t.append(" · equity ", style=INK)
         t.append(f"${eq:,.2f}", style=PRICE)
+    # 'open' = unrealized mark-to-market of live positions (lifetime, not today);
+    # 'day' = realized P&L closed since day0. Two different questions, two labels.
     upnl = _open_pnl(appstate)
     rpnl = ex.get("realized_day", 0.0) or 0.0
-    t.append(" · day ", style=INK)
+    t.append(" · open ", style=INK)
     t.append(_fmt_usd(upnl), style=GAIN if upnl >= 0 else LOSS)
-    t.append("u / ", style=INK)
+    t.append(" · day ", style=INK)
     t.append(_fmt_usd(rpnl), style=GAIN if rpnl >= 0 else LOSS)
-    t.append("r", style=INK)
     t.append(" · ", style=INK)
     t.append(f"{ex.get('open_count', 0)} pos", style=QTY)
     t.append(" · ", style=INK)
@@ -468,6 +474,28 @@ _STRIP_COLS = ((7, "left"), (9, "left"), (10, "right"), (8, "right"),
                (11, "right"), (10, "right"), (10, "left"))
 
 
+def _band_bounds(v):
+    """Band scale follows the tier (resolution follows relevance, on the x-axis).
+    An ACTIVE pair (has fills) zooms to its TRADE ZONE — [stop*0.98 → max(fill,
+    now)*1.05] — so stop/fills/cursor get the full width at real resolution; the
+    year-linear scale crushes them into a few cells and fakes stop-proximity. The
+    52w context is kept as a printed fact (year_note). Watch/idle keep the YEAR
+    scale, because for them 'cursor hugging the yearly low' IS the information.
+    Returns (lo, hi, year_note)."""
+    if v["has_fills"] and v["stop"]:
+        entries = [f["entry"] for f in v["fills"] if f["entry"]]
+        refs = entries + ([v["price"]] if v["price"] else []) + [v["stop"]]
+        lo = v["stop"] * 0.98
+        hi = max(refs) * 1.05
+        if hi <= lo:
+            hi = lo * 1.05
+        card = v["card"]
+        note = (f"+{card.pct_above_low:.0f}% ↑52w low"
+                if (card and card.pct_above_low is not None) else None)
+        return lo, hi, note
+    return v["lo"], v["hi"], None
+
+
 def _field_strip(appstate, sym, tier, v, w, selected, now):
     res = _resolution(tier, v)
     disp = DISPLAY.get(sym, sym)
@@ -476,15 +504,29 @@ def _field_strip(appstate, sym, tier, v, w, selected, now):
     if res == "idle":
         band = _render_band(v["lo"], v["hi"], max(20, w - 22),
                             now_price=v["price"], faint=True)
-        line = Text()
-        line.append(f"  {disp:<5} ", style=FAINT)
+        line = Text(f"  {disp:<5} ", style=FAINT)
         line.append_text(band)
         line.append(f"  {st_label}", style=FAINT)
         if selected:
             line.stylize(SEL_BG)
         return [line]
 
-    # compact fixed-width columns (not full-bleed) — the band is the wide element
+    if res == "watch":
+        # ONE row (spec): sym + score + price + a bare YEAR-scale band (track+cursor)
+        band_w = max(20, w - 44)
+        band = _render_band(v["lo"], v["hi"], band_w, now_price=v["price"])
+        card = v["card"]
+        line = Text(f"  {disp:<5} ", style=TIME)
+        if card:
+            line.append_text(_dots(card.score, card.denom))
+        line.append(f" {_fmt_price(v['price']):>10}  ", style=PRICE)
+        line.append_text(band)
+        line.append(f" {_fmt_price(v['hi']):<9}", style=INK)
+        if selected:
+            line.stylize(SEL_BG)
+        return [line]
+
+    # active: 2 rows (data + trade-zone band)
     data = Table.grid(expand=False, padding=(0, 1, 0, 0))
     for wdt, jst in _STRIP_COLS:
         data.add_column(width=wdt, justify=jst, no_wrap=True)
@@ -506,18 +548,19 @@ def _field_strip(appstate, sym, tier, v, w, selected, now):
     )
     rows = [data]
 
-    band_w = max(20, w - 24)
-    if res == "watch":
-        band = _render_band(v["lo"], v["hi"], band_w, now_price=v["price"])
-    else:
-        band = _render_band(v["lo"], v["hi"], band_w,
-                            fills=[f["entry"] for f in v["fills"]],
-                            pendings=[p["price"] for p in v["pendings"]],
-                            stop=v["stop"], now_price=v["price"], avg_entry=v["avg_entry"])
+    blo, bhi, note = _band_bounds(v)
+    note_w = (len(note) + 2) if note else 0
+    band_w = max(20, w - 24 - note_w)
+    band = _render_band(blo, bhi, band_w,
+                        fills=[f["entry"] for f in v["fills"]],
+                        pendings=[p["price"] for p in v["pendings"]],
+                        stop=v["stop"], now_price=v["price"], avg_entry=v["avg_entry"])
     bline = Text("     ")
-    bline.append(f"{_fmt_price(v['lo']):>9} ", style=INK)
+    bline.append(f"{_fmt_price(blo):>9} ", style=INK)
     bline.append_text(band)
-    bline.append(f" {_fmt_price(v['hi']):<9}", style=INK)
+    bline.append(f" {_fmt_price(bhi):<9}", style=INK)
+    if note:
+        bline.append(f"  {note}", style=INK)
     rows.append(bline)
 
     if selected:
@@ -642,12 +685,12 @@ def render_field(appstate, w, height):
     if appstate.focus_symbol not in [s for s, _, _ in ordered]:
         appstate.focus_symbol = ordered[0][0] if ordered else None
 
-    header = render_header(appstate, w)
-    footer = render_footer(appstate, w)
-    budget = max(6, height - 9)          # minus header(4) + sep(1) + footer(2) + keybar(1) + margin
-
-    body = []
-    used = 0
+    header = render_header(appstate, w)          # 4 rows (title/exec/btc/sep)
+    # Fixed chrome = header(4) + sep(1) + margin(1) + keybar(1) = 7. The rest splits
+    # between strips and a journal tail that ABSORBS whatever the strips don't use —
+    # dead space becomes live narrative (15 lines quiet, shrinks to 1 on a busy field).
+    avail = max(4, height - 7)
+    body, used = [], 0
     for sym, tier, v in ordered:
         selected = (sym == appstate.focus_symbol)
         strip = _field_strip(appstate, sym, tier, v, w, selected, now)
@@ -656,16 +699,18 @@ def render_field(appstate, w, height):
         if sym == appstate.expanded_symbol:
             exp_block = _expansion(appstate, sym, v, w)
             cost += _expansion_rows(appstate, v)
-        if used + cost > budget and body:
+        if used + cost > avail - 1 and body:     # always leave >=1 row for the journal
             break
         body.extend(strip)
         if exp_block is not None:
             body.append(exp_block)
         used += cost
-    return Group(header, Group(*body), _sep(w), footer)
+    jlines = max(1, avail - used)
+    return Group(header, Group(*body), _sep(w), _margin_line(appstate, w),
+                 _journal_tail_block(appstate, jlines), _keybar())
 
 
-def render_footer(appstate, w):
+def _margin_line(appstate, w):
     ex = appstate.exec
     used = ex.get("margin_used")
     free = ex.get("free_margin")
@@ -693,17 +738,23 @@ def render_footer(appstate, w):
         m.append("    capacity ≈ ", style=INK)
         m.append(f"{cap}", style=QTY)
         m.append(" min-fills", style=INK)
+    return m
 
-    latest = Text("latest ", style=INK)
-    tail = ex.get("journal_tail", [])[:3]
+
+def _journal_tail_block(appstate, n):
+    """The last n journal events, newest first — the 'latest' line grown into a
+    live narrative that fills whatever height the strips leave (Fix 3)."""
+    tail = appstate.exec.get("journal_tail", [])
     if not tail:
-        latest.append("— (quiet)", style=INK)
-    for ts, kind, symbol, text in tail:
-        latest.append(" · ", style=INK)
-        latest.append(_local_hm(ts) + " ", style=TIME)
-        latest.append((kind or "") + " ", style=KIND_TAG_STYLE.get(kind, INK))
-        latest.append(f"{symbol or ''} {text or ''}"[:40], style=FAINT)
-    return Group(m, latest, _keybar())
+        return Text("latest — (quiet)", style=INK)
+    lines = []
+    for ts, kind, symbol, text in tail[:max(1, n)]:
+        row = Text(_local_hm(ts) + " ", style=TIME)
+        row.append(f"{(kind or ''):<7}", style=KIND_TAG_STYLE.get(kind, INK))
+        row.append(f"{symbol + ' ' if symbol else ''}", style=PRICE)
+        row.append(text or "", style=FAINT)
+        lines.append(row)
+    return Group(*lines)
 
 
 def _keybar():

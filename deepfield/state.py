@@ -70,6 +70,7 @@ class AppState:
         "pending": [], "by_pair": {}, "journal_tail": [],
         "realized_day": 0.0, "realized_week": 0.0, "capacity": None,
         "last_recon": None, "free_margin": None, "margin_used": None,
+        "stops_total": None, "stops_covered": None,
     })
 
     def pair(self, symbol):

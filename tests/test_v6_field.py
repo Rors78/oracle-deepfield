@@ -81,6 +81,54 @@ def test_field_height_law_all_active_plus_expanded():
     assert "1 field · 2 book" in txt                   # keybar present (not clipped off)
 
 
+# ── Fix 1: band scale by tier ────────────────────────────────────────────────
+
+def test_band_bounds_trade_zone_for_active_year_for_watch():
+    active = {"has_fills": True, "stop": 100.0, "price": 110.0,
+              "fills": [{"entry": 108.0}, {"entry": 112.0}],
+              "card": type("C", (), {"pct_above_low": 11.0})(), "lo": 40.0, "hi": 200.0}
+    lo, hi, note = ui._band_bounds(active)
+    assert abs(lo - 98.0) < 1e-9                 # stop * 0.98
+    assert abs(hi - 112.0 * 1.05) < 1e-9         # max(fill, now) * 1.05
+    assert note and "52w low" in note            # year context kept as a printed fact
+    watch = {"has_fills": False, "stop": None, "price": 50.0, "fills": [],
+             "card": None, "lo": 40.0, "hi": 200.0}
+    assert ui._band_bounds(watch) == (40.0, 200.0, None)   # year scale, no zoom
+
+
+# ── Fix 3: watch is one row ───────────────────────────────────────────────────
+
+def test_watch_pair_renders_one_row():
+    st = AppState()
+    now = time.time()
+    ps = st.pair("ADA/USD")
+    ps.confirmed = Card(status="WATCH", score=3)
+    ps.last_tick = _tick(0.19); ps.last_tick_ts = now
+    for sym, tier, v in ui._attention_sorted(st, now):
+        if sym == "ADA/USD":
+            strip = ui._field_strip(st, sym, tier, v, 200, False, now)
+            assert len(strip) == 1               # watch = ONE row (bare band)
+            return
+    raise AssertionError("ADA/USD not in sort")
+
+
+# ── Fix 2 + Fix 4: header live coverage / recon-separate / P&L labels ─────────
+
+def test_header_live_coverage_and_pnl_labels():
+    st = AppState()
+    st.exec = dict(st.exec)
+    st.exec.update({"mode": "live", "equity": 100.0, "positions": [], "pending": [],
+                    "stops_total": 17, "stops_covered": 17, "realized_day": 0.0,
+                    "last_recon": json.dumps({"ts": "2026-07-06T06:12:00+00:00",
+                                              "per_pair": {}, "all_ok": True})})
+    line = ui.render_exec_line(st).plain
+    assert "stops 17/17" in line and "recon ok" in line      # live coverage + separate stamp
+    assert "open $0.00" in line and "day $0.00" in line       # labeled, and
+    assert "+$0.00" not in line                               # zero carries no sign
+    st.exec["stops_covered"] = 15
+    assert "stops 15/17" in ui.render_exec_line(st).plain     # tracks the live book
+
+
 # ── #2 band math + proximity promotes to the fault tier ──────────────────────
 
 def test_band_edges_and_proximity_top_tier():
