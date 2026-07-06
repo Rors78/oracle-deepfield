@@ -789,6 +789,42 @@ def render_journal(appstate, w, height):
     return Group(*lines)
 
 
+# ── navigation (pure AppState mutators — the KeyController handlers call these) ─
+
+def nav_view(appstate, n):
+    """1/2/3 — switch view, keep focus, collapse expansion (§4)."""
+    appstate.view = n
+    appstate.expanded_symbol = None
+    appstate.ledger_scroll = 0
+
+
+def nav_select(appstate, delta):
+    """j/k/↑/↓ — move focus through the attention-sorted order, clamped."""
+    order = [s for s, _, _ in _attention_sorted(appstate, time.time())]
+    if not order:
+        return
+    cur = appstate.focus_symbol
+    idx = order.index(cur) if cur in order else 0
+    appstate.focus_symbol = order[max(0, min(len(order) - 1, idx + delta))]
+
+
+def nav_expand(appstate):
+    """enter/space — toggle the ONE expanded pair (the focused one)."""
+    appstate.expanded_symbol = (None if appstate.expanded_symbol == appstate.focus_symbol
+                                else appstate.focus_symbol)
+    appstate.ledger_scroll = 0
+
+
+def nav_scroll(appstate, delta):
+    """,/. — scroll the active scrollable for the current view."""
+    if appstate.view == 2:
+        appstate.book_scroll = max(0, appstate.book_scroll + delta)
+    elif appstate.view == 3:
+        appstate.journal_scroll = max(0, appstate.journal_scroll + delta)
+    else:
+        appstate.ledger_scroll = max(0, appstate.ledger_scroll + delta)
+
+
 # ── frame dispatch + Live loop ───────────────────────────────────────────────
 
 def render_frame(appstate, conn=None, total_width=120, height=54, show_keys=False):
@@ -816,6 +852,7 @@ def export_frame_text(appstate, conn=None, width=120, height=54, styles=False):
 async def run_ui(appstate, conn=None, hz=None, show_keys=False):
     hz = hz or config.RENDER_HZ
     console = Console()
+    key_evt = getattr(appstate, "_key_evt", None)   # set by run_live for instant redraw
     with Live(console=console, screen=True, auto_refresh=False) as live:
         while True:
             if appstate.paused:
@@ -827,4 +864,13 @@ async def run_ui(appstate, conn=None, hz=None, show_keys=False):
                 continue
             live.update(render_frame(appstate, conn, console.width, console.height, show_keys),
                         refresh=True)
-            await asyncio.sleep(1.0 / hz)
+            # Wake immediately on a keypress (view/select/expand/scroll), else tick
+            # at the render cap so clocks/countdowns/prices still advance.
+            if key_evt is not None:
+                try:
+                    await asyncio.wait_for(key_evt.wait(), timeout=1.0 / hz)
+                except asyncio.TimeoutError:
+                    pass
+                key_evt.clear()
+            else:
+                await asyncio.sleep(1.0 / hz)

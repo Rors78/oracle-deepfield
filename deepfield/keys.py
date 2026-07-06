@@ -1,6 +1,11 @@
-"""Keyboard controls — termios cbreak reader on the asyncio loop. SPEC §8.
+"""Keyboard controls — termios cbreak reader on the asyncio loop. SPEC §8 + v6.
 
-q quit · p pause render · f force reconcile · a test alert.
+q quit · p pause · f reconcile · a test-alert · 1/2/3 views · j/k (↑/↓) select ·
+enter/space expand · ,/. scroll. Handlers mutate AppState only.
+
+Keys are matched EXACTLY first (so a multi-byte escape sequence like ↑ = \\x1b[A
+routes as one key), then per-byte (so a burst/paste still dispatches each key).
+A bare ESC or an unrecognized sequence dispatches nothing harmful.
 
 Only activates when stdin is a real TTY (never in --once/cron/tests). The
 terminal is restored in stop() no matter how the app exits — a cbreak terminal
@@ -31,21 +36,34 @@ class KeyController:
         self._saved = termios.tcgetattr(self._fd)
         tty.setcbreak(self._fd)
         self.loop.add_reader(self._fd, self._on_readable)
-        log.info("key controls active: %s", b"".join(sorted(self.handlers)).decode())
+        printable = "".join(sorted(k.decode("latin-1") for k in self.handlers
+                                   if len(k) == 1 and 32 <= k[0] < 127))
+        log.info("key controls active: %s (+arrows)", printable)
         return True
 
     def _on_readable(self):
+        # Read the whole chunk so an escape sequence (arrows) arrives intact in
+        # one syscall rather than as three unmatchable single bytes.
         try:
-            ch = os.read(self._fd, 1)
+            data = os.read(self._fd, 16)
         except OSError:
             return
-        handler = self.handlers.get(ch)
-        if handler is None:
+        if not data:
             return
+        exact = self.handlers.get(data)
+        if exact is not None:
+            self._dispatch(data, exact)
+            return
+        for b in data:                       # per-byte fallback (bursts / pastes)
+            handler = self.handlers.get(bytes([b]))
+            if handler is not None:
+                self._dispatch(bytes([b]), handler)
+
+    def _dispatch(self, key, handler):
         try:
             handler()
         except Exception:
-            log.exception("key handler %r failed", ch)
+            log.exception("key handler %r failed", key)
 
     def stop(self):
         if self._fd is None:

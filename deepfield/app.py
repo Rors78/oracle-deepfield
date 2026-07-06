@@ -6,6 +6,7 @@ import asyncio
 import logging
 import datetime
 import statistics
+import time
 
 from . import config
 from . import store
@@ -313,8 +314,33 @@ async def run_live(simple=False, debug=False):
                 c.close()
         asyncio.ensure_future(asyncio.to_thread(_fire))
 
+    # ── v6 SURVEY view controls — mutate AppState only, then wake the renderer ──
+    appstate._key_evt = asyncio.Event()   # run_ui waits on this for instant redraw
+
+    def _wake():
+        appstate.pause_dirty = True        # so a keypress redraws even while paused
+        appstate._key_evt.set()
+
+    def on_view(n):
+        return lambda: (ui.nav_view(appstate, n), _wake())
+
+    def on_select(delta):
+        return lambda: (ui.nav_select(appstate, delta), _wake())
+
+    def on_expand():
+        ui.nav_expand(appstate)
+        _wake()
+
+    def on_scroll(delta):
+        return lambda: (ui.nav_scroll(appstate, delta), _wake())
+
     keys = KeyController(asyncio.get_running_loop(), {
         b"q": on_quit, b"p": on_pause, b"f": on_force_reconcile, b"a": on_test_alert,
+        b"1": on_view(1), b"2": on_view(2), b"3": on_view(3),
+        b"j": on_select(1), b"k": on_select(-1),
+        b"\x1b[B": on_select(1), b"\x1b[A": on_select(-1),   # ↓ / ↑
+        b"\r": on_expand, b"\n": on_expand, b" ": on_expand,
+        b",": on_scroll(-1), b".": on_scroll(1),
     })
     keys_active = keys.start() if not simple else False
 
