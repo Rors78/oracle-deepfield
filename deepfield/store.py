@@ -37,9 +37,21 @@ CREATE TABLE IF NOT EXISTS orders(
     side TEXT, ordertype TEXT, mode TEXT,        -- off | paper | live | validate
     entry REAL, stop REAL, volume REAL, leverage INTEGER,
     notional REAL, margin REAL, risk_usd REAL,
+    score INTEGER, required INTEGER,             -- entry conviction (rides down the ladder chain)
     txid TEXT, stop_txid TEXT, status TEXT, error TEXT
 );
 """
+
+
+def _ensure_columns(conn, table, coldefs):
+    """Idempotent additive migration (SQLite has no ADD COLUMN IF NOT EXISTS):
+    ALTER-add any column in coldefs the live table is missing, leaving existing
+    rows NULL for it. coldefs: [(name, decl), ...]. New/additive only — never
+    drops or retypes, so it's safe to run on every connect."""
+    have = {r[1] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+    for name, decl in coldefs:
+        if name not in have:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
 
 
 def connect(db_path):
@@ -55,6 +67,9 @@ def connect(db_path):
     conn.execute("PRAGMA synchronous=NORMAL")
     conn.execute("PRAGMA busy_timeout=5000")
     conn.executescript(SCHEMA)
+    # Additive migration for DBs created before the orders conviction columns
+    # (existing rows -> NULL score/required -> ladder falls back to flat min).
+    _ensure_columns(conn, "orders", [("score", "INTEGER"), ("required", "INTEGER")])
     conn.commit()
     return conn
 
@@ -156,8 +171,8 @@ def insert_alert(conn, ts_iso, symbol, price, score, denom, signals, kind):
 def insert_order(conn, row):
     """row: dict of the orders columns. Returns the new order id."""
     cols = ["ts", "symbol", "margin_pair", "side", "ordertype", "mode", "entry", "stop",
-            "volume", "leverage", "notional", "margin", "risk_usd", "txid", "stop_txid",
-            "status", "error"]
+            "volume", "leverage", "notional", "margin", "risk_usd", "score", "required",
+            "txid", "stop_txid", "status", "error"]
     cur = conn.execute(
         f"INSERT INTO orders({','.join(cols)}) VALUES({','.join('?' * len(cols))})",
         [row.get(c) for c in cols],
