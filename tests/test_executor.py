@@ -54,6 +54,36 @@ def test_size_min_mode_is_minimum_order(tmp_path):
     conn.close()
 
 
+def test_size_conviction_weighted_min(tmp_path):
+    """Tier 1: with a card, the min-mode order is CONVICTION-WEIGHTED by
+    score-over-required (delta 0 -> 1.0x STARTER, +1 -> 1.5x, +2 -> 2.0x) —
+    reusing the same engine.tranche the champion card shows, so the live fill
+    matches the displayed qty. A 7/7 sizes exactly 2x a bare-threshold 5/7."""
+    from deepfield import engine
+    conn = _conn(tmp_path, ordermin=0.1, costmin=0.5, lot_dec=8)
+    e = _exec(conn)   # min mode
+    starter = Card(); starter.score, starter.required = 5, 5   # delta 0 -> 1.0x
+    mid = Card(); mid.score, mid.required = 6, 5               # delta 1 -> 1.5x
+    strong = Card(); strong.score, strong.required = 7, 5      # delta 2 -> 2.0x
+    kw = dict(entry=100.0, stop=90.0, leverage=10, equity=1000.0)
+    s0 = e.size(SYM, card=starter, **kw)
+    s1 = e.size(SYM, card=mid, **kw)
+    s2 = e.size(SYM, card=strong, **kw)
+    assert (s0["conviction_mult"], s1["conviction_mult"], s2["conviction_mult"]) == (1.0, 1.5, 2.0)
+    # the wiring contract: live size == the EXACT engine.tranche qty the card displays.
+    for card, s in ((starter, s0), (mid, s1), (strong, s2)):
+        qty, _ = engine.tranche(card.score, card.required, 0.1, 0.5, 8, 100.0)
+        assert s["volume"] == qty
+    assert s0["volume"] < s1["volume"] < s2["volume"]         # scales up with conviction
+    assert s2["volume"] == 2.0 * s0["volume"]                 # 7/7 = exactly 2x the STARTER
+    # conviction only scales UP: the STARTER equals the flat card-less min, and a
+    # scaled rung reports it's no longer floored to the exchange minimum.
+    flat = e.size(SYM, **kw)
+    assert s0["volume"] == flat["volume"] and s0["floored_to_min"] is True
+    assert s2["floored_to_min"] is False
+    conn.close()
+
+
 def test_size_risk_2pct_off_the_stop(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "EXEC_SIZE_MODE", "risk")
     conn = _conn(tmp_path)

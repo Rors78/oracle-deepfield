@@ -30,6 +30,7 @@ import datetime
 from . import store
 from . import broker
 from . import config
+from . import engine
 
 log = logging.getLogger("deepfield.exec")
 
@@ -156,10 +157,14 @@ class Executor:
         f = 10 ** lot_dec
         return math.ceil(need * f) / f
 
-    def size(self, symbol, entry, stop, leverage, equity):
+    def size(self, symbol, entry, stop, leverage, equity, card=None):
         """Returns a sizing dict or None.
         EXEC_SIZE_MODE='min' (default): buy the minimum order — tiny, no liquidation
-        worry. 'risk': volume = risk_usd/(entry-stop), margin-capped, min-floored."""
+        worry. With a `card`, the min order is CONVICTION-WEIGHTED (Tier 1): the same
+        engine.tranche the champion card displays scales the min-fill by score-over-
+        required (delta 0 -> 1.0x STARTER, +1 -> 1.5x, +2 -> 2.0x), so the live fill
+        matches the shown tranche. No card -> flat 1.0x min (ladder/plan preview).
+        'risk': volume = risk_usd/(entry-stop), margin-capped, min-floored."""
         info = store.get_pair_info(self.conn, symbol) or {}
         lot_dec = info.get("lot_decimals")
         ordermin = info.get("ordermin") or 0.0
@@ -170,13 +175,26 @@ class Executor:
 
         if config.EXEC_SIZE_MODE == "min":
             volume = self._min_volume(ordermin, costmin, entry, lot_dec)
+            mult = 1.0
+            if card is not None:
+                # Conviction weighting: reuse the exact engine.tranche the display
+                # uses so the fill == the shown qty. Guarded — conviction is a bonus
+                # ON TOP of the min-fill floor, never a reason an order fails to size.
+                try:
+                    cvol, cmult = engine.tranche(card.score, card.required,
+                                                 ordermin, costmin, lot_dec, entry)
+                    if cvol > 0:
+                        volume, mult = cvol, cmult
+                except Exception:
+                    log.warning("size %s: conviction tranche failed — flat min", symbol)
             if volume <= 0:
                 return None
             notional = volume * entry
             return {
                 "volume": volume, "notional": notional, "margin": notional / leverage,
                 "risk_usd": 0.0, "actual_risk": volume * max(0.0, stop_dist),
-                "capped": False, "floored_to_min": True, "size_mode": "min",
+                "capped": False, "floored_to_min": mult == 1.0, "size_mode": "min",
+                "conviction_mult": mult,
             }
 
         # "risk" mode
@@ -219,7 +237,7 @@ class Executor:
         if not leverage:
             return None
         stop = self.compute_stop(symbol, entry, card)
-        s = self.size(symbol, entry, stop, leverage, equity)
+        s = self.size(symbol, entry, stop, leverage, equity, card=card)
         if not s:
             return None
         return {"leverage": leverage, "stop": stop, "entry": entry, **s}
@@ -249,7 +267,7 @@ class Executor:
             log.error("no leverage for %s", symbol)
             return None
         stop = self.compute_stop(symbol, entry_price, card)
-        sizing = self.size(symbol, entry_price, stop, leverage, equity)
+        sizing = self.size(symbol, entry_price, stop, leverage, equity, card=card)
         if sizing is None:
             log.warning("EXEC %s: sizing produced nothing (equity=%s)", symbol, equity)
             return None
@@ -274,10 +292,13 @@ class Executor:
             px = _round_price(entry_price, tick)
         stop_px = _round_price(stop, tick)
         vol = sizing["volume"]
+        cmult = sizing.get("conviction_mult", 1.0)
+        tag = (f" ({cmult:g}x conviction)" if cmult > 1.0
+               else " (FLOORED-min)" if sizing["floored_to_min"]
+               else " (CAPPED)" if sizing["capped"] else "")
         log.info("EXEC %s [%s] %.6g @ %s x%d lev · stop %s · notional $%.2f margin $%.2f risk $%.2f%s",
                  symbol, self.mode, vol, px, leverage, stop_px, sizing["notional"],
-                 sizing["margin"], sizing["actual_risk"],
-                 " (FLOORED-min)" if sizing["floored_to_min"] else (" (CAPPED)" if sizing["capped"] else ""))
+                 sizing["margin"], sizing["actual_risk"], tag)
 
         params = {"pair": margin_pair, "type": "buy", "ordertype": config.ENTRY_ORDERTYPE,
                   "volume": str(vol), "leverage": str(leverage)}
@@ -320,7 +341,8 @@ class Executor:
             row["txid"] = res["txid"][0]
             row["status"] = "pending"
             log.info("ENTRY %s: limit resting @ %s (pending fill) %s", symbol, px, row["txid"])
-            self._journal("order", symbol, f"{row['volume']:g} entry limit resting @ {px} (pending)")
+            conv = f" · {cmult:g}x conviction" if cmult > 1.0 else ""
+            self._journal("order", symbol, f"{row['volume']:g} entry limit resting @ {px} (pending){conv}")
             return store.insert_order(self.conn, row)
         row["status"] = "rejected"
         row["error"] = "no txid from AddOrder"
