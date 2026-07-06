@@ -96,6 +96,43 @@ def test_band_bounds_trade_zone_for_active_year_for_watch():
     assert ui._band_bounds(watch) == (40.0, 200.0, None)   # year scale, no zoom
 
 
+# ── Fix A: the band labels the TRUE stop, not the scale anchor ───────────────
+
+def test_active_band_labels_true_stop_not_anchor():
+    st = AppState()
+    st.exec = dict(st.exec); st.exec["by_pair"] = {}
+    ps = st.pair("LTC/USD")
+    ps.confirmed = Card(status="BUY", lo=41.14, hi=130.0)
+    ps.last_tick = _tick(44.8); ps.last_tick_ts = time.time()
+    st.exec["by_pair"]["LTC/USD"] = {
+        "fills": [{"id": 1, "ts": "x", "vol": 0.1, "lev": 10, "entry": 45.0, "stop": 41.14}],
+        "pendings": [], "vol_sum": 0.1, "avg_entry": 45.0, "upnl": None, "stop": 41.14}
+    txt = ui.export_frame_text(st, width=229, height=54)
+    assert "stop $41.14" in txt                        # TRUE stop is labeled
+    assert ui._fmt_price(41.14 * 0.98) not in txt      # the scale anchor ($40.32) is NOT printed
+
+
+# ── Fix B: stale data feeding a live position sorts to the fault tier ─────────
+
+def test_stale_position_sorts_to_fault_tier():
+    st = AppState()
+    st.exec = dict(st.exec); st.exec["by_pair"] = {}
+    old = time.time() - 10_000
+    _seed(st, "SUI/USD", 3, status="BUY")              # fresh BUY -> tier 1
+    ps = st.pair("LTC/USD")
+    ps.confirmed = Card(status="BUY")
+    ps.last_tick = _tick(45.0); ps.last_tick_ts = old  # STALE, and has a position
+    st.exec["by_pair"]["LTC/USD"] = _by_pair(_fills(3))
+    ordered = ui._attention_sorted(st, time.time())
+    assert ordered[0][0] == "LTC/USD" and ordered[0][1] == 0   # stale+position outranks fresh BUY
+    # a STALE pair WITHOUT a position is not promoted — old data only matters with money on it
+    ps2 = st.pair("ADA/USD")
+    ps2.confirmed = Card(status="WATCH", score=3)
+    ps2.last_tick = _tick(0.19); ps2.last_tick_ts = old
+    tiers = {s: t for s, t, _ in ui._attention_sorted(st, time.time())}
+    assert tiers["ADA/USD"] != 0
+
+
 # ── Fix 3: watch is one row ───────────────────────────────────────────────────
 
 def test_watch_pair_renders_one_row():
@@ -159,7 +196,8 @@ def test_all_idle_one_row_each():
         disp = ui.DISPLAY.get(sym, sym)
         hits = [ln for ln in lines if ln.strip().startswith(disp)]
         assert len(hits) == 1, f"{disp} should render exactly one idle row"
-    assert _height(txt) <= 25                        # ~19: compact, no overflow
+    assert "1 field · 2 book" in txt                 # keybar pinned to the fixed floor
+    assert _height(txt) <= 54                          # fills to the floor, no overflow
 
 
 # ── #4 renders at both sizes, all three views, no crash ──────────────────────

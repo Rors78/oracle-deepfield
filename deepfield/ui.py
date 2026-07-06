@@ -257,10 +257,14 @@ def _pair_view(appstate, sym, now):
 
 
 def _tier(v):
-    """Attention tier (§ FIELD sort): 0 proximity fault · 1 BUY · 2 position
-    w/o BUY · 3 watch · 4 idle."""
+    """Attention tier (§ FIELD sort): 0 fault (proximity, OR stale data feeding a
+    live position) · 1 BUY · 2 position w/o BUY · 3 watch · 4 idle. Stale WITHOUT a
+    position stays where its score puts it — old data only matters when money rides
+    on it."""
     card = v["card"]
     if v["prox"]:
+        return 0
+    if v["stale"] and v["has_fills"]:
         return 0
     if v["is_buy"]:
         return 1
@@ -513,15 +517,18 @@ def _field_strip(appstate, sym, tier, v, w, selected, now):
 
     if res == "watch":
         # ONE row (spec): sym + score + price + a bare YEAR-scale band (track+cursor)
-        band_w = max(20, w - 44)
-        band = _render_band(v["lo"], v["hi"], band_w, now_price=v["price"])
         card = v["card"]
+        pct = f" +{card.pct_above_low:.0f}%↑low" if (card and card.pct_above_low is not None) else ""
+        band_w = max(20, w - 46 - len(pct))
+        band = _render_band(v["lo"], v["hi"], band_w, now_price=v["price"])
         line = Text(f"  {disp:<5} ", style=TIME)
         if card:
             line.append_text(_dots(card.score, card.denom))
         line.append(f" {_fmt_price(v['price']):>10}  ", style=PRICE)
         line.append_text(band)
         line.append(f" {_fmt_price(v['hi']):<9}", style=INK)
+        if pct:
+            line.append(pct, style=INK)          # restore the thesis number in 1-row form
         if selected:
             line.stylize(SEL_BG)
         return [line]
@@ -549,18 +556,27 @@ def _field_strip(appstate, sym, tier, v, w, selected, now):
     rows = [data]
 
     blo, bhi, note = _band_bounds(v)
-    note_w = (len(note) + 2) if note else 0
-    band_w = max(20, w - 24 - note_w)
+    stop, price = v["stop"], v["price"]
+    # Label the TRUE stop (safety-relevant), NOT the scale anchor (stop*0.98) — the
+    # anchor is plumbing and has no business wearing a price. Right side carries the
+    # distance-to-stop and the 52w-low fact.
+    lbl = Text("stop ", style=INK)
+    lbl.append(_fmt_price(stop) if stop else "—", style=RISK if stop else INK)
+    rt = Text()
+    if stop and price:
+        rt.append(f"  {(stop / price - 1) * 100:+.1f}% stop", style=INK)
+    if note:
+        rt.append(f" · {note}", style=INK)
+    band_w = max(20, w - 6 - len(lbl.plain) - len(rt.plain))
     band = _render_band(blo, bhi, band_w,
                         fills=[f["entry"] for f in v["fills"]],
                         pendings=[p["price"] for p in v["pendings"]],
-                        stop=v["stop"], now_price=v["price"], avg_entry=v["avg_entry"])
+                        stop=stop, now_price=price, avg_entry=v["avg_entry"])
     bline = Text("     ")
-    bline.append(f"{_fmt_price(blo):>9} ", style=INK)
+    bline.append_text(lbl)
+    bline.append(" ")
     bline.append_text(band)
-    bline.append(f" {_fmt_price(bhi):<9}", style=INK)
-    if note:
-        bline.append(f"  {note}", style=INK)
+    bline.append_text(rt)
     rows.append(bline)
 
     if selected:
@@ -743,17 +759,21 @@ def _margin_line(appstate, w):
 
 def _journal_tail_block(appstate, n):
     """The last n journal events, newest first — the 'latest' line grown into a
-    live narrative that fills whatever height the strips leave (Fix 3)."""
+    live narrative that fills whatever height the strips leave (Fix 3). Padded to
+    EXACTLY n rows so the keybar pins to a fixed floor while history is short."""
+    n = max(1, n)
     tail = appstate.exec.get("journal_tail", [])
-    if not tail:
-        return Text("latest — (quiet)", style=INK)
     lines = []
-    for ts, kind, symbol, text in tail[:max(1, n)]:
-        row = Text(_local_hm(ts) + " ", style=TIME)
+    if not tail:
+        lines.append(Text("latest — (quiet)", style=INK))
+    for ts, kind, symbol, text in tail[:n]:
+        row = Text(_local_hms(ts) + " ", style=TIME)   # HH:MM:SS — ordering is fact, not faith
         row.append(f"{(kind or ''):<7}", style=KIND_TAG_STYLE.get(kind, INK))
         row.append(f"{symbol + ' ' if symbol else ''}", style=PRICE)
         row.append(text or "", style=FAINT)
         lines.append(row)
+    while len(lines) < n:                               # pad so the floor is fixed
+        lines.append(Text(""))
     return Group(*lines)
 
 
