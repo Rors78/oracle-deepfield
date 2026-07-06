@@ -6,6 +6,7 @@ test can place a real order — paper and off are the only self-contained modes.
 import os
 import time
 import json
+import sqlite3
 import datetime
 
 import pytest
@@ -221,6 +222,34 @@ def test_poll_fills_promotes_filled_and_rests_stop(tmp_path, monkeypatch):
     assert stop_txid == "OSTOP-1"       # protective stop rested only now
     assert abs(vol - 0.1) < 1e-9
     assert any(p.get("type") == "sell" and p.get("ordertype") == "stop-loss" for p in seq)
+    conn.close()
+
+
+def test_journal_failure_never_blocks_fill(tmp_path, monkeypatch):
+    """v6 acceptance #5: the JOURNAL is display-truth, not the money path. A
+    store.journal that raises inside poll_fills must NOT stop the fill from
+    promoting or the protective stop from resting — same isolation rule as the
+    alerter/dispatch fix. Proven by making journal blow up on every call."""
+    conn = _conn(tmp_path)
+    seq = []
+    monkeypatch.setattr(ex_mod.broker, "private",
+                        lambda ep, p=None, **kw: (seq.append(p) or {"txid": ["OSTOP-9"]}))
+    monkeypatch.setattr(ex_mod.broker, "query_order",
+                        lambda txid: {"status": "closed", "vol_exec": "0.1"})
+
+    def _boom(*a, **k):
+        raise sqlite3.OperationalError("database is locked")   # journal write fails hard
+    monkeypatch.setattr(ex_mod.store, "journal", _boom)
+
+    e = _exec(conn, mode="live")
+    oid = _seed_pending(conn, "OENTRY-J")
+    e.poll_fills()                        # must not raise despite journal blowing up
+    status, stop_txid, vol = conn.execute(
+        "SELECT status,stop_txid,volume FROM orders WHERE id=?", (oid,)).fetchone()
+    assert status == "open"               # fill still promoted
+    assert stop_txid == "OSTOP-9"         # protective stop still rested
+    assert abs(vol - 0.1) < 1e-9
+    assert any(p.get("ordertype") == "stop-loss" for p in seq)
     conn.close()
 
 

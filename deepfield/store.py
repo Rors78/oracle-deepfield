@@ -9,6 +9,7 @@ Close predicate (M1 sharpening): a bar is closed iff now >= ts + interval*60.
 """
 import sqlite3
 import time
+import datetime
 
 # §9 schema + Q2 ruling: pairs gains lot_decimals (AssetPairs). ts = bar OPEN.
 SCHEMA = """
@@ -28,6 +29,9 @@ CREATE TABLE IF NOT EXISTS alerts(
     kind TEXT                                       -- confirmed | provisional | test
 );
 CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT);
+CREATE TABLE IF NOT EXISTS journal(
+    id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, kind TEXT, symbol TEXT, text TEXT
+);
 CREATE TABLE IF NOT EXISTS orders(
     id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, symbol TEXT, margin_pair TEXT,
     side TEXT, ordertype TEXT, mode TEXT,        -- off | paper | live | validate
@@ -223,6 +227,28 @@ def recent_alerts(conn, n=5):
     return conn.execute(
         "SELECT ts, symbol, price, score, denom, signals, kind FROM alerts ORDER BY id DESC LIMIT ?",
         (n,),
+    ).fetchall()
+
+
+def journal(conn, kind, symbol, text):
+    """Append one display-truth event to the journal (v6 SURVEY, JOURNAL view).
+
+    DISPLAY-ONLY: the alerts table stays cooldown ground truth; this narrates the
+    system for the operator's eyes. This raw writer commits and MAY raise (locked
+    DB, disk). Every emit site in the money path MUST call it through a try/except
+    wrapper (executor._journal / ingest._journal) so a journal failure can NEVER
+    delay or drop a fill, stop, or order — the same isolation rule as the
+    dispatch/alerter fix. Regression: test_journal_failure_never_blocks_fill."""
+    ts = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    conn.execute("INSERT INTO journal(ts, kind, symbol, text) VALUES(?,?,?,?)",
+                 (ts, kind, symbol, text))
+    conn.commit()
+
+
+def recent_journal(conn, n=200):
+    """Last n journal rows, newest first — the UI JOURNAL view + FIELD 'latest'."""
+    return conn.execute(
+        "SELECT ts, kind, symbol, text FROM journal ORDER BY id DESC LIMIT ?", (n,),
     ).fetchall()
 
 

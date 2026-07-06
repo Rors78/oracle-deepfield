@@ -64,6 +64,16 @@ class Executor:
         self.conn = conn
         self.mode = config.EXEC_MODE
 
+    def _journal(self, kind, symbol, text):
+        """Isolated journal emit (v6 JOURNAL view). DISPLAY-ONLY narration — a
+        failure here must NEVER delay or drop a fill/stop/order, so every emit
+        goes through this try/except (same rule as the alerter dispatch fix).
+        Never raises into the money path."""
+        try:
+            store.journal(self.conn, kind, symbol, text)
+        except Exception:
+            log.exception("journal emit failed (%s %s) — trade path unaffected", kind, symbol)
+
     # ── portfolio + rails ────────────────────────────────────────────────────
 
     def portfolio_value(self):
@@ -373,6 +383,7 @@ class Executor:
                 self.conn.execute("UPDATE orders SET status='open', volume=? WHERE id=?", (vol_exec, oid))
                 self.conn.commit()
                 log.info("FILL %s: %.6g filled — position open, resting stop", sym, vol_exec)
+                self._journal("fill", sym, f"{vol_exec:.6g} filled @ {lev}x — position open")
                 self._rest_stop(sym, mpair, stop, vol_exec, lev, oid, paper=False)
             else:
                 self.conn.execute("UPDATE orders SET status='canceled', error=? WHERE id=?",
