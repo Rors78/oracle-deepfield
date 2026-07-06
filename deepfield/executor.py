@@ -24,12 +24,14 @@ genuinely warrant scrutiny (sizing/rounding, the pending->open->stopped machine)
 import os
 import json
 import math
+import types
 import logging
 import datetime
 
 from . import store
 from . import broker
 from . import config
+from . import engine
 
 log = logging.getLogger("deepfield.exec")
 
@@ -156,10 +158,14 @@ class Executor:
         f = 10 ** lot_dec
         return math.ceil(need * f) / f
 
-    def size(self, symbol, entry, stop, leverage, equity):
+    def size(self, symbol, entry, stop, leverage, equity, card=None):
         """Returns a sizing dict or None.
         EXEC_SIZE_MODE='min' (default): buy the minimum order — tiny, no liquidation
-        worry. 'risk': volume = risk_usd/(entry-stop), margin-capped, min-floored."""
+        worry. With a `card`, the min order is CONVICTION-WEIGHTED (Tier 1): the same
+        engine.tranche the champion card displays scales the min-fill by score-over-
+        required (delta 0 -> 1.0x STARTER, +1 -> 1.5x, +2 -> 2.0x), so the live fill
+        matches the shown tranche. No card -> flat 1.0x min (ladder/plan preview).
+        'risk': volume = risk_usd/(entry-stop), margin-capped, min-floored."""
         info = store.get_pair_info(self.conn, symbol) or {}
         lot_dec = info.get("lot_decimals")
         ordermin = info.get("ordermin") or 0.0
@@ -170,13 +176,26 @@ class Executor:
 
         if config.EXEC_SIZE_MODE == "min":
             volume = self._min_volume(ordermin, costmin, entry, lot_dec)
+            mult = 1.0
+            if card is not None:
+                # Conviction weighting: reuse the exact engine.tranche the display
+                # uses so the fill == the shown qty. Guarded — conviction is a bonus
+                # ON TOP of the min-fill floor, never a reason an order fails to size.
+                try:
+                    cvol, cmult = engine.tranche(card.score, card.required,
+                                                 ordermin, costmin, lot_dec, entry)
+                    if cvol > 0:
+                        volume, mult = cvol, cmult
+                except Exception:
+                    log.warning("size %s: conviction tranche failed — flat min", symbol)
             if volume <= 0:
                 return None
             notional = volume * entry
             return {
                 "volume": volume, "notional": notional, "margin": notional / leverage,
                 "risk_usd": 0.0, "actual_risk": volume * max(0.0, stop_dist),
-                "capped": False, "floored_to_min": True, "size_mode": "min",
+                "capped": False, "floored_to_min": mult == 1.0, "size_mode": "min",
+                "conviction_mult": mult,
             }
 
         # "risk" mode
@@ -219,7 +238,7 @@ class Executor:
         if not leverage:
             return None
         stop = self.compute_stop(symbol, entry, card)
-        s = self.size(symbol, entry, stop, leverage, equity)
+        s = self.size(symbol, entry, stop, leverage, equity, card=card)
         if not s:
             return None
         return {"leverage": leverage, "stop": stop, "entry": entry, **s}
@@ -249,7 +268,7 @@ class Executor:
             log.error("no leverage for %s", symbol)
             return None
         stop = self.compute_stop(symbol, entry_price, card)
-        sizing = self.size(symbol, entry_price, stop, leverage, equity)
+        sizing = self.size(symbol, entry_price, stop, leverage, equity, card=card)
         if sizing is None:
             log.warning("EXEC %s: sizing produced nothing (equity=%s)", symbol, equity)
             return None
@@ -274,10 +293,13 @@ class Executor:
             px = _round_price(entry_price, tick)
         stop_px = _round_price(stop, tick)
         vol = sizing["volume"]
+        cmult = sizing.get("conviction_mult", 1.0)
+        tag = (f" ({cmult:g}x conviction)" if cmult > 1.0
+               else " (FLOORED-min)" if sizing["floored_to_min"]
+               else " (CAPPED)" if sizing["capped"] else "")
         log.info("EXEC %s [%s] %.6g @ %s x%d lev · stop %s · notional $%.2f margin $%.2f risk $%.2f%s",
                  symbol, self.mode, vol, px, leverage, stop_px, sizing["notional"],
-                 sizing["margin"], sizing["actual_risk"],
-                 " (FLOORED-min)" if sizing["floored_to_min"] else (" (CAPPED)" if sizing["capped"] else ""))
+                 sizing["margin"], sizing["actual_risk"], tag)
 
         params = {"pair": margin_pair, "type": "buy", "ordertype": config.ENTRY_ORDERTYPE,
                   "volume": str(vol), "leverage": str(leverage)}
@@ -291,7 +313,11 @@ class Executor:
             "ordertype": config.ENTRY_ORDERTYPE, "mode": self.mode,
             "entry": px, "stop": stop_px, "volume": vol, "leverage": leverage,
             "notional": sizing["notional"], "margin": sizing["margin"],
-            "risk_usd": sizing["actual_risk"], "txid": None, "stop_txid": None,
+            "risk_usd": sizing["actual_risk"],
+            # Persist the entry conviction so continuous laddering can size each
+            # rung the same (the fill->rung chain flows through the DB).
+            "score": getattr(card, "score", None), "required": getattr(card, "required", None),
+            "txid": None, "stop_txid": None,
             "status": "pending", "error": None,
         }
 
@@ -320,7 +346,8 @@ class Executor:
             row["txid"] = res["txid"][0]
             row["status"] = "pending"
             log.info("ENTRY %s: limit resting @ %s (pending fill) %s", symbol, px, row["txid"])
-            self._journal("order", symbol, f"{row['volume']:g} entry limit resting @ {px} (pending)")
+            conv = f" · {cmult:g}x conviction" if cmult > 1.0 else ""
+            self._journal("order", symbol, f"{row['volume']:g} entry limit resting @ {px} (pending){conv}")
             return store.insert_order(self.conn, row)
         row["status"] = "rejected"
         row["error"] = "no txid from AddOrder"
@@ -335,9 +362,9 @@ class Executor:
         if self.mode != "live":
             return
         rows = self.conn.execute(
-            "SELECT id, symbol, margin_pair, volume, leverage, stop, txid, ts "
+            "SELECT id, symbol, margin_pair, volume, leverage, stop, txid, ts, entry, score, required "
             "FROM orders WHERE status='pending'").fetchall()
-        for oid, sym, mpair, vol, lev, stop, txid, ts in rows:
+        for oid, sym, mpair, vol, lev, stop, txid, ts, entry, score, required in rows:
             o = broker.query_order(txid) if txid else None
             if o is None:
                 continue                        # transient query failure — retry next cycle
@@ -387,11 +414,92 @@ class Executor:
                 log.info("FILL %s: %.6g filled — position open, resting stop", sym, vol_exec)
                 self._journal("fill", sym, f"{vol_exec:.6g} filled @ {lev}x — position open")
                 self._rest_stop(sym, mpair, stop, vol_exec, lev, oid, paper=False)
+                # Continuous laddering: protection is secured above; now drop the next
+                # rung below the fill, sized at the SAME conviction the entry carried
+                # (score/required ride down the chain). Isolated — a rung failure
+                # never unwinds the fill.
+                self._place_ladder_rung(sym, mpair, lev, stop, entry, score, required)
             else:
                 self.conn.execute("UPDATE orders SET status='canceled', error=? WHERE id=?",
                                   (f"entry {status}, unfilled", oid))
                 self.conn.commit()
                 log.info("ENTRY %s: %s unfilled — no position", sym, status)
+
+    def _place_ladder_rung(self, symbol, margin_pair, leverage, stop, filled_price,
+                           score=None, required=None):
+        """Continuous laddering (config.LADDER_CONTINUOUS): when a bid fills, drop the
+        NEXT post-only rung one LADDER_STEP_PCT below the fill — CONVICTION-sized off
+        the entry's score (a 7/7 position ladders 2x rungs; score/required ride down
+        the chain via the DB), SAME support stop — so accumulation continues down
+        toward the stop without waiting for a candle close or a restart. The conviction
+        is FROZEN at the entry score for the whole descent (the weekly/daily signals
+        don't move intraday; across a daily close they can, but the ladder does not
+        re-score — a high-conviction entry keeps doubling down even if the signal later
+        decays). Bounded by a NATURAL FLOOR: a rung at/under the stop is not placed.
+        One resting rung per symbol. Fully isolated — never raises into poll_fills, so
+        the fill/stop just secured is never unwound. NULL score -> flat 1.0x min."""
+        try:
+            if not config.LADDER_CONTINUOUS or self.mode != "live":
+                return
+            if os.path.exists(config.HALT_FILE):
+                log.info("LADDER %s: HALT present — no next rung", symbol)
+                return
+            if not filled_price or filled_price <= 0:
+                return
+            if store.has_pending_entry(self.conn, symbol):
+                return                                  # one resting rung per symbol
+            tick = config.MARGIN_TICK_DECIMALS.get(symbol, 2)
+            target = _round_price(filled_price * (1 - config.LADDER_STEP_PCT), tick)
+            if stop and target <= stop * (1 + config.LADDER_STOP_BUFFER):
+                log.info("LADDER %s: next rung @ %s would hit stop %s — ladder floor reached, holding",
+                         symbol, target, stop)
+                return
+            equity = self.portfolio_value()
+            ok, reason = self.rails_ok(equity)          # honor MAX_OPEN / drawdown / loss caps if on
+            if not ok:
+                log.info("LADDER %s: rails block next rung — %s", symbol, reason)
+                return
+            # Rebuild a stand-in card from the persisted entry conviction and size the
+            # rung through the exact Tier-1 size(card=) path — so a rung is sized the
+            # same as its entry would be. size() reads only .score/.required.
+            conv = (types.SimpleNamespace(score=score, required=required)
+                    if score is not None and required is not None else None)
+            sizing = self.size(symbol, target, stop, leverage, equity, card=conv)
+            if sizing is None:
+                log.warning("LADDER %s: sizing produced nothing — no rung", symbol)
+                return
+            cmult = sizing.get("conviction_mult", 1.0)
+            ceiling = config.EXEC_MAX_ORDER_NOTIONAL_USD
+            if ceiling > 0 and sizing["notional"] > ceiling:
+                log.error("LADDER %s REFUSED: rung notional $%.2f exceeds ceiling $%.2f",
+                          symbol, sizing["notional"], ceiling)
+                return
+            vol = sizing["volume"]
+            params = {"pair": margin_pair, "type": "buy", "ordertype": "limit",
+                      "volume": str(vol), "leverage": str(leverage),
+                      "price": str(target), "oflags": "post"}   # post-only can't fill instantly
+            res = broker.private("/0/private/AddOrder", params, idempotent=False)
+            if not (res and res.get("txid")):
+                log.warning("LADDER %s: next rung AddOrder returned no txid (post-only reject on a "
+                            "gap-down, or transient) — ladder pauses, resumes on next fill/close", symbol)
+                return
+            row = {
+                "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                "symbol": symbol, "margin_pair": margin_pair, "side": "buy",
+                "ordertype": "limit", "mode": self.mode, "entry": target, "stop": stop,
+                "volume": vol, "leverage": leverage, "notional": sizing["notional"],
+                "margin": sizing["margin"], "risk_usd": sizing.get("actual_risk", 0.0),
+                # carry the entry conviction to the next rung so it doesn't decay to 1x
+                "score": score, "required": required,
+                "txid": res["txid"][0], "stop_txid": None, "status": "pending", "error": None,
+            }
+            store.insert_order(self.conn, row)
+            conv_tag = f", {cmult:g}x conviction" if cmult > 1.0 else ""
+            log.info("LADDER %s: next rung resting @ %s (%.6g%s) — one step below fill %s",
+                     symbol, target, vol, conv_tag, filled_price)
+            self._journal("order", symbol, f"ladder: next rung {vol:g} resting @ {target}{conv_tag}")
+        except Exception:
+            log.exception("LADDER %s: place next rung failed (fill/stop unaffected)", symbol)
 
     def verify_open_stops(self):
         """On live restart: reconcile each pair's OPEN ledger rows and their

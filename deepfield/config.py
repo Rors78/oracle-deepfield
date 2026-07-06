@@ -140,6 +140,16 @@ ENTRY_TTL_SECS = 86400              # cancel a still-unfilled post-only entry bi
                                     # Kraken's open-order cap and crowd out protective stops
                                     # (Finding 5). Fills are unaffected (a filled bid is 'open',
                                     # not 'pending'), so stacking still works. 0 = never expire.
+# Continuous laddering: when a resting entry FILLS, immediately drop the next rung one
+# LADDER_STEP_PCT below the fill (post-only, min-fill, SAME support stop) so accumulation
+# continues down toward the stop without waiting for a candle close or a restart. Bounded
+# by a NATURAL FLOOR — a rung that would land at/under the stop is not placed — so a full
+# descent is ~ (entry-stop)/step rungs (~8 at 1% over an ~8% stop), never a runaway. One
+# resting rung per symbol at a time; a gap-down that puts the rung above market is rejected
+# by post-only (ladder pauses, safe) until the next fill/close. LIVE mode only.
+LADDER_CONTINUOUS = True
+LADDER_STEP_PCT = 0.01              # next rung this far below the fill (1% ~= 8 rungs to an 8% stop)
+LADDER_STOP_BUFFER = 0.0            # extra margin ABOVE the stop below which no rung is placed
 MARGIN_CAP_PCT = 0.90               # a single position may post at most this frac of free margin
 
 # Risk rails (deterministic hard limits, from GoldenEye — NOT learners).

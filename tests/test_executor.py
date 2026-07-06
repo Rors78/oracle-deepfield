@@ -54,6 +54,36 @@ def test_size_min_mode_is_minimum_order(tmp_path):
     conn.close()
 
 
+def test_size_conviction_weighted_min(tmp_path):
+    """Tier 1: with a card, the min-mode order is CONVICTION-WEIGHTED by
+    score-over-required (delta 0 -> 1.0x STARTER, +1 -> 1.5x, +2 -> 2.0x) —
+    reusing the same engine.tranche the champion card shows, so the live fill
+    matches the displayed qty. A 7/7 sizes exactly 2x a bare-threshold 5/7."""
+    from deepfield import engine
+    conn = _conn(tmp_path, ordermin=0.1, costmin=0.5, lot_dec=8)
+    e = _exec(conn)   # min mode
+    starter = Card(); starter.score, starter.required = 5, 5   # delta 0 -> 1.0x
+    mid = Card(); mid.score, mid.required = 6, 5               # delta 1 -> 1.5x
+    strong = Card(); strong.score, strong.required = 7, 5      # delta 2 -> 2.0x
+    kw = dict(entry=100.0, stop=90.0, leverage=10, equity=1000.0)
+    s0 = e.size(SYM, card=starter, **kw)
+    s1 = e.size(SYM, card=mid, **kw)
+    s2 = e.size(SYM, card=strong, **kw)
+    assert (s0["conviction_mult"], s1["conviction_mult"], s2["conviction_mult"]) == (1.0, 1.5, 2.0)
+    # the wiring contract: live size == the EXACT engine.tranche qty the card displays.
+    for card, s in ((starter, s0), (mid, s1), (strong, s2)):
+        qty, _ = engine.tranche(card.score, card.required, 0.1, 0.5, 8, 100.0)
+        assert s["volume"] == qty
+    assert s0["volume"] < s1["volume"] < s2["volume"]         # scales up with conviction
+    assert s2["volume"] == 2.0 * s0["volume"]                 # 7/7 = exactly 2x the STARTER
+    # conviction only scales UP: the STARTER equals the flat card-less min, and a
+    # scaled rung reports it's no longer floored to the exchange minimum.
+    flat = e.size(SYM, **kw)
+    assert s0["volume"] == flat["volume"] and s0["floored_to_min"] is True
+    assert s2["floored_to_min"] is False
+    conn.close()
+
+
 def test_size_risk_2pct_off_the_stop(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "EXEC_SIZE_MODE", "risk")
     conn = _conn(tmp_path)
@@ -179,6 +209,170 @@ def _seed_pending(conn, txid="OENTRY", stop=90.0):
         "VALUES(?,?,?,?,?,?, 'pending')", (SYM, "XBTUSD:BTNL", 0.1, 10, stop, txid))
     conn.commit()
     return cur.lastrowid
+
+
+def _seed_pending_entry(conn, txid, entry, stop=90.0, vol=0.1, score=None, required=None):
+    """A resting entry WITH a fill/entry price — the ladder steps off this.
+    Optional score/required = the entry's conviction that rides down the chain."""
+    cur = conn.execute(
+        "INSERT INTO orders(symbol,margin_pair,volume,leverage,stop,entry,score,required,txid,status,mode) "
+        "VALUES(?,?,?,?,?,?,?,?,?, 'pending','live')",
+        (SYM, "XBTUSD:BTNL", vol, 10, stop, entry, score, required, txid))
+    conn.commit()
+    return cur.lastrowid
+
+
+def _ladder_private(sent):
+    """AddOrder mock: stop-loss -> OSTOP, ladder buy-limit -> ORUNG."""
+    def fp(ep, p=None, **kw):
+        sent.append(p)
+        if p and p.get("ordertype") == "stop-loss":
+            return {"txid": ["OSTOP-1"]}
+        return {"txid": ["ORUNG-1"]}
+    return fp
+
+
+def test_ladder_places_next_rung_on_fill(tmp_path, monkeypatch):
+    """v6: a fill drops the NEXT post-only rung one LADDER_STEP_PCT below the fill,
+    same support stop — accumulation continues without a candle close/restart."""
+    conn = _conn(tmp_path)
+    monkeypatch.setattr(config, "LADDER_CONTINUOUS", True)
+    monkeypatch.setattr(config, "LADDER_STEP_PCT", 0.01)
+    monkeypatch.setattr(ex_mod.broker, "trade_balance", lambda: 1000.0)
+    sent = []
+    monkeypatch.setattr(ex_mod.broker, "private", _ladder_private(sent))
+    monkeypatch.setattr(ex_mod.broker, "query_order", lambda t: {"status": "closed", "vol_exec": "0.1"})
+    e = _exec(conn, mode="live")
+    oid = _seed_pending_entry(conn, "OENTRY-L", entry=100.0, stop=90.0)
+    e.poll_fills()
+    assert conn.execute("SELECT status FROM orders WHERE id=?", (oid,)).fetchone()[0] == "open"
+    rung = conn.execute("SELECT entry, stop, status FROM orders WHERE txid='ORUNG-1'").fetchone()
+    assert rung is not None
+    assert abs(rung[0] - 99.0) < 1e-6           # 100 * (1 - 0.01)
+    assert abs(rung[1] - 90.0) < 1e-6           # SAME support stop
+    assert rung[2] == "pending"
+    assert any(p.get("type") == "buy" and p.get("oflags") == "post" for p in sent)   # post-only
+    conn.close()
+
+
+def test_ladder_holds_at_stop_floor(tmp_path, monkeypatch):
+    """The natural floor: a rung that would land at/under the stop is not placed."""
+    conn = _conn(tmp_path)
+    monkeypatch.setattr(config, "LADDER_CONTINUOUS", True)
+    monkeypatch.setattr(config, "LADDER_STEP_PCT", 0.01)
+    monkeypatch.setattr(ex_mod.broker, "trade_balance", lambda: 1000.0)
+    sent = []
+    monkeypatch.setattr(ex_mod.broker, "private", _ladder_private(sent))
+    monkeypatch.setattr(ex_mod.broker, "query_order", lambda t: {"status": "closed", "vol_exec": "0.1"})
+    e = _exec(conn, mode="live")
+    _seed_pending_entry(conn, "OENTRY-F", entry=90.5, stop=90.0)   # 90.5*0.99=89.6 <= stop
+    e.poll_fills()
+    assert conn.execute("SELECT COUNT(*) FROM orders WHERE status='pending'").fetchone()[0] == 0
+    assert all(p.get("ordertype") == "stop-loss" for p in sent)   # only the stop, no ladder rung
+    conn.close()
+
+
+def test_ladder_disabled_places_nothing(tmp_path, monkeypatch):
+    conn = _conn(tmp_path)
+    monkeypatch.setattr(config, "LADDER_CONTINUOUS", False)
+    monkeypatch.setattr(ex_mod.broker, "trade_balance", lambda: 1000.0)
+    sent = []
+    monkeypatch.setattr(ex_mod.broker, "private", _ladder_private(sent))
+    monkeypatch.setattr(ex_mod.broker, "query_order", lambda t: {"status": "closed", "vol_exec": "0.1"})
+    e = _exec(conn, mode="live")
+    oid = _seed_pending_entry(conn, "OENTRY-D", entry=100.0, stop=90.0)
+    e.poll_fills()
+    assert conn.execute("SELECT status FROM orders WHERE id=?", (oid,)).fetchone()[0] == "open"
+    assert conn.execute("SELECT COUNT(*) FROM orders WHERE status='pending'").fetchone()[0] == 0
+    conn.close()
+
+
+def test_ladder_failure_never_unwinds_fill(tmp_path, monkeypatch):
+    """Isolation: if the ladder rung's AddOrder blows up, the fill still promotes and
+    the protective stop still rests — laddering can never unwind secured protection."""
+    conn = _conn(tmp_path)
+    monkeypatch.setattr(config, "LADDER_CONTINUOUS", True)
+    monkeypatch.setattr(ex_mod.broker, "trade_balance", lambda: 1000.0)
+
+    def fp(ep, p=None, **kw):
+        if p and p.get("ordertype") == "stop-loss":
+            return {"txid": ["OSTOP-1"]}
+        raise RuntimeError("kraken down")     # the ladder buy-limit blows up
+    monkeypatch.setattr(ex_mod.broker, "private", fp)
+    monkeypatch.setattr(ex_mod.broker, "query_order", lambda t: {"status": "closed", "vol_exec": "0.1"})
+    e = _exec(conn, mode="live")
+    oid = _seed_pending_entry(conn, "OENTRY-X", entry=100.0, stop=90.0)
+    e.poll_fills()                            # must not raise
+    status, stop_txid = conn.execute(
+        "SELECT status, stop_txid FROM orders WHERE id=?", (oid,)).fetchone()
+    assert status == "open" and stop_txid == "OSTOP-1"
+    conn.close()
+
+
+def test_ladder_rung_inherits_entry_conviction(tmp_path, monkeypatch):
+    """Combine: the auto-placed rung is CONVICTION-sized off the entry's score —
+    a 7/7 position (required 5 -> 2.0x) ladders a 2x rung, NOT a flat min, and the
+    score/required are persisted on the rung so it rides down the chain."""
+    conn = _conn(tmp_path, ordermin=0.1, costmin=0.5, lot_dec=8)
+    monkeypatch.setattr(config, "LADDER_CONTINUOUS", True)
+    monkeypatch.setattr(config, "LADDER_STEP_PCT", 0.01)
+    monkeypatch.setattr(ex_mod.broker, "trade_balance", lambda: 1000.0)
+    monkeypatch.setattr(ex_mod.broker, "private", _ladder_private([]))
+    monkeypatch.setattr(ex_mod.broker, "query_order", lambda t: {"status": "closed", "vol_exec": "0.2"})
+    e = _exec(conn, mode="live")
+    _seed_pending_entry(conn, "OENTRY-7", entry=100.0, stop=90.0, vol=0.2, score=7, required=5)
+    e.poll_fills()
+    entry_px, vol, sc, rq = conn.execute(
+        "SELECT entry, volume, score, required FROM orders WHERE txid='ORUNG-1'").fetchone()
+    assert abs(entry_px - 99.0) < 1e-6          # one 1% step below the fill
+    assert abs(vol - 0.2) < 1e-9                # 2.0x conviction min (0.1*2), NOT flat 0.1
+    assert (sc, rq) == (7, 5)                   # conviction persisted for the next rung
+    conn.close()
+
+
+def test_ladder_conviction_does_not_decay_down_the_chain(tmp_path, monkeypatch):
+    """rung1 fill -> rung2: the frozen entry conviction propagates row-to-row —
+    the second hop is still 2x, not silently reset to flat min."""
+    conn = _conn(tmp_path, ordermin=0.1, costmin=0.5, lot_dec=8)
+    monkeypatch.setattr(config, "LADDER_CONTINUOUS", True)
+    monkeypatch.setattr(config, "LADDER_STEP_PCT", 0.01)
+    monkeypatch.setattr(ex_mod.broker, "trade_balance", lambda: 1000.0)
+    n = {"i": 0}
+
+    def private(ep, p=None, **kw):
+        if p and p.get("ordertype") == "stop-loss":
+            return {"txid": ["OSTOP"]}
+        n["i"] += 1
+        return {"txid": [f"ORUNG-{n['i']}"]}    # unique txid per rung so the chain advances
+    monkeypatch.setattr(ex_mod.broker, "private", private)
+    monkeypatch.setattr(ex_mod.broker, "query_order", lambda t: {"status": "closed", "vol_exec": "0.2"})
+    e = _exec(conn, mode="live")
+    _seed_pending_entry(conn, "OENTRY-7", entry=100.0, stop=90.0, vol=0.2, score=7, required=5)
+    e.poll_fills()      # entry fills -> rung1 placed
+    e.poll_fills()      # rung1 fills -> rung2 placed
+    rungs = conn.execute(
+        "SELECT volume, score, required FROM orders WHERE txid LIKE 'ORUNG-%' ORDER BY id").fetchall()
+    assert len(rungs) == 2
+    for vol, sc, rq in rungs:
+        assert abs(vol - 0.2) < 1e-9 and (sc, rq) == (7, 5)   # 2x conviction, never decays to 1x
+    conn.close()
+
+
+def test_ladder_rung_null_score_falls_back_to_flat_min(tmp_path, monkeypatch):
+    """A row with no persisted score (pre-migration order / paper edge) -> the rung
+    sizes at flat 1.0x min, never crashing on a NULL score."""
+    conn = _conn(tmp_path, ordermin=0.1, costmin=0.5, lot_dec=8)
+    monkeypatch.setattr(config, "LADDER_CONTINUOUS", True)
+    monkeypatch.setattr(config, "LADDER_STEP_PCT", 0.01)
+    monkeypatch.setattr(ex_mod.broker, "trade_balance", lambda: 1000.0)
+    monkeypatch.setattr(ex_mod.broker, "private", _ladder_private([]))
+    monkeypatch.setattr(ex_mod.broker, "query_order", lambda t: {"status": "closed", "vol_exec": "0.1"})
+    e = _exec(conn, mode="live")
+    _seed_pending_entry(conn, "OENTRY-N", entry=100.0, stop=90.0, vol=0.1)   # no score
+    e.poll_fills()
+    vol = conn.execute("SELECT volume FROM orders WHERE txid='ORUNG-1'").fetchone()[0]
+    assert abs(vol - 0.1) < 1e-9                # flat min, not scaled
+    conn.close()
 
 
 def test_live_entry_is_pending_with_no_stop(tmp_path, monkeypatch):
