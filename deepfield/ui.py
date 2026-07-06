@@ -536,6 +536,20 @@ def _expansion(appstate, sym, v, w):
     return grid
 
 
+def _expansion_rows(appstate, v):
+    """Actual rendered height of the accordion = max(THESIS col, LEDGER col), so
+    the FIELD budget reserves the true cost (not a flat guess) and the height law
+    stays airtight — the loop drops an idle pair before the keybar could clip."""
+    card = v["card"]
+    thesis = 1 + (((len(card.results) + 1) // 2) if (card and card.results) else 0) + 1
+    nfills = len(v["fills"])
+    scroll = max(0, appstate.ledger_scroll)
+    shown = min(10, max(0, nfills - scroll))
+    ledger = (2 + shown + min(3, len(v["pendings"]))
+              + (1 if nfills > scroll + 10 else 0) + (1 if nfills else 0))
+    return max(thesis, ledger)
+
+
 def _thesis_block(appstate, sym, v):
     from .signals import FIRED
     card = v["card"]
@@ -641,7 +655,7 @@ def render_field(appstate, w, height):
         exp_block = None
         if sym == appstate.expanded_symbol:
             exp_block = _expansion(appstate, sym, v, w)
-            cost += 12
+            cost += _expansion_rows(appstate, v)
         if used + cost > budget and body:
             break
         body.extend(strip)

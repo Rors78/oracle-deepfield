@@ -67,6 +67,20 @@ def test_field_height_within_54_with_30fill_expanded():
     assert "(20 more)" in txt                        # ledger windowed at 10 of 30
 
 
+# ── height law airtight: all 15 stacked + one expanded, keybar never clips ───
+
+def test_field_height_law_all_active_plus_expanded():
+    st = AppState()
+    st.exec = dict(st.exec); st.exec["by_pair"] = {}
+    for i, sym in enumerate(ui.PAIR_LIST):
+        _seed(st, sym, 30 if i == 0 else 6)          # every pair active (has fills)
+    st.focus_symbol = ui.PAIR_LIST[0]
+    st.expanded_symbol = ui.PAIR_LIST[0]              # the 30-fill one expanded
+    txt = ui.export_frame_text(st, width=229, height=54)
+    assert _height(txt) <= 54                          # accurate reserve -> never overflows
+    assert "1 field · 2 book" in txt                   # keybar present (not clipped off)
+
+
 # ── #2 band math + proximity promotes to the fault tier ──────────────────────
 
 def test_band_edges_and_proximity_top_tier():
