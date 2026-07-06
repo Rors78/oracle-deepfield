@@ -320,6 +320,7 @@ class Executor:
             row["txid"] = res["txid"][0]
             row["status"] = "pending"
             log.info("ENTRY %s: limit resting @ %s (pending fill) %s", symbol, px, row["txid"])
+            self._journal("order", symbol, f"{row['volume']:g} entry limit resting @ {px} (pending)")
             return store.insert_order(self.conn, row)
         row["status"] = "rejected"
         row["error"] = "no txid from AddOrder"
@@ -361,6 +362,7 @@ class Executor:
                 elif _entry_ttl_expired(ts):
                     log.info("EXPIRE %s: entry bid unfilled past TTL (%.0fs) — canceling stale post-only bid",
                              sym, _age_secs(ts))
+                    self._journal("expire", sym, "entry bid unfilled past TTL — canceling")
                 else:
                     continue                    # unfilled + resting, within TTL — patient bid
                 if broker.cancel_order(txid) is None:
@@ -493,6 +495,7 @@ class Executor:
                     broker.cancel_order(stop_txid)
                     log.warning("startup: %s order %d unbacked (pair open %.8g < %.8g) — "
                                 "canceled orphan stop %s", sym, oid, budget[key], volf, stop_txid)
+                    self._journal("stop", sym, f"canceled orphan stop {stop_txid} (row unbacked)")
                 # Finding 6: if the stop actually EXECUTED, record realized P&L (from
                 # Kraken's own execution records) bucketed by close time, so the daily/
                 # weekly loss caps see real stop-outs. Manual/unknown closes stay unrecorded.
@@ -535,8 +538,10 @@ class Executor:
                 self.conn.commit()
                 recon[sym]["replaced"] += 1
                 log.info("PROTECT %s: re-placed stop @ %s (%s)", sym, stop, res["txid"][0])
+                self._journal("stop", sym, f"re-placed missing stop @ {stop}")
             else:
                 log.error("PROTECT %s: re-place FAILED — position may be UNPROTECTED", sym)
+                self._journal("stop", sym, "re-place FAILED — position may be UNPROTECTED")
 
         # Positive evidence: one line per pair, so a clean reconcile leaves proof it ran
         # and the invariant held — not silence to interpret (audit re-review). E.g.
@@ -560,6 +565,9 @@ class Executor:
             store.meta_set(self.conn, "last_recon", json.dumps(payload))
         except Exception:
             log.exception("last_recon publish failed (reconcile itself unaffected)")
+        total_rows = sum(r["rows"] for r in recon.values())
+        total_stops = sum(r["resting"] + r["replaced"] for r in recon.values())
+        self._journal("recon", "", f"{len(recon)} pairs · {total_stops}/{total_rows} stops resting")
 
     def _stop_exit_pnl_json(self, sym, oid, entry_txid, stop_order):
         """Realized P&L for a STOP-triggered close, from Kraken's own execution records:
@@ -608,5 +616,7 @@ class Executor:
             self.conn.execute("UPDATE orders SET stop_txid=? WHERE id=?", (res["txid"][0], order_id))
             self.conn.commit()
             log.info("PROTECT %s: exchange stop @ %s (%s)", symbol, stop_px, res["txid"][0])
+            self._journal("stop", symbol, f"protective stop rested @ {stop_px}")
         else:
             log.error("PROTECT %s: FAILED to rest stop — position is UNPROTECTED", symbol)
+            self._journal("stop", symbol, "STOP FAILED — position UNPROTECTED")

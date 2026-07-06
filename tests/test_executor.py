@@ -225,6 +225,25 @@ def test_poll_fills_promotes_filled_and_rests_stop(tmp_path, monkeypatch):
     conn.close()
 
 
+def test_journal_rows_emitted_on_order_fill_stop(tmp_path, monkeypatch):
+    """v6 stage5: the money-path lifecycle narrates itself into the JOURNAL —
+    a resting live entry emits 'order', a confirmed fill emits 'fill', the
+    protective stop emits 'stop'."""
+    conn = _conn(tmp_path)
+    monkeypatch.setattr(ex_mod.broker, "private",
+                        lambda ep, p=None, **kw: ({"txid": ["OENTRY-1"]}
+                                                  if p and p.get("ordertype") == "limit"
+                                                  else {"txid": ["OSTOP-1"]}))
+    monkeypatch.setattr(ex_mod.broker, "query_order",
+                        lambda t: {"status": "closed", "vol_exec": "0.1"})
+    e = _exec(conn, mode="live")
+    e.place_entry(SYM, 100.0, Card(low_52w=92.0))     # -> 'order'
+    e.poll_fills()                                     # -> 'fill' + 'stop'
+    kinds = [r[1] for r in store.recent_journal(conn, 20)]
+    assert "order" in kinds and "fill" in kinds and "stop" in kinds
+    conn.close()
+
+
 def test_journal_failure_never_blocks_fill(tmp_path, monkeypatch):
     """v6 acceptance #5: the JOURNAL is display-truth, not the money path. A
     store.journal that raises inside poll_fills must NOT stop the fill from

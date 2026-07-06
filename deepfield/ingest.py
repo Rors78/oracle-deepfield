@@ -67,6 +67,14 @@ class Ingest:
             log.warning("EXECUTION ENABLED — mode=%s (live leveraged orders on confirmed BUYs)",
                         config.EXEC_MODE)
 
+    def _journal(self, kind, symbol, text):
+        """Isolated journal emit (v6 JOURNAL view) — display-truth narration that
+        must NEVER delay or drop the alert/order path. Never raises out."""
+        try:
+            store.journal(self.conn, kind, symbol, text)
+        except Exception:
+            log.exception("journal emit failed (%s %s) — path unaffected", kind, symbol)
+
     # ── event handlers ──────────────────────────────────────────────────────
 
     def handle_tick(self, ev: events.Tick):
@@ -370,6 +378,7 @@ class Ingest:
         if store.has_pending_entry(self.conn, symbol):
             self._armed_buys.add(symbol)
             log.info("startup-arm: %s already has a resting pending entry — skipping re-fire", symbol)
+            self._journal("order", symbol, "boot-arm skipped — entry already resting")
             return
         self._armed_buys.add(symbol)   # one-shot: never retry this symbol on later ticks
         log.info("startup-arm: %s already confirmed BUY %d/%d — firing on first fresh tick",
@@ -383,6 +392,8 @@ class Ingest:
             log.info("cooldown suppresses %s alert for %s (last=%.0f, now=%.0f, gap=%.0fs < %ds)",
                      kind, symbol, last_ts, now, now - last_ts, REALERT_HOURS * 3600)
             return
+        if kind == "confirmed":
+            self._journal("detect", symbol, f"{card.score}/{card.denom} confirmed BUY")
         # SPEC §11: the alert message carries the LIVE price. The card's price
         # is the last closed daily close — hours stale at alert time.
         ps = self.state.pair(symbol)

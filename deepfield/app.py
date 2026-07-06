@@ -8,6 +8,7 @@ import datetime
 import statistics
 import time
 
+from . import VERSION
 from . import config
 from . import store
 from . import backfill
@@ -78,6 +79,14 @@ def _poll_fills_threaded():
         log.exception("poll_fills failed")
     finally:
         c.close()
+
+
+def _sys_journal(conn, text):
+    """Isolated 'sys' journal emit for lifecycle events — never raises out."""
+    try:
+        store.journal(conn, "sys", "", text)
+    except Exception:
+        log.exception("sys journal emit failed — unaffected")
 
 
 def _build_by_pair(conn, appstate):
@@ -270,6 +279,7 @@ def _startup(debug, announce=False):
 async def run_live(simple=False, debug=False):
     log.info("DEEPFIELD starting (simple=%s)", simple)
     conn, appstate, ing = _startup(debug, announce=not simple)
+    _sys_journal(conn, f"process start — survey v{VERSION} · exec {config.EXEC_MODE}")
     symbols = [p["ws"] for p in config.PAIRS]
     queue = asyncio.Queue()
 
@@ -369,6 +379,7 @@ async def run_live(simple=False, debug=False):
         for t in tasks:
             t.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
+        _sys_journal(conn, "process stop — clean shutdown")
         conn.close()
         log.info("DEEPFIELD stopped cleanly")
 
