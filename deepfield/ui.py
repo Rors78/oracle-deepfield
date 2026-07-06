@@ -480,19 +480,26 @@ _STRIP_COLS = ((7, "left"), (9, "left"), (10, "right"), (8, "right"),
 
 def _band_bounds(v):
     """Band scale follows the tier (resolution follows relevance, on the x-axis).
-    An ACTIVE pair (has fills) zooms to its TRADE ZONE — [stop*0.98 → max(fill,
-    now)*1.05] — so stop/fills/cursor get the full width at real resolution; the
-    year-linear scale crushes them into a few cells and fakes stop-proximity. The
-    52w context is kept as a printed fact (year_note). Watch/idle keep the YEAR
-    scale, because for them 'cursor hugging the yearly low' IS the information.
+    An ACTIVE pair zooms to its TRADE ZONE, anchored to the fills / resting bids /
+    cursor — NOT the stop — so the entry ladder breathes across the full width
+    instead of being squeezed against the stop→cheapest-fill buffer. The stop
+    normally sits BELOW the zone and is drawn as an off-scale ◄ marker in the
+    label; when price NEARS the stop (proximity) the zone extends down to keep the
+    stop — and its red alarm segment — on-scale, exactly when it matters. Watch/idle
+    keep the YEAR scale (cursor-hugging-the-yearly-low IS their information).
     Returns (lo, hi, year_note)."""
     if v["has_fills"] and v["stop"]:
-        entries = [f["entry"] for f in v["fills"] if f["entry"]]
-        refs = entries + ([v["price"]] if v["price"] else []) + [v["stop"]]
-        lo = v["stop"] * 0.98
-        hi = max(refs) * 1.05
+        price, stop = v["price"], v["stop"]
+        refs = [f["entry"] for f in v["fills"] if f["entry"]]
+        refs += [p["price"] for p in v["pendings"] if p.get("price")]
+        if price:
+            refs.append(price)
+        lo = min(refs) * 0.99
+        hi = max(refs) * 1.01
+        if _proximity(price, stop):
+            lo = min(lo, stop * 0.995)          # pull the stop on-scale near danger
         if hi <= lo:
-            hi = lo * 1.05
+            hi = lo * 1.02
         card = v["card"]
         note = (_pct_low_note(card.pct_above_low)
                 if (card and card.pct_above_low is not None) else None)
@@ -564,11 +571,14 @@ def _field_strip(appstate, sym, tier, v, w, selected, now):
 
     blo, bhi, note = _band_bounds(v)
     stop, price = v["stop"], v["price"]
-    # Label the TRUE stop (safety-relevant), NOT the scale anchor (stop*0.98) — the
-    # anchor is plumbing and has no business wearing a price. Right side carries the
-    # distance-to-stop and the 52w-low fact.
+    # Label the TRUE stop (safety-relevant). It normally sits BELOW the zone, so mark
+    # it off-scale with ◄ and don't plot a (clamped, misleading) tick; when proximity
+    # pulls it on-scale, the ┊ tick + red alarm segment render inside the band.
+    stop_on = stop is not None and blo <= stop <= bhi
     lbl = Text("stop ", style=INK)
     lbl.append(_fmt_price(stop) if stop else "—", style=RISK if stop else INK)
+    if stop and not stop_on:
+        lbl.append(" ◄", style=RISK)
     rt = Text()
     if stop and price:
         rt.append(f"  {(stop / price - 1) * 100:+.1f}% stop", style=INK)
@@ -578,7 +588,8 @@ def _field_strip(appstate, sym, tier, v, w, selected, now):
     band = _render_band(blo, bhi, band_w,
                         fills=[f["entry"] for f in v["fills"]],
                         pendings=[p["price"] for p in v["pendings"]],
-                        stop=stop, now_price=price, avg_entry=v["avg_entry"])
+                        stop=stop if stop_on else None,
+                        now_price=price, avg_entry=v["avg_entry"])
     bline = Text("     ")
     bline.append_text(lbl)
     bline.append(" ")

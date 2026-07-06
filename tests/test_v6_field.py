@@ -85,13 +85,19 @@ def test_field_height_law_all_active_plus_expanded():
 
 def test_band_bounds_trade_zone_for_active_year_for_watch():
     active = {"has_fills": True, "stop": 100.0, "price": 110.0,
-              "fills": [{"entry": 108.0}, {"entry": 112.0}],
+              "fills": [{"entry": 108.0}, {"entry": 112.0}], "pendings": [],
               "card": type("C", (), {"pct_above_low": 11.0})(), "lo": 40.0, "hi": 200.0}
     lo, hi, note = ui._band_bounds(active)
-    assert abs(lo - 98.0) < 1e-9                 # stop * 0.98
-    assert abs(hi - 112.0 * 1.05) < 1e-9         # max(fill, now) * 1.05
-    assert note and "52w low" in note            # year context kept as a printed fact
-    watch = {"has_fills": False, "stop": None, "price": 50.0, "fills": [],
+    assert abs(lo - 108.0 * 0.99) < 1e-9         # anchored to cheapest fill/price, NOT the stop
+    assert abs(hi - 112.0 * 1.01) < 1e-9
+    assert lo > active["stop"]                    # stop sits OFF-scale, below the zone
+    assert note and "52w low" in note
+    # proximity pulls the stop back on-scale (so the alarm segment can render)
+    prox = {"has_fills": True, "stop": 100.0, "price": 102.0, "fills": [{"entry": 108.0}],
+            "pendings": [], "card": None, "lo": 40.0, "hi": 200.0}
+    plo, _, _ = ui._band_bounds(prox)
+    assert plo <= 100.0
+    watch = {"has_fills": False, "stop": None, "price": 50.0, "fills": [], "pendings": [],
              "card": None, "lo": 40.0, "hi": 200.0}
     assert ui._band_bounds(watch) == (40.0, 200.0, None)   # year scale, no zoom
 
@@ -109,7 +115,8 @@ def test_active_band_labels_true_stop_not_anchor():
         "pendings": [], "vol_sum": 0.1, "avg_entry": 45.0, "upnl": None, "stop": 41.14}
     txt = ui.export_frame_text(st, width=229, height=54)
     assert "stop $41.14" in txt                        # TRUE stop is labeled
-    assert ui._fmt_price(41.14 * 0.98) not in txt      # the scale anchor ($40.32) is NOT printed
+    assert "◄" in txt                                  # stop marked off-scale (below the zone)
+    assert ui._fmt_price(41.14 * 0.98) not in txt      # no scale-anchor price printed
 
 
 # ── Fix B: stale data feeding a live position sorts to the fault tier ─────────
