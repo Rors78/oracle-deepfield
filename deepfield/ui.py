@@ -494,10 +494,16 @@ def _band_bounds(v):
         if hi <= lo:
             hi = lo * 1.05
         card = v["card"]
-        note = (f"+{card.pct_above_low:.0f}% ↑52w low"
+        note = (_pct_low_note(card.pct_above_low)
                 if (card and card.pct_above_low is not None) else None)
         return lo, hi, note
     return v["lo"], v["hi"], None
+
+
+def _pct_low_note(pct):
+    """One canonical '% above 52w low' label — used identically on active bands
+    and watch rows so the frame speaks one dialect."""
+    return f"+{pct:.0f}% ↑52w low"
 
 
 def _field_strip(appstate, sym, tier, v, w, selected, now):
@@ -518,7 +524,8 @@ def _field_strip(appstate, sym, tier, v, w, selected, now):
     if res == "watch":
         # ONE row (spec): sym + score + price + a bare YEAR-scale band (track+cursor)
         card = v["card"]
-        pct = f" +{card.pct_above_low:.0f}%↑low" if (card and card.pct_above_low is not None) else ""
+        pct = (" " + _pct_low_note(card.pct_above_low)
+               if (card and card.pct_above_low is not None) else "")
         band_w = max(20, w - 46 - len(pct))
         band = _render_band(v["lo"], v["hi"], band_w, now_price=v["price"])
         line = Text(f"  {disp:<5} ", style=TIME)
