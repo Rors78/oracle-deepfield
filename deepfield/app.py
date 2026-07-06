@@ -4,6 +4,8 @@ writer -> clock-close watchdog -> hourly reconciler -> UI (rich or --simple)
 """
 import asyncio
 import logging
+import datetime
+import statistics
 
 from . import config
 from . import store
@@ -77,6 +79,62 @@ def _poll_fills_threaded():
         c.close()
 
 
+def _build_by_pair(conn, appstate):
+    """v6 SURVEY: per-pair ledger snapshot for the FIELD bands + BOOK view.
+    Pure DB read of the open/pending order rows, keyed by symbol. uP&L here is a
+    snapshot convenience (last known tick); the FIELD LEDGER recomputes per-fill
+    uP&L live at render from ps.last_tick (renderers own the live math)."""
+    by_pair = {}
+    for oid, sym, ts, vol, lev, entry, stop in conn.execute(
+            "SELECT id, symbol, ts, volume, leverage, entry, stop FROM orders "
+            "WHERE status='open' ORDER BY symbol, id"):
+        d = by_pair.setdefault(sym, {"fills": [], "pendings": [], "vol_sum": 0.0,
+                                     "avg_entry": None, "upnl": None, "stop": None})
+        d["fills"].append({"id": oid, "ts": ts, "vol": vol, "lev": lev,
+                           "entry": entry, "stop": stop})
+    for sym, price, vol, ts in conn.execute(
+            "SELECT symbol, entry, volume, ts FROM orders "
+            "WHERE status='pending' ORDER BY symbol, id"):
+        d = by_pair.setdefault(sym, {"fills": [], "pendings": [], "vol_sum": 0.0,
+                                     "avg_entry": None, "upnl": None, "stop": None})
+        d["pendings"].append({"price": price, "vol": vol, "ts": ts})
+    for sym, d in by_pair.items():
+        fills = d["fills"]
+        vsum = sum((f["vol"] or 0.0) for f in fills)
+        d["vol_sum"] = vsum
+        if vsum > 0:
+            num = sum((f["vol"] or 0.0) * (f["entry"] or 0.0) for f in fills)
+            d["avg_entry"] = num / vsum
+        stops = [f["stop"] for f in fills if f["stop"] is not None]
+        d["stop"] = max(stops) if stops else None   # tightest protective floor for the stack
+        ps = appstate.pairs.get(sym)
+        cur = ps.last_tick.last if (ps and ps.last_tick) else None
+        if cur is not None and vsum > 0:
+            d["upnl"] = sum((cur - (f["entry"] or 0.0)) * (f["vol"] or 0.0) for f in fills)
+    return by_pair
+
+
+def _snapshot_capacity(conn, appstate, free_margin):
+    """Room to keep buying: free margin ÷ the typical fill's margin, in min-fills.
+    Median margin of the last 10 LIVE fills; fallback to the mean of the current
+    per-pair exec_plan margins. None when neither is available."""
+    if not free_margin or free_margin <= 0:
+        return None
+    rows = conn.execute(
+        "SELECT margin FROM orders WHERE mode='live' AND status IN('open','closed') "
+        "AND margin IS NOT NULL ORDER BY id DESC LIMIT 10").fetchall()
+    margins = [float(r[0]) for r in rows if r[0] is not None]
+    if not margins:
+        margins = [p.exec_plan["margin"] for p in appstate.pairs.values()
+                   if p.exec_plan and p.exec_plan.get("margin")]
+        if margins:
+            margins = [sum(margins) / len(margins)]
+    if not margins:
+        return None
+    typical = statistics.median(margins)
+    return int(free_margin / typical) if typical > 0 else None
+
+
 async def _exec_state_refresh(appstate, conn, ing, interval=15):
     """Publish the execution snapshot (equity/positions/rails) + per-BUY cooldown
     and dry-run order plan into AppState, so the UI stays a pure reader. Equity is
@@ -125,12 +183,24 @@ async def _exec_state_refresh(appstate, conn, ing, interval=15):
                     "SELECT symbol,entry,volume,leverage FROM orders "
                     "WHERE status='pending' ORDER BY id DESC")
             ]
+            # v6 SURVEY read-only plumbing: per-pair ledger, journal tail, realized
+            # day/week P&L (F6 boundaries, verbatim from rails_ok), min-fill capacity.
+            now = datetime.datetime.now(datetime.timezone.utc)
+            day0 = now.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+            wk0 = (now - datetime.timedelta(days=now.weekday())).replace(
+                hour=0, minute=0, second=0, microsecond=0).isoformat()
             appstate.exec = {
                 "mode": mode, "equity": equity, "open_count": len(positions),
                 "positions": positions, "pending": pending,
                 "rails_ok": rails_ok, "rails_reason": reason,
                 "halt": os.path.exists(config.HALT_FILE), "updated": _t.time(),
                 "balance": balance, "margin_used": margin_used, "free_margin": free_margin,
+                "by_pair": _build_by_pair(conn, appstate),
+                "journal_tail": store.recent_journal(conn, 200),
+                "realized_day": store.realized_pnl_since(conn, day0),
+                "realized_week": store.realized_pnl_since(conn, wk0),
+                "capacity": _snapshot_capacity(conn, appstate, free_margin),
+                "last_recon": store.meta_get(conn, "last_recon"),
             }
             for sym, ps in list(appstate.pairs.items()):
                 card = ps.confirmed

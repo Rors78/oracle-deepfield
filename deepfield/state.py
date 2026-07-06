@@ -59,6 +59,10 @@ class AppState:
     exec: dict = field(default_factory=lambda: {
         "mode": "off", "equity": None, "open_count": 0, "positions": [],
         "rails_ok": True, "rails_reason": "", "halt": False, "updated": 0.0,
+        # v6 SURVEY read-only plumbing (populated by _exec_state_refresh)
+        "pending": [], "by_pair": {}, "journal_tail": [],
+        "realized_day": 0.0, "realized_week": 0.0, "capacity": None,
+        "last_recon": None, "free_margin": None, "margin_used": None,
     })
 
     def pair(self, symbol):

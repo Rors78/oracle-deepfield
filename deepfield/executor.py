@@ -546,6 +546,21 @@ class Executor:
                      "%d closed, %d re-placed, %d unknown",
                      sym, r["rows"], r["openvol"], r["resting"], r["closed"], r["replaced"], r["unknown"])
 
+        # v6 SURVEY: publish this reconcile as display-truth for the header/BOOK
+        # coherence readout. A pair is 'ok' iff no stop status was left UNKNOWN
+        # (a query failure that could hide an unprotected row); all_ok gates the
+        # header's teal 'recon ok' vs alarm 'MISMATCH'. Boot-time stamp — this
+        # runs only at startup, so the UI labels its age honestly, not as live.
+        try:
+            per_pair = {sym: {"rows": r["rows"], "vol": round(r["openvol"], 8),
+                              "stops": r["resting"] + r["replaced"], "ok": r["unknown"] == 0}
+                        for sym, r in recon.items()}
+            payload = {"ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                       "per_pair": per_pair, "all_ok": all(p["ok"] for p in per_pair.values())}
+            store.meta_set(self.conn, "last_recon", json.dumps(payload))
+        except Exception:
+            log.exception("last_recon publish failed (reconcile itself unaffected)")
+
     def _stop_exit_pnl_json(self, sym, oid, entry_txid, stop_order):
         """Realized P&L for a STOP-triggered close, from Kraken's own execution records:
         proceeds (stop-sell cost - fee) minus cost basis (entry-buy cost + fee). Returns a
