@@ -49,9 +49,11 @@ def test_F8_tranche_ordermin_floor_and_conviction():
     # DOGE-like: ordermin dominates; costmin/price tiny.
     qty, mult = engine.tranche(5, 5, ordermin=50, costmin=0.5, lot_decimals=8, price=0.1)
     assert mult == 1.0 and qty == 50 and qty * 0.1 >= 0.5
-    # +2 conviction doubles
+    # +1 conviction doubles, +2 triples (CONVICTION {0:1, 1:2, 2:3})
+    qty1, mult1 = engine.tranche(6, 5, ordermin=50, costmin=0.5, lot_decimals=8, price=0.1)
+    assert mult1 == 2.0 and qty1 == 100
     qty2, mult2 = engine.tranche(7, 5, ordermin=50, costmin=0.5, lot_decimals=8, price=0.1)
-    assert mult2 == 2.0 and qty2 == 100
+    assert mult2 == 3.0 and qty2 == 150
     # BTC-like: ordermin floor holds, cost satisfied
     qtyb, _ = engine.tranche(5, 5, ordermin=0.00005, costmin=0.5, lot_decimals=8, price=60000)
     assert qtyb >= 0.00005 and qtyb * 60000 >= 0.5

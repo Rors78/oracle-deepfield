@@ -158,6 +158,17 @@ class Executor:
         f = 10 ** lot_dec
         return math.ceil(need * f) / f
 
+    def _owns_level_near(self, symbol, price, pct):
+        """True if an OPEN position for symbol already sits within `pct` (fraction)
+        of `price`. Used by continuous laddering to own each price level once
+        instead of re-buying the same band as price churns."""
+        if price <= 0:
+            return False
+        rows = self.conn.execute(
+            "SELECT entry FROM orders WHERE symbol=? AND status='open' AND entry IS NOT NULL",
+            (symbol,)).fetchall()
+        return any(abs(e - price) <= pct * price for (e,) in rows if e)
+
     def size(self, symbol, entry, stop, leverage, equity, card=None):
         """Returns a sizing dict or None.
         EXEC_SIZE_MODE='min' (default): buy the minimum order — tiny, no liquidation
@@ -453,6 +464,16 @@ class Executor:
             if stop and target <= stop * (1 + config.LADDER_STOP_BUFFER):
                 log.info("LADDER %s: next rung @ %s would hit stop %s — ladder floor reached, holding",
                          symbol, target, stop)
+                return
+            # Level dedupe: own each price level ONCE. In a choppy range the daily
+            # re-arm + ladder would otherwise re-buy the same band (a fill dips 1%,
+            # recovers, re-arms, dips again) and stack many overlapping rungs. Skip
+            # the rung if we already hold an OPEN position within half a step of it —
+            # descends cleanly toward the stop instead of churn-buying the band. The
+            # just-filled anchor is a full step above target, so it never self-blocks.
+            if self._owns_level_near(symbol, target, config.LADDER_STEP_PCT * 0.5):
+                log.info("LADDER %s: already own a rung within half a step of %s — skip "
+                         "(own each level once)", symbol, target)
                 return
             equity = self.portfolio_value()
             ok, reason = self.rails_ok(equity)          # honor MAX_OPEN / drawdown / loss caps if on

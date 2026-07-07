@@ -56,26 +56,27 @@ def test_size_min_mode_is_minimum_order(tmp_path):
 
 def test_size_conviction_weighted_min(tmp_path):
     """Tier 1: with a card, the min-mode order is CONVICTION-WEIGHTED by
-    score-over-required (delta 0 -> 1.0x STARTER, +1 -> 1.5x, +2 -> 2.0x) —
+    score-over-required (delta 0 -> 1.0x STARTER, +1 -> 2.0x, +2 -> 3.0x) —
     reusing the same engine.tranche the champion card shows, so the live fill
-    matches the displayed qty. A 7/7 sizes exactly 2x a bare-threshold 5/7."""
+    matches the displayed qty. A 7/7 sizes exactly 3x a bare-threshold 5/7."""
     from deepfield import engine
     conn = _conn(tmp_path, ordermin=0.1, costmin=0.5, lot_dec=8)
     e = _exec(conn)   # min mode
     starter = Card(); starter.score, starter.required = 5, 5   # delta 0 -> 1.0x
-    mid = Card(); mid.score, mid.required = 6, 5               # delta 1 -> 1.5x
-    strong = Card(); strong.score, strong.required = 7, 5      # delta 2 -> 2.0x
+    mid = Card(); mid.score, mid.required = 6, 5               # delta 1 -> 2.0x
+    strong = Card(); strong.score, strong.required = 7, 5      # delta 2 -> 3.0x
     kw = dict(entry=100.0, stop=90.0, leverage=10, equity=1000.0)
     s0 = e.size(SYM, card=starter, **kw)
     s1 = e.size(SYM, card=mid, **kw)
     s2 = e.size(SYM, card=strong, **kw)
-    assert (s0["conviction_mult"], s1["conviction_mult"], s2["conviction_mult"]) == (1.0, 1.5, 2.0)
+    assert (s0["conviction_mult"], s1["conviction_mult"], s2["conviction_mult"]) == (1.0, 2.0, 3.0)
     # the wiring contract: live size == the EXACT engine.tranche qty the card displays.
     for card, s in ((starter, s0), (mid, s1), (strong, s2)):
         qty, _ = engine.tranche(card.score, card.required, 0.1, 0.5, 8, 100.0)
         assert s["volume"] == qty
     assert s0["volume"] < s1["volume"] < s2["volume"]         # scales up with conviction
-    assert s2["volume"] == 2.0 * s0["volume"]                 # 7/7 = exactly 2x the STARTER
+    assert abs(s1["volume"] - 2.0 * s0["volume"]) < 1e-6      # 6/7 ~ 2x the STARTER
+    assert abs(s2["volume"] - 3.0 * s0["volume"]) < 1e-6      # 7/7 ~ 3x (exact qty via engine.tranche above)
     # conviction only scales UP: the STARTER equals the flat card-less min, and a
     # scaled rung reports it's no longer floored to the exchange minimum.
     flat = e.size(SYM, **kw)
@@ -311,28 +312,28 @@ def test_ladder_failure_never_unwinds_fill(tmp_path, monkeypatch):
 
 def test_ladder_rung_inherits_entry_conviction(tmp_path, monkeypatch):
     """Combine: the auto-placed rung is CONVICTION-sized off the entry's score —
-    a 7/7 position (required 5 -> 2.0x) ladders a 2x rung, NOT a flat min, and the
+    a 7/7 position (required 5 -> 3.0x) ladders a 3x rung, NOT a flat min, and the
     score/required are persisted on the rung so it rides down the chain."""
     conn = _conn(tmp_path, ordermin=0.1, costmin=0.5, lot_dec=8)
     monkeypatch.setattr(config, "LADDER_CONTINUOUS", True)
     monkeypatch.setattr(config, "LADDER_STEP_PCT", 0.01)
     monkeypatch.setattr(ex_mod.broker, "trade_balance", lambda: 1000.0)
     monkeypatch.setattr(ex_mod.broker, "private", _ladder_private([]))
-    monkeypatch.setattr(ex_mod.broker, "query_order", lambda t: {"status": "closed", "vol_exec": "0.2"})
+    monkeypatch.setattr(ex_mod.broker, "query_order", lambda t: {"status": "closed", "vol_exec": "0.3"})
     e = _exec(conn, mode="live")
-    _seed_pending_entry(conn, "OENTRY-7", entry=100.0, stop=90.0, vol=0.2, score=7, required=5)
+    _seed_pending_entry(conn, "OENTRY-7", entry=100.0, stop=90.0, vol=0.3, score=7, required=5)
     e.poll_fills()
     entry_px, vol, sc, rq = conn.execute(
         "SELECT entry, volume, score, required FROM orders WHERE txid='ORUNG-1'").fetchone()
     assert abs(entry_px - 99.0) < 1e-6          # one 1% step below the fill
-    assert abs(vol - 0.2) < 1e-9                # 2.0x conviction min (0.1*2), NOT flat 0.1
+    assert abs(vol - 0.3) < 1e-6                # 3.0x conviction min (0.1*3), NOT flat 0.1
     assert (sc, rq) == (7, 5)                   # conviction persisted for the next rung
     conn.close()
 
 
 def test_ladder_conviction_does_not_decay_down_the_chain(tmp_path, monkeypatch):
     """rung1 fill -> rung2: the frozen entry conviction propagates row-to-row —
-    the second hop is still 2x, not silently reset to flat min."""
+    the second hop is still 3x, not silently reset to flat min."""
     conn = _conn(tmp_path, ordermin=0.1, costmin=0.5, lot_dec=8)
     monkeypatch.setattr(config, "LADDER_CONTINUOUS", True)
     monkeypatch.setattr(config, "LADDER_STEP_PCT", 0.01)
@@ -345,16 +346,16 @@ def test_ladder_conviction_does_not_decay_down_the_chain(tmp_path, monkeypatch):
         n["i"] += 1
         return {"txid": [f"ORUNG-{n['i']}"]}    # unique txid per rung so the chain advances
     monkeypatch.setattr(ex_mod.broker, "private", private)
-    monkeypatch.setattr(ex_mod.broker, "query_order", lambda t: {"status": "closed", "vol_exec": "0.2"})
+    monkeypatch.setattr(ex_mod.broker, "query_order", lambda t: {"status": "closed", "vol_exec": "0.3"})
     e = _exec(conn, mode="live")
-    _seed_pending_entry(conn, "OENTRY-7", entry=100.0, stop=90.0, vol=0.2, score=7, required=5)
+    _seed_pending_entry(conn, "OENTRY-7", entry=100.0, stop=90.0, vol=0.3, score=7, required=5)
     e.poll_fills()      # entry fills -> rung1 placed
     e.poll_fills()      # rung1 fills -> rung2 placed
     rungs = conn.execute(
         "SELECT volume, score, required FROM orders WHERE txid LIKE 'ORUNG-%' ORDER BY id").fetchall()
     assert len(rungs) == 2
     for vol, sc, rq in rungs:
-        assert abs(vol - 0.2) < 1e-9 and (sc, rq) == (7, 5)   # 2x conviction, never decays to 1x
+        assert abs(vol - 0.3) < 1e-6 and (sc, rq) == (7, 5)   # 3x conviction, never decays to 1x
     conn.close()
 
 
@@ -372,6 +373,47 @@ def test_ladder_rung_null_score_falls_back_to_flat_min(tmp_path, monkeypatch):
     e.poll_fills()
     vol = conn.execute("SELECT volume FROM orders WHERE txid='ORUNG-1'").fetchone()[0]
     assert abs(vol - 0.1) < 1e-9                # flat min, not scaled
+    conn.close()
+
+
+def test_ladder_dedupe_skips_owned_level(tmp_path, monkeypatch):
+    """Level-dedupe: the ladder does NOT place a rung at a price it already owns
+    (within half a step) — so it descends cleanly instead of re-buying a band."""
+    conn = _conn(tmp_path, ordermin=0.1, costmin=0.5, lot_dec=8)
+    monkeypatch.setattr(config, "LADDER_CONTINUOUS", True)
+    monkeypatch.setattr(config, "LADDER_STEP_PCT", 0.01)
+    monkeypatch.setattr(ex_mod.broker, "trade_balance", lambda: 1000.0)
+    monkeypatch.setattr(ex_mod.broker, "private", _ladder_private([]))
+    monkeypatch.setattr(ex_mod.broker, "query_order", lambda t: {"status": "closed", "vol_exec": "0.1"})
+    e = _exec(conn, mode="live")
+    # already hold an OPEN rung at ~99.0 — exactly where the fill below would ladder to
+    conn.execute("INSERT INTO orders(symbol,margin_pair,volume,leverage,stop,entry,status,mode) "
+                 "VALUES(?,?,?,?,?,?, 'open','live')", (SYM, "XBTUSD:BTNL", 0.1, 10, 90.0, 99.0))
+    conn.commit()
+    _seed_pending_entry(conn, "OENTRY-D", entry=100.0, stop=90.0, vol=0.1)   # fills @100 -> target 99.0
+    e.poll_fills()
+    # target 99.0 is already owned -> NO new rung placed (only the stop went out)
+    assert conn.execute("SELECT COUNT(*) FROM orders WHERE txid='ORUNG-1'").fetchone()[0] == 0
+    conn.close()
+
+
+def test_ladder_dedupe_allows_a_clean_step_down(tmp_path, monkeypatch):
+    """Control: with nothing owned near the target, the rung IS placed — dedupe
+    only suppresses re-buying a level, never a genuine next step down."""
+    conn = _conn(tmp_path, ordermin=0.1, costmin=0.5, lot_dec=8)
+    monkeypatch.setattr(config, "LADDER_CONTINUOUS", True)
+    monkeypatch.setattr(config, "LADDER_STEP_PCT", 0.01)
+    monkeypatch.setattr(ex_mod.broker, "trade_balance", lambda: 1000.0)
+    monkeypatch.setattr(ex_mod.broker, "private", _ladder_private([]))
+    monkeypatch.setattr(ex_mod.broker, "query_order", lambda t: {"status": "closed", "vol_exec": "0.1"})
+    e = _exec(conn, mode="live")
+    # own a rung far below (95.0) — nowhere near the 99.0 target
+    conn.execute("INSERT INTO orders(symbol,margin_pair,volume,leverage,stop,entry,status,mode) "
+                 "VALUES(?,?,?,?,?,?, 'open','live')", (SYM, "XBTUSD:BTNL", 0.1, 10, 90.0, 95.0))
+    conn.commit()
+    _seed_pending_entry(conn, "OENTRY-C", entry=100.0, stop=90.0, vol=0.1)   # fills @100 -> target 99.0
+    e.poll_fills()
+    assert conn.execute("SELECT COUNT(*) FROM orders WHERE txid='ORUNG-1'").fetchone()[0] == 1
     conn.close()
 
 

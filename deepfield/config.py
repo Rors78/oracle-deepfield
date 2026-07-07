@@ -69,7 +69,7 @@ REALERT_HOURS = 0          # F10: per-symbol cooldown before re-alert (0 = disab
 PROVISIONAL_ALERTS = False # invariant 7: provisional is display-only unless True
 
 # --- Conviction multipliers (F8): score relative to required threshold ---
-CONVICTION = {0: 1.0, 1: 1.5, 2: 2.0}  # +2 and above -> 2.0 (STARTER at 0)
+CONVICTION = {0: 1.0, 1: 2.0, 2: 3.0}  # +1 -> 2x, +2 and above -> 3x (STARTER at 0)
 
 # --- Named horizontal price levels (F7), display-only, operator-edited ---
 LEVELS = {
