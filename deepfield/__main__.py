@@ -23,6 +23,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--exec-probe", action="store_true",
                    help="send validate=true orders for all pairs — prove the live order path without executing")
     p.add_argument("--exec-status", action="store_true", help="show execution config, rails, equity, recent orders")
+    p.add_argument("--web", action="store_true", help="serve the read-only web console (localhost dashboard)")
+    p.add_argument("--port", type=int, default=None,
+                   help="web console port (with --web; default: DEEPFIELD_WEB_PORT or 8787)")
     sub = p.add_subparsers(dest="cmd")
     imp = sub.add_parser("import-legacy", help="seed the cooldown ledger from dca_log.csv")
     imp.add_argument("csv")
@@ -86,6 +89,13 @@ def main(argv=None) -> int:
         for r in conn.execute("SELECT ts,symbol,mode,side,volume,leverage,entry,stop,status FROM orders ORDER BY id DESC LIMIT 8"):
             print("  ", r)
         conn.close()
+        return 0
+    if args.web:
+        from .web import server
+        from . import config
+        # honor DEEPFIELD_WEB_PORT (via config.WEB_PORT) when --port is unset, so the
+        # standalone console and the in-process console resolve the same port.
+        server.serve(port=args.port if args.port is not None else config.WEB_PORT)
         return 0
     if args.exec_probe:
         from . import app

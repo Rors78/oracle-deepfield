@@ -236,11 +236,47 @@ async def _exec_state_refresh(appstate, conn, ing, interval=15):
                 else:
                     ps.cooldown_until = 0.0
                     ps.exec_plan = None
+            # v6 web console: persist the broker-only values (equity/margin/tick
+            # price/links) the read-only web server can't get from the DB. Pure
+            # display persistence — no trading effect. Never blanks the snapshot.
+            try:
+                _persist_web_live(conn, appstate, equity, margin_used, free_margin, balance)
+            except Exception:
+                log.exception("web_live persist failed (display value only)")
         except asyncio.CancelledError:
             raise
         except Exception:
             log.exception("exec state refresh failed (will retry)")
         await asyncio.sleep(interval)
+
+
+def _persist_web_live(conn, appstate, equity, margin_used, free_margin, balance):
+    """Write the read-only `web_live` meta blob for deepfield.web.server. Broker-
+    only fields (equity/margin/level/links/tick prices) that a DB reader can't see."""
+    import json as _json
+    import time as _t
+    prices, chg = {}, {}
+    for sym, ps in appstate.pairs.items():
+        if ps.last_tick:
+            prices[sym] = ps.last_tick.last
+            cp = getattr(ps.last_tick, "change_pct", None)
+            if cp is not None:
+                chg[sym] = round(cp, 1)
+    lvl = None
+    try:
+        lvl = float(balance["ml"]) if (balance and balance.get("ml")) else None
+    except (TypeError, ValueError, KeyError):
+        lvl = None
+    links = ([bool(appstate.links[n].get("up")) for n in sorted(appstate.links)]
+             if appstate.links else None)
+    blob = {
+        "equity": equity, "margin_used": margin_used, "free_margin": free_margin,
+        "margin_level": round(lvl) if lvl else None,
+        "capacity": appstate.exec.get("capacity"),
+        "prices": prices, "chg": chg, "links": links,
+        "mode": config.EXEC_MODE, "started": appstate.started_ts, "updated": _t.time(),
+    }
+    store.meta_set(conn, "web_live", _json.dumps(blob))
 
 
 async def _hourly_reconciler(ing):
@@ -294,9 +330,34 @@ def _startup(debug, announce=False):
     return conn, appstate, ing
 
 
+def _start_web_console():
+    """Serve the read-only web console in a daemon thread so one launch (the desktop
+    icon) brings up TUI + web together. Fully isolated: its own ro DB connections, a
+    guarded loop — it can never delay or crash the bot. Best-effort; a busy port just
+    logs and moves on."""
+    import threading
+
+    def _run():
+        try:
+            from .web import server as web_server
+            web_server.serve(port=config.WEB_PORT, quiet=True)
+        except OSError as e:
+            log.warning("web console not started (port %d in use?): %s", config.WEB_PORT, e)
+        except Exception:
+            log.exception("web console thread crashed (bot unaffected)")
+
+    threading.Thread(target=_run, name="web-console", daemon=True).start()
+    log.info("web console → http://127.0.0.1:%d", config.WEB_PORT)
+
+
 async def run_live(simple=False, debug=False):
     log.info("DEEPFIELD starting (simple=%s)", simple)
     conn, appstate, ing = _startup(debug, announce=not simple)
+    if config.WEB_ENABLED:
+        try:
+            _start_web_console()
+        except Exception:
+            log.exception("web console launch failed (bot continues)")
     _sys_journal(conn, f"process start — survey v{VERSION} · exec {config.EXEC_MODE}")
     symbols = [p["ws"] for p in config.PAIRS]
     queue = asyncio.Queue()

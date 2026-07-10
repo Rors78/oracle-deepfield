@@ -1,0 +1,987 @@
+<title>DEEPFIELD — operator console</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<style>
+/* ============================================================================
+   DEEPFIELD · web console redesign — visual system
+   A deep-field instrument: a single committed dark world (Hubble Deep Field),
+   matching the operator's tmux environment. Color is a legend: each data
+   CATEGORY owns one hue, always paired with a shape + label (never color alone).
+   Palette seeded from the live TUI (deepfield/ui.py:34-47).
+   ========================================================================== */
+:root{
+  color-scheme: dark;
+  /* deep-sky grounds — cool-biased neutrals, chosen not defaulted */
+  --sky-0:#06080b; --sky-1:#0a0d12; --sky-2:#0f131a; --sky-3:#141a23; --sky-4:#1a212c;
+  --line:#1b2029; --line-2:#252c37; --sel:#141c27;
+  /* ink */
+  --ink:#e7ecf0;      /* PRICE steel — primary data */
+  --ink-2:#aab3bd;    /* secondary data */
+  --ink-dim:#6b747c;  /* INK graphite — labels/units/chrome */
+  --ink-faint:#3e454c;/* FAINT — idle rows, tracks, separators */
+  /* the category legend */
+  --brass:#c9a85c;    /* THESIS — score, BUY, fills/rungs, detections */
+  --teal:#4fbfa3;     /* HEALTH — link, recon, live, coherence, rails ok */
+  --gain:#57b98a;     /* GAIN — positive P&L / up */
+  --loss:#d45d5d;     /* LOSS — negative P&L / down */
+  --alarm:#e0483e;    /* RISK — stops, near-stop, HALT, MISMATCH */
+  --time:#6fb3d2;     /* TIME — clocks, countdowns, ages, timestamps */
+  --violet:#a98fd6;   /* QTY — counts, volume, margin, notional, capacity */
+  --amber:#e09b4c;    /* ATTN — STALE, pending/resting bids, warnings */
+  --cyan:#8fd1c6;     /* IND — RSI / momentum */
+  /* glows */
+  --glow-brass:rgba(201,168,92,.16);
+  --glow-alarm:rgba(224,72,62,.20);
+  --glow-teal:rgba(79,191,163,.16);
+  /* type */
+  --mono:"JetBrains Mono","SFMono-Regular",ui-monospace,"Cascadia Code",Menlo,Consolas,monospace;
+  --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,"Helvetica Neue",Arial,sans-serif;
+  --r:6px;
+}
+/* single committed world: re-assert the instrument in every theme signal */
+@media (prefers-color-scheme: light){ :root{ color-scheme: dark; } }
+
+*{ box-sizing:border-box; }
+html,body{ margin:0; height:100%; }
+body{
+  background:
+    radial-gradient(1200px 700px at 78% -8%, rgba(30,40,55,.35), transparent 60%),
+    radial-gradient(900px 600px at 8% 108%, rgba(24,30,42,.4), transparent 55%),
+    var(--sky-0);
+  color:var(--ink);
+  font-family:var(--sans);
+  font-size:13px; line-height:1.45;
+  -webkit-font-smoothing:antialiased;
+  letter-spacing:.1px;
+}
+.mono{ font-family:var(--mono); font-variant-numeric:tabular-nums; }
+.num{ font-family:var(--mono); font-variant-numeric:tabular-nums; }
+.eyebrow{ font-size:10.5px; letter-spacing:.18em; text-transform:uppercase; color:var(--ink-dim); font-weight:600; }
+.dim{ color:var(--ink-dim); }
+.faint{ color:var(--ink-faint); }
+.gain{ color:var(--gain); } .loss{ color:var(--loss); }
+.brass{ color:var(--brass); } .teal{ color:var(--teal); } .alarm{ color:var(--alarm); }
+.time{ color:var(--time); } .violet{ color:var(--violet); } .amber{ color:var(--amber); } .cyan{ color:var(--cyan); }
+button{ font-family:inherit; color:inherit; }
+:focus-visible{ outline:2px solid var(--time); outline-offset:2px; border-radius:3px; }
+
+/* ── shell ─────────────────────────────────────────────────────────────── */
+.wrap{ max-width:1680px; margin:0 auto; padding:14px 18px 40px; }
+
+/* top identity bar */
+.topbar{ display:flex; align-items:baseline; justify-content:space-between; gap:16px; padding-bottom:10px; }
+.brand{ display:flex; align-items:baseline; gap:10px; }
+.brand b{ color:var(--brass); font-weight:700; letter-spacing:.22em; font-size:15px; }
+.brand .v{ color:var(--ink-dim); font-size:11px; letter-spacing:.06em; }
+.topclock{ color:var(--ink-dim); font-size:12px; }
+.topclock .num{ color:var(--time); }
+
+/* generic panel */
+.panel{ background:linear-gradient(180deg,var(--sky-1),var(--sky-0)); border:1px solid var(--line); border-radius:var(--r); }
+.band{ border:1px solid var(--line); border-radius:var(--r); background:var(--sky-1); }
+
+/* ── HEALTH strip — summary before detail ──────────────────────────────── */
+.health{ display:grid; grid-template-columns:1.35fr 1fr; gap:1px; background:var(--line); border:1px solid var(--line); border-radius:var(--r); overflow:hidden; margin-bottom:10px; }
+.health > div{ background:var(--sky-1); padding:11px 14px; }
+.hl{ display:flex; align-items:center; flex-wrap:wrap; gap:6px 18px; }
+.stat{ display:flex; flex-direction:column; gap:1px; }
+.stat .k{ font-size:9.5px; letter-spacing:.16em; text-transform:uppercase; color:var(--ink-dim); font-weight:600; }
+.stat .val{ font-family:var(--mono); font-variant-numeric:tabular-nums; font-size:15px; line-height:1.1; }
+.stat .val.big{ font-size:26px; letter-spacing:-.5px; }
+.stat .val.mid{ font-size:19px; }
+.sub{ font-size:10.5px; color:var(--ink-dim); font-family:var(--mono); }
+.vsep{ width:1px; align-self:stretch; background:var(--line-2); margin:2px 2px; }
+.dot{ display:inline-block; width:9px; height:9px; border-radius:50%; }
+.dot.up{ background:var(--teal); box-shadow:0 0 7px var(--glow-teal); }
+.dot.down{ background:var(--alarm); }
+.pill{ display:inline-flex; align-items:center; gap:5px; font-size:11px; font-weight:600; padding:2px 8px; border-radius:20px; letter-spacing:.04em; font-family:var(--mono); }
+.pill.live{ color:var(--brass); background:rgba(201,168,92,.1); border:1px solid rgba(201,168,92,.4); }
+.pill.ok{ color:var(--teal); background:rgba(79,191,163,.09); border:1px solid rgba(79,191,163,.3); }
+.pill.warn{ color:var(--amber); background:rgba(224,155,76,.09); border:1px solid rgba(224,155,76,.3); }
+.pill.crit{ color:var(--alarm); background:rgba(224,72,62,.12); border:1px solid rgba(224,72,62,.45); }
+.pill.mut{ color:var(--ink-dim); border:1px solid var(--line-2); }
+
+.equityrow{ display:flex; align-items:flex-end; gap:22px; }
+.spark{ display:block; }
+.flagnote{ font-size:9.5px; color:var(--ink-dim); }
+.flag{ display:inline-block; color:var(--amber); border:1px solid rgba(224,155,76,.4); border-radius:3px; font-size:8.5px; padding:0 4px; letter-spacing:.06em; vertical-align:middle; }
+
+.marginbar{ display:flex; align-items:center; gap:10px; margin-top:9px; font-family:var(--mono); font-size:11.5px; color:var(--ink-dim); flex-wrap:wrap; }
+.mtrack{ width:120px; height:7px; border-radius:4px; background:var(--sky-3); overflow:hidden; border:1px solid var(--line-2); }
+.mfill{ height:100%; background:linear-gradient(90deg,var(--violet),#7d63b8); }
+
+/* ── REGIME band ───────────────────────────────────────────────────────── */
+.regime{ display:flex; align-items:center; gap:22px; flex-wrap:wrap; padding:9px 14px; margin-bottom:12px; font-family:var(--mono); font-size:12px; color:var(--ink-dim); }
+.cd{ display:flex; align-items:center; gap:8px; }
+.cdtrack{ width:78px; height:6px; border-radius:4px; background:var(--sky-3); overflow:hidden; border:1px solid var(--line-2); }
+.cdfill{ height:100%; background:linear-gradient(90deg,var(--time),#4a86a6); }
+
+/* ── main layout: field + journal rail ─────────────────────────────────── */
+.grid{ display:grid; grid-template-columns:1fr 340px; gap:12px; align-items:start; }
+@media (max-width:1180px){ .grid{ grid-template-columns:1fr; } }
+
+.sectionhead{ display:flex; align-items:center; justify-content:space-between; padding:0 2px 8px; }
+.sectionhead .lead{ display:flex; align-items:baseline; gap:10px; }
+.sectionhead h2{ margin:0; font-size:12px; letter-spacing:.18em; text-transform:uppercase; color:var(--ink-2); font-weight:600; }
+.sectionhead .hint{ font-size:11px; color:var(--ink-dim); }
+.toggle{ display:inline-flex; border:1px solid var(--line-2); border-radius:6px; overflow:hidden; }
+.toggle button{ background:transparent; border:0; padding:4px 11px; font-size:11px; letter-spacing:.05em; color:var(--ink-dim); cursor:pointer; }
+.toggle button.on{ background:var(--sky-3); color:var(--ink); }
+
+/* FIELD table */
+.field{ display:flex; flex-direction:column; }
+.frow{ display:grid; grid-template-columns:88px 116px 96px 62px 92px 78px 74px 1fr; align-items:center; gap:10px;
+  padding:7px 12px; border:1px solid transparent; border-radius:7px; cursor:pointer; position:relative; }
+.frow + .frow{ margin-top:2px; }
+.frow:hover{ background:var(--sky-2); border-color:var(--line); }
+.frow.sel{ background:var(--sel); border-color:var(--line-2); }
+.frow .sym{ font-family:var(--mono); font-weight:700; font-size:15px; letter-spacing:.02em; }
+.frow.t-idle{ opacity:.42; }
+.frow.t-watch{ opacity:.82; }
+.frow.t-active{ background:var(--sky-2); border-color:var(--line); }
+.frow.t-active .sym{ color:var(--brass); text-shadow:0 0 12px var(--glow-brass); }
+.frow.t-buy .sym{ color:var(--brass); text-shadow:0 0 10px var(--glow-brass); }
+.tierbar{ position:absolute; left:0; top:6px; bottom:6px; width:3px; border-radius:3px; background:transparent; }
+.frow.t-active .tierbar{ background:var(--brass); }
+.frow.t-buy .tierbar{ background:var(--brass); opacity:.6; }
+.frow.fault .tierbar{ background:var(--alarm); box-shadow:0 0 8px var(--glow-alarm); }
+.px{ font-family:var(--mono); font-size:14px; text-align:right; }
+.chg{ font-family:var(--mono); font-size:12px; text-align:right; }
+.pos{ font-family:var(--mono); font-size:11.5px; color:var(--violet); text-align:right; }
+.pnl{ font-family:var(--mono); font-size:12.5px; text-align:right; }
+.arrow{ font-size:10px; }
+
+/* 7-signal grid — shows WHICH fired, not just the count (cross-pair columns) */
+.sig{ display:grid; grid-template-columns:repeat(7,1fr); gap:3px; width:112px; }
+.sigcell{ height:13px; border-radius:2px; background:var(--sky-4); border:1px solid var(--line-2); position:relative; }
+.sigcell.on{ background:var(--brass); border-color:var(--brass); box-shadow:0 0 6px var(--glow-brass); }
+.sigcell.na{ background:repeating-linear-gradient(45deg,var(--sky-3),var(--sky-3) 2px,transparent 2px,transparent 4px); }
+.sigcell.na::after{ content:""; position:absolute; inset:4px; border-left:1px solid var(--ink-faint); transform:rotate(30deg); }
+
+/* status pill in row */
+.st{ font-family:var(--mono); font-size:11px; font-weight:600; letter-spacing:.03em; text-align:left; white-space:nowrap; }
+.st.buy{ color:var(--brass); } .st.buywait{ color:var(--amber); } .st.hold{ color:var(--teal); }
+.st.stale{ color:var(--amber); } .st.near{ color:var(--alarm); } .st.wch{ color:var(--time); } .st.idle{ color:var(--ink-faint); }
+
+/* mini 52-week band (row sparkband) */
+.miniband{ position:relative; height:26px; }
+.miniband svg{ display:block; width:100%; height:100%; overflow:visible; }
+.mbmeta{ position:absolute; right:0; top:-1px; font-family:var(--mono); font-size:10px; color:var(--ink-dim); }
+
+/* JOURNAL rail */
+.journal{ position:sticky; top:12px; max-height:calc(100vh - 26px); display:flex; flex-direction:column; }
+.jhead{ display:flex; align-items:center; justify-content:space-between; padding:11px 13px 9px; border-bottom:1px solid var(--line); }
+.jfilter{ display:flex; gap:4px; }
+.jfilter button{ background:transparent; border:1px solid var(--line-2); border-radius:5px; padding:2px 7px; font-size:10px; color:var(--ink-dim); cursor:pointer; font-family:var(--mono); }
+.jfilter button.on{ color:var(--ink); background:var(--sky-3); border-color:var(--line-2); }
+.jfeed{ overflow-y:auto; padding:6px 8px 10px; scrollbar-width:thin; }
+.jrow{ display:grid; grid-template-columns:62px 52px 1fr; gap:8px; align-items:baseline; padding:3px 5px; border-radius:5px; font-family:var(--mono); font-size:11px; }
+.jrow:hover{ background:var(--sky-2); }
+.jrow.newest{ animation:land 1.1s ease; }
+@keyframes land{ 0%{ background:rgba(79,191,163,.22); } 100%{ background:transparent; } }
+.stream{ display:inline-flex; align-items:center; gap:5px; font-size:9.5px; letter-spacing:.1em; text-transform:uppercase; color:var(--teal); }
+.stream i{ width:6px; height:6px; border-radius:50%; background:var(--teal); animation:pulse 2s ease-in-out infinite; }
+@keyframes pulse{ 0%,100%{ opacity:.35; box-shadow:0 0 0 0 rgba(79,191,163,.35); } 50%{ opacity:1; box-shadow:0 0 0 4px rgba(79,191,163,0); } }
+@media (prefers-reduced-motion: reduce){ .stream i{ animation:none; } .jrow.newest{ animation:none; } }
+.jts{ color:var(--time); }
+.jkind{ font-weight:600; letter-spacing:.04em; font-size:10px; }
+.k-fill{ color:var(--teal); } .k-stop{ color:var(--alarm); } .k-order{ color:var(--ink-2); }
+.k-detect{ color:var(--brass); } .k-recon{ color:var(--teal); } .k-sys{ color:var(--ink-dim); } .k-expire{ color:var(--amber); }
+.jtext{ color:var(--ink-dim); }
+.jtext .s{ color:var(--ink); }
+.jday{ font-size:9.5px; letter-spacing:.14em; text-transform:uppercase; color:var(--ink-faint); padding:9px 5px 4px; border-top:1px solid var(--line); margin-top:4px; }
+.jday:first-child{ border-top:0; margin-top:0; }
+
+/* ── DETAIL view ───────────────────────────────────────────────────────── */
+.view{ display:none; }
+.view.active{ display:block; }
+.backbtn{ background:transparent; border:1px solid var(--line-2); border-radius:6px; padding:6px 12px; color:var(--ink-dim); cursor:pointer; font-size:11px; letter-spacing:.05em; }
+.backbtn:hover{ color:var(--ink); background:var(--sky-2); }
+.dhero{ display:flex; align-items:center; gap:20px; flex-wrap:wrap; padding:14px 4px 16px; }
+.dhero .dsym{ font-family:var(--mono); font-weight:700; font-size:30px; letter-spacing:.02em; color:var(--brass); text-shadow:0 0 18px var(--glow-brass); }
+.dhero .dpx{ font-family:var(--mono); font-size:34px; letter-spacing:-1px; }
+.dstat{ display:flex; flex-direction:column; gap:1px; padding:0 4px; }
+.dstat .k{ font-size:9.5px; letter-spacing:.14em; text-transform:uppercase; color:var(--ink-dim); }
+.dstat .val{ font-family:var(--mono); font-size:16px; }
+.dgrid{ display:grid; grid-template-columns:1fr 416px; gap:12px; align-items:start; }
+@media (max-width:1120px){ .dgrid{ grid-template-columns:1fr; } }
+.dcol{ display:flex; flex-direction:column; gap:12px; }
+.dgrid2{ display:grid; grid-template-columns:300px 1fr; gap:12px; align-items:start; margin-top:12px; }
+@media (max-width:1120px){ .dgrid2{ grid-template-columns:1fr; } }
+.card{ background:var(--sky-1); border:1px solid var(--line); border-radius:var(--r); padding:14px; }
+.card h3{ margin:0 0 10px; font-size:11px; letter-spacing:.16em; text-transform:uppercase; color:var(--ink-2); font-weight:600; display:flex; justify-content:space-between; align-items:baseline; }
+.chartwrap{ position:relative; }
+.chartwrap svg{ display:block; width:100%; height:auto; overflow:visible; }
+.chart-tip{ position:absolute; pointer-events:none; background:var(--sky-4); border:1px solid var(--line-2); border-radius:5px; padding:5px 8px; font-family:var(--mono); font-size:11px; color:var(--ink); opacity:0; transition:opacity .08s; white-space:nowrap; box-shadow:0 6px 18px rgba(0,0,0,.5); z-index:5; }
+.legend{ display:flex; flex-wrap:wrap; gap:6px 16px; margin-top:16px; font-size:10.5px; color:var(--ink-dim); font-family:var(--mono); }
+.legend span{ display:inline-flex; align-items:center; gap:6px; }
+.lg{ width:16px; height:0; border-top-width:2px; border-top-style:solid; display:inline-block; }
+.lgdot{ width:8px; height:8px; border-radius:50%; display:inline-block; }
+.lgring{ width:9px; height:9px; border-radius:50%; border:1.5px solid var(--amber); display:inline-block; }
+
+/* thesis checklist */
+.thesis li{ list-style:none; display:flex; align-items:flex-start; gap:9px; padding:6px 2px; border-bottom:1px solid var(--line); }
+.thesis ul{ margin:0; padding:0; }
+.tmark{ font-family:var(--mono); width:16px; text-align:center; flex:none; }
+.tmark.on{ color:var(--brass); } .tmark.off{ color:var(--ink-faint); } .tmark.na{ color:var(--amber); }
+.tname{ font-size:12.5px; }
+.tname.on{ color:var(--ink); } .tname.off{ color:var(--ink-dim); } .tname.na{ color:var(--ink-dim); }
+.natag{ font-size:9px; letter-spacing:.1em; text-transform:uppercase; color:var(--amber); border:1px solid rgba(224,155,76,.4); border-radius:3px; padding:0 4px; align-self:center; }
+.treason{ font-size:10.5px; color:var(--amber); font-family:var(--mono); margin-left:auto; align-self:center; text-align:right; max-width:220px; }
+
+/* ledger table */
+.ledger{ width:100%; border-collapse:collapse; font-family:var(--mono); font-variant-numeric:tabular-nums; font-size:12px; }
+.ledger th{ text-align:right; font-weight:500; font-size:9.5px; letter-spacing:.1em; text-transform:uppercase; color:var(--ink-dim); padding:0 8px 7px; border-bottom:1px solid var(--line); }
+.ledger th:first-child{ text-align:right; } .ledger th.l{ text-align:left; }
+.ledger td{ text-align:right; padding:4px 8px; border-bottom:1px solid rgba(27,32,41,.6); color:var(--ink-2); }
+.ledger td.l{ text-align:left; }
+.ledger tr:hover td{ background:var(--sky-2); }
+.ledger .st-live{ color:var(--teal); }
+.ledger tr.rest td{ color:var(--amber); }
+.ledger tfoot td{ border-top:1px solid var(--line-2); border-bottom:0; padding-top:8px; color:var(--ink); font-weight:600; }
+.tradezone svg{ overflow:visible; }
+
+/* ── SPEC view ─────────────────────────────────────────────────────────── */
+.speccols{ columns:2; column-gap:16px; }
+@media (max-width:900px){ .speccols{ columns:1; } }
+.specblock{ break-inside:avoid; margin-bottom:16px; }
+.swatch{ display:flex; align-items:center; gap:10px; padding:5px 0; }
+.sw{ width:26px; height:26px; border-radius:5px; flex:none; border:1px solid rgba(255,255,255,.06); }
+.swatch .nm{ font-family:var(--mono); font-size:12px; }
+.swatch .hx{ font-family:var(--mono); font-size:10.5px; color:var(--ink-dim); }
+.swatch .use{ font-size:10.5px; color:var(--ink-dim); margin-left:auto; text-align:right; max-width:170px; }
+.stategrid{ display:flex; flex-wrap:wrap; gap:8px; }
+.tscale > div{ padding:4px 0; border-bottom:1px solid var(--line); color:var(--ink); }
+.tscale .lab{ font-size:10px; color:var(--ink-dim); font-family:var(--mono); }
+.note{ font-size:11px; color:var(--ink-dim); line-height:1.55; }
+.note b{ color:var(--ink-2); font-weight:600; }
+
+/* app nav */
+.appnav{ display:flex; gap:4px; margin-left:auto; }
+.appnav button{ background:transparent; border:1px solid var(--line-2); border-radius:6px; padding:5px 12px; font-size:11px; letter-spacing:.06em; color:var(--ink-dim); cursor:pointer; }
+.appnav button.on{ background:var(--sky-3); color:var(--ink); }
+
+.footer{ margin-top:22px; padding-top:14px; border-top:1px solid var(--line); font-size:11px; color:var(--ink-dim); line-height:1.7; }
+.footer b{ color:var(--ink-2); }
+
+.keybar{ margin-top:12px; font-family:var(--mono); font-size:10.5px; color:var(--ink-faint); letter-spacing:.03em; }
+</style>
+
+<div class="wrap">
+  <div class="topbar">
+    <div class="brand">
+      <b>DEEPFIELD</b><span class="v">survey · v6.0.0 · web console — live</span>
+    </div>
+    <div class="appnav" id="appnav">
+      <button data-nav="field" class="on">Field</button>
+      <button data-nav="detail">Pair detail</button>
+      <button data-nav="spec">Visual system</button>
+    </div>
+    <div class="topclock mono" id="topclock">tue jul 07 · <span class="num">13:30:16</span> mt · 19:30 utc · up <span class="num">06:53:33</span></div>
+  </div>
+
+  <div id="liveerr" style="display:none;color:var(--alarm);font-size:11px;padding:2px 4px 8px">● live API disconnected — retrying…</div>
+
+  <!-- ═══════════════ FIELD (overview) ═══════════════ -->
+  <section class="view active" id="view-field">
+
+    <div class="health" id="healthstrip"></div>
+
+    <!-- REGIME -->
+    <div class="band regime" id="regimestrip"></div>
+
+    <!-- FIELD + JOURNAL -->
+    <div class="grid">
+      <div>
+        <div class="sectionhead">
+          <div class="lead">
+            <h2>The Field</h2>
+            <span class="hint">15 pairs · sorted by attention — faults, BUYs, positions, watch, idle · click a pair to drill in</span>
+          </div>
+          <div class="toggle" id="fieldmode">
+            <button data-fm="field" class="on">Field</button>
+            <button data-fm="book">Book · all rungs</button>
+          </div>
+        </div>
+        <div class="field" id="fieldbody"></div>
+        <div class="keybar">signals grid reads <b style="color:var(--brass)">■</b> fired · <span class="faint">■</span> quiet · <span class="amber">▨</span> n/a — scan a column to catch a signal lighting across pairs</div>
+      </div>
+
+      <!-- live journal rail -->
+      <aside class="band journal">
+        <div class="jhead">
+          <div class="lead" style="display:flex;flex-direction:column;gap:1px">
+            <h2 style="margin:0;font-size:11px;letter-spacing:.16em;text-transform:uppercase;color:var(--ink-2)">Journal</h2>
+            <span class="stream"><i></i> streaming · live</span>
+          </div>
+          <div class="jfilter" id="jfilter">
+            <button data-jf="all" class="on">all</button>
+            <button data-jf="fill">fills</button>
+            <button data-jf="detect">detect</button>
+          </div>
+        </div>
+        <div class="jfeed" id="jfeed"></div>
+      </aside>
+    </div>
+  </section>
+
+  <!-- ═══════════════ PAIR DETAIL ═══════════════ -->
+  <section class="view" id="view-detail">
+    <div style="display:flex;align-items:center;gap:14px;padding:2px 2px 4px">
+      <button class="backbtn" id="backbtn">← Field</button>
+      <span class="hint dim" id="detailcrumb" style="font-size:11px"></span>
+    </div>
+    <div class="dhero" id="dhero"></div>
+
+    <div class="dgrid">
+      <div class="card chartwrap">
+        <h3><span>52-week range <span class="dim" style="font-weight:400;text-transform:none;letter-spacing:0">· daily close · price plotted on its yearly range</span></span><span class="dim" id="chartrange"></span></h3>
+        <div class="chartwrap" id="bigchart"></div>
+        <div class="chart-tip" id="bigtip"></div>
+        <div class="legend">
+          <span><span class="lg" style="border-color:var(--cyan)"></span> price</span>
+          <span><span class="lgdot" style="background:var(--brass)"></span> filled rung</span>
+          <span><span class="lgring"></span> resting bid</span>
+          <span><span class="lg" style="border-color:var(--ink-2);border-top-style:dashed"></span> avg entry</span>
+          <span><span class="lg" style="border-color:var(--alarm)"></span> protective stop</span>
+          <span><span class="lg" style="border-color:var(--ink-faint);border-top-style:dotted"></span> 52w hi/lo</span>
+        </div>
+      </div>
+
+      <div class="dcol">
+        <div class="card thesis" id="thesiscard">
+          <h3><span>Thesis</span><span class="dim mono" id="thesisscore"></span></h3>
+          <ul id="thesislist"></ul>
+          <div class="note" id="thesisfoot" style="margin-top:11px"></div>
+        </div>
+        <div class="card tradezone" id="tradezonecard">
+          <h3><span>Trade zone</span><span class="dim" style="font-weight:400;text-transform:none;letter-spacing:0">zoomed</span></h3>
+          <div class="chartwrap" id="zonechart"></div>
+          <div class="note" id="zonenote" style="margin-top:8px">The ladder, zoomed off the 52-week scale — every rung, the average, the resting bid and the stop, spaced so nothing collides. <b>Both scales visible at once</b> — the fix for the terminal's silent re-anchor.</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card" style="margin-top:12px">
+      <h3><span>Ladder ledger</span><span class="dim mono" id="ledgersig"></span></h3>
+      <div style="overflow-x:auto">
+        <table class="ledger" id="ledgertbl"></table>
+      </div>
+    </div>
+
+    <div class="card" style="margin-top:12px">
+      <h3><span>Pair feed</span><span class="dim" style="font-weight:400;text-transform:none;letter-spacing:0" id="feedsym"></span></h3>
+      <div id="pairfeed"></div>
+    </div>
+  </section>
+
+  <!-- ═══════════════ VISUAL SYSTEM / SPEC ═══════════════ -->
+
+  <section class="view" id="view-spec">
+    <div class="sectionhead"><div class="lead"><h2>Visual system &amp; component states</h2><span class="hint">what the coder builds against — every carry-forward state rendered, not described</span></div></div>
+    <div class="speccols">
+
+      <div class="specblock card">
+        <h3>Color is a legend</h3>
+        <p class="note" style="margin-top:0">Each data <b>category</b> owns one hue, used for that category everywhere. Seeded from the live TUI palette. Every hue always ships with a <b>shape + label</b> — never color alone (colorblind-safe by construction; validated against the near-black surface).</p>
+        <div id="palette"></div>
+      </div>
+
+      <div class="specblock card">
+        <h3>Status — pills &amp; row states</h3>
+        <p class="note" style="margin-top:0">State reads in form as well as color. Carried forward intact from the TUI:</p>
+        <div class="stategrid" id="states"></div>
+      </div>
+
+      <div class="specblock card">
+        <h3 style="color:var(--alarm)">Fault state — NEAR-STOP</h3>
+        <p class="note" style="margin-top:0">When price sits within 3% of the stop, the pair promotes to the top of the field with a red rail, and the band segment between price and stop paints red — one wick from being swept. Live example (illustrative pair):</p>
+        <div class="field" id="faultrow" style="margin-top:10px"></div>
+      </div>
+
+      <div class="specblock card">
+        <h3>Type scale</h3>
+        <div class="tscale">
+          <div style="font-size:30px" class="mono">$79.54 <span class="lab">— hero / equity · mono 30</span></div>
+          <div style="font-size:19px" class="mono">−$3.23 <span class="lab">— key figures · mono 19</span></div>
+          <div style="font-size:14px" class="mono">$43.87 <span class="lab">— table data · mono 14 · tabular</span></div>
+          <div style="font-size:12px">Below W-EMA200 <span class="lab">— body · sans 12–13</span></div>
+          <div class="eyebrow">Section eyebrow <span class="lab" style="letter-spacing:0">— sans 10.5 · tracked caps</span></div>
+        </div>
+        <p class="note">Two voices: a grotesque for <b>chrome &amp; labels</b>, monospace with tabular figures for <b>every number</b> so columns align across the field. No webfonts (CSP-safe native stacks — no silent fallback).</p>
+      </div>
+
+      <div class="specblock card">
+        <h3>52-week band — the one spatial language</h3>
+        <p class="note" style="margin-top:0">The signature mark. Price plotted on its 52-week range so "near the yearly low" is <b>geometric</b>. On the field it's a 1-row spark; on the detail page it grows into a real chart + a zoomed trade-zone (both scales visible — the TUI showed only one at a time).</p>
+        <div style="margin-top:10px"><svg id="specband" width="100%" height="30"></svg></div>
+        <div class="legend" style="margin-top:8px">
+          <span><span class="lgdot" style="background:var(--brass)"></span> fills</span>
+          <span><span class="lgring"></span> resting bid</span>
+          <span><span class="lg" style="border-color:var(--alarm)"></span> stop</span>
+          <span style="color:var(--gain)">▲ price (green ≥ avg / red below)</span>
+        </div>
+      </div>
+
+      <div class="specblock card">
+        <h3>Margin level thresholds</h3>
+        <div class="note">Encoded by color + value, carried from the TUI:</div>
+        <div style="display:flex;flex-direction:column;gap:6px;margin-top:8px" class="mono">
+          <div><span class="teal">552%</span> <span class="dim">— healthy · &gt; 500</span></div>
+          <div><span class="amber">180%</span> <span class="dim">— caution · ≥ 150</span></div>
+          <div><span class="alarm">120%</span> <span class="dim">— danger · &lt; 150</span></div>
+        </div>
+      </div>
+
+      <div class="specblock card">
+        <h3>Empty · loading · error</h3>
+        <div style="display:flex;flex-direction:column;gap:8px;margin-top:6px">
+          <div class="band" style="padding:14px;text-align:center;color:var(--ink-dim);font-size:12px">No open positions or resting orders</div>
+          <div class="band" style="padding:14px;text-align:center;color:var(--ink-dim);font-size:12px">
+            <span class="mono" style="color:var(--time)">⟳</span> loading snapshot…
+          </div>
+          <div class="band" style="padding:14px;text-align:center;color:var(--alarm);font-size:12px;border-color:rgba(224,72,62,.4)">
+            ● link DOWN — last tick 3m ago · showing last known state
+          </div>
+        </div>
+      </div>
+
+      <div class="specblock card">
+        <h3 style="color:var(--amber)">Flags — not in the data palette</h3>
+        <p class="note" style="margin-top:0">One element needs data the bot doesn't persist yet. Everything else is drawn from real fields.</p>
+        <div class="note"><span class="flag">△ trend</span> <b>Equity sparkline</b> — needs periodic equity snapshots persisted to a table (current + peak equity <i>are</i> available; the series is not). Designed as optional — nothing depends on it. Flagged per brief before committing the layout to it.</div>
+        <p class="note" style="margin-top:10px">Recovered <b>from</b> the palette but unused by the TUI, now surfaced: <b>peak equity</b>, <b>week realized P&amp;L</b>, per-signal <b>N/A reasons</b>, average-entry on the row, the full <b>52-week charts</b> (16,711 candles in the DB, zero drawn before).</p>
+      </div>
+
+    </div>
+  </section>
+</div>
+
+<script>
+"use strict";
+/* ── real data ─────────────────────────────────────────────────────────── */
+const SIGNALS = [
+  {code:"E2",  name:"Below W-EMA200"},
+  {code:"RSI", name:"W-RSI < 40 turning up"},
+  {code:"MACD",name:"W-MACD hist cross-up"},
+  {code:"DIV", name:"D-RSI bullish divergence"},
+  {code:"UP1", name:"W first up-close"},
+  {code:"VOL", name:"W volume accumulation"},
+  {code:"LOW", name:"Near 52-week low (<20%)"},
+];
+// per-pair signal state: 1 fired · 0 quiet · -1 n/a(+reason). LTC/SUI = real.
+const F=1,Q=0,NA=-1;
+let PAIRS=[], PMAP={}, JOURNAL=[], HEALTH={}, REGIME={};
+const CLOSES={};        // per-pair daily close series (fetched from /api/pair)
+const START_TS={};      // per-pair series start ts (unix)
+
+/* ── formatting ────────────────────────────────────────────────────────── */
+const fmtPx = v => v==null ? "—" : v>=1000 ? "$"+v.toLocaleString('en-US',{maximumFractionDigits:0})
+                                : v>=1 ? "$"+v.toFixed(2) : "$"+v.toFixed(4);
+const fmtUsd = v => { if(v==null) return "—"; if(Math.abs(v)<0.005) return "$0.00";
+  return (v>0?"+$":"−$")+Math.abs(v).toFixed(2); };
+const fmtVol = v => String(parseFloat(v.toFixed(6)));   // 1.7/17 → 0.1, not 0.09999…
+const pnlClass = v => v>=0 ? "gain":"loss";
+const fmtChg = v => v==null?"—":(v>=0?"+":"")+v.toFixed(1)+"%";
+
+/* ── field rendering ───────────────────────────────────────────────────── */
+function bandSVG(p, w, h){
+  // returns inner SVG markup for a mini 52-week band
+  const lo=p.lo, hi=p.hi, pad=3, ww=w-pad*2;
+  const X = v => pad + ((Math.max(lo,Math.min(hi,v))-lo)/(hi-lo))*ww;
+  const midY = h/2;
+  let s = `<line x1="${pad}" y1="${midY}" x2="${w-pad}" y2="${midY}" stroke="var(--ink-faint)" stroke-width="1"/>`;
+  // proximity segment (price within 3% above stop) → red
+  if(p.stop){
+    const prox = p.price>0 && (p.price-p.stop)/p.stop < 0.03;
+    if(prox){ s += `<line x1="${X(p.stop)}" y1="${midY}" x2="${X(p.price)}" y2="${midY}" stroke="var(--alarm)" stroke-width="2"/>`; }
+  }
+  // fills
+  if(p.rungs){ p.rungs.forEach(r=>{ s += `<circle cx="${X(r)}" cy="${midY}" r="2" fill="var(--brass)"/>`; }); }
+  // resting bid (hollow)
+  if(p.bid!=null){ s += `<circle cx="${X(p.bid)}" cy="${midY}" r="2.6" fill="none" stroke="var(--amber)" stroke-width="1.3"/>`; }
+  // stop tick
+  if(p.stop!=null){ s += `<line x1="${X(p.stop)}" y1="${midY-6}" x2="${X(p.stop)}" y2="${midY+6}" stroke="var(--alarm)" stroke-width="1.6"/>`; }
+  // price cursor
+  const col = p.avg==null ? "var(--ink)" : (p.price>=p.avg ? "var(--gain)":"var(--loss)");
+  const cx = X(p.price);
+  s += `<path d="M${cx-4} ${midY-8} L${cx+4} ${midY-8} L${cx} ${midY-1} Z" fill="${col}"/>`;
+  s += `<circle cx="${cx}" cy="${midY}" r="1.6" fill="${col}"/>`;
+  return s;
+}
+
+function sigGrid(p){
+  return `<div class="sig" title="${p.sym} signals">` + p.sig.map((s,i)=>{
+    const cls = s===F?"on": s===NA?"na":"";
+    const t = SIGNALS[i].name + (s===F?" — fired": s===NA?" — N/A":" — quiet");
+    return `<div class="sigcell ${cls}" title="${t}"></div>`;
+  }).join("") + `</div>`;
+}
+
+function fieldRow(p){
+  const near = p.rungs && p.stop && p.price && (p.price-p.stop)/p.stop < 0.03;
+  const cls = "frow t-"+p.tier + (near?" fault":"");
+  const chgCls = p.chg>=0?"gain":"loss";
+  const chgArrow = p.chg>=0?"▲":"▼";
+  const posCell = p.fills ? `<div class="pos">${p.fills}f·${p.size}</div>` : `<div class="pos dim">—</div>`;
+  const pnlCell = p.pnl!=null ? `<div class="pnl ${pnlClass(p.pnl)}">${fmtUsd(p.pnl)}</div>` : `<div class="pnl dim">—</div>`;
+  const stopMeta = p.stop!=null
+     ? `<span class="mbmeta">${(((p.stop/p.price)-1)*100).toFixed(1)}% stop · +${p.pctLow}% ↑low</span>`
+     : `<span class="mbmeta">+${p.pctLow}% ↑52w low</span>`;
+  return `<div class="${cls}" data-sym="${p.sym}" role="button" tabindex="0">
+    <span class="tierbar"></span>
+    <div class="sym">${p.sym}</div>
+    ${sigGrid(p)}
+    <div class="px">${fmtPx(p.price)}</div>
+    <div class="chg ${(p.chg||0)>=0?'gain':'loss'}">${fmtChg(p.chg)}</div>
+    ${posCell}
+    ${pnlCell}
+    <div class="st ${p.stStyle}">${p.status}</div>
+    <div class="miniband"><svg viewBox="0 0 300 26" preserveAspectRatio="none">${bandSVG(p,300,26)}</svg>${stopMeta}</div>
+  </div>`;
+}
+
+function renderField(){
+  const RANK={active:0,buy:1,watch:2,idle:3};
+  const ordered=[...PAIRS].sort((a,b)=>(RANK[a.tier]-RANK[b.tier])||(b.score-a.score)||a.sym.localeCompare(b.sym));
+  document.getElementById("fieldbody").innerHTML = ordered.map(fieldRow).join("");
+  document.querySelectorAll(".frow").forEach(r=>{
+    r.addEventListener("click", ()=>openDetail(r.dataset.sym));
+    r.addEventListener("keydown", e=>{ if(e.key==="Enter"||e.key===" "){ e.preventDefault(); openDetail(r.dataset.sym);} });
+  });
+}
+
+/* book view — all rungs across pairs */
+function renderBook(){
+  const body = document.getElementById("fieldbody");
+  const active = PAIRS.filter(p=>p.rungs);
+  body.innerHTML = active.map(p=>{
+    const rows = p.rungs.map((r,i)=>{
+      const vi = p.vols ? p.vols[i] : p.size/p.fills;   // real conviction-sized vol, not the average
+      const up = (p.price-r)*vi;
+      return `<tr><td class="l dim">#${i+1}</td><td>${fmtVol(vi)}@${p.lev}x</td><td>${fmtPx(r)}</td>
+        <td class="dim">now ${fmtPx(p.price)}</td><td class="${pnlClass(up)}">${fmtUsd(up)}</td>
+        <td class="alarm">stop ${fmtPx(p.stop)}</td><td class="st-live">live</td></tr>`;
+    }).join("");
+    const bidList = p.bids && p.bids.length ? p.bids : (p.bid!=null ? [{price:p.bid, vol:null}] : []);
+    const restRows = bidList.map(b=>
+      `<tr class="rest"><td class="l">○</td><td>${b.vol!=null?fmtVol(b.vol):"—"}</td><td>@ ${fmtPx(b.price)}</td><td colspan="4" class="l">resting post-only</td></tr>`
+    ).join("");
+    // real per-pair stop coverage (open fills with a resting stop_txid), not a hardcode:
+    // all covered → teal ▣ coherent; a gap → alarm ▢ N/M stops (mirrors the header badge).
+    // p.stops absent (older server not yet restarted) → assume coherent, never false-alarm.
+    const coh = (p.stops == null || p.stops >= p.fills)
+      ? `<span class="teal">▣ coherent</span>`
+      : `<span class="alarm">▢ ${p.stops}/${p.fills} stops</span>`;
+    return `<div class="card" style="margin-bottom:10px">
+      <h3 style="margin-bottom:8px"><span style="color:var(--brass)">${p.sym}</span>
+        <span class="dim mono" style="font-weight:400;text-transform:none;letter-spacing:0">${p.fills}f · ${p.size} vol · ø ${fmtPx(p.avg)} · uP&L <span class="${pnlClass(p.pnl)}">${fmtUsd(p.pnl)}</span> · stop ${fmtPx(p.stop)} ${coh}</span></h3>
+      <div style="overflow-x:auto"><table class="ledger">${rows}${restRows}</table></div></div>`;
+  }).join("");
+}
+
+/* ── journal rail ──────────────────────────────────────────────────────── */
+let jFilter = "all";
+function renderJournal(){
+  const feed = document.getElementById("jfeed");
+  let lastDay=null, html="";
+  JOURNAL.filter(j=> jFilter==="all"||j[1]===jFilter).forEach((j,idx)=>{
+    const [ts,kind,sym,text,day]=j;
+    if(day!==lastDay){ html+=`<div class="jday">${day}</div>`; lastDay=day; }
+    const symHtml = sym?`<span class="s">${sym.replace('/USD','')}</span> `:"";
+    html+=`<div class="jrow${idx===0&&jFilter==="all"?" newest":""}">
+      <span class="jts">${ts}</span>
+      <span class="jkind k-${kind}">${kind.toUpperCase()}</span>
+      <span class="jtext">${symHtml}${text}</span></div>`;
+  });
+  feed.innerHTML = html;
+}
+
+/* ── detail: big 52-week chart ─────────────────────────────────────────── */
+const CW=760, CH=300, PADL=52, PADR=16, PADT=14, PADB=26;
+function niceTicks(min,max,n){
+  const span=max-min, step0=span/n, mag=Math.pow(10,Math.floor(Math.log10(step0)));
+  const norm=step0/mag, step=(norm>=5?5:norm>=2?2:1)*mag;
+  const out=[]; for(let v=Math.ceil(min/step)*step; v<=max+1e-9; v+=step) out.push(v); return out;
+}
+function bigChart(p){
+  const series = CLOSES[p.sym];
+  const hasSeries = !!(series && series.length);
+  const startTs = START_TS[p.sym] || 0;
+  const el = document.getElementById("bigchart");
+  const tip = document.getElementById("bigtip");
+  if(!hasSeries){
+    el.innerHTML = `<div style="height:${CH}px;display:flex;align-items:center;justify-content:center;color:var(--ink-dim);font-size:12px">loading ${p.sym} series…</div>`;
+    return;
+  }
+  const n=series.length;
+  const dmin=Math.min(...series, p.stop??Infinity), dmax=Math.max(...series);
+  const yMin=dmin*0.985, yMax=dmax*1.02;
+  const X=i=> PADL + i/(n-1)*(CW-PADL-PADR);
+  const Y=v=> PADT + (1-(v-yMin)/(yMax-yMin))*(CH-PADT-PADB);
+  const line = series.map((v,i)=>(i?"L":"M")+X(i).toFixed(1)+" "+Y(v).toFixed(1)).join(" ");
+  const area = line+` L${X(n-1).toFixed(1)} ${(CH-PADB)} L${PADL} ${(CH-PADB)} Z`;
+  let g="";
+  niceTicks(yMin,yMax,4).forEach(v=>{
+    g+=`<line x1="${PADL}" y1="${Y(v).toFixed(1)}" x2="${CW-PADR}" y2="${Y(v).toFixed(1)}" stroke="var(--line)" stroke-width="1"/>
+        <text x="${PADL-8}" y="${Y(v)+3}" text-anchor="end" fill="var(--ink-dim)" font-size="10" font-family="var(--mono)">${fmtPx(v)}</text>`;
+  });
+  // month ticks along x
+  let xlab="";
+  for(let m=0;m<=11;m+=2){ const i=Math.round(m/12*(n-1)); const d=new Date((startTs+i*86400)*1000);
+    xlab+=`<text x="${X(i)}" y="${CH-8}" text-anchor="middle" fill="var(--ink-faint)" font-size="9.5" font-family="var(--mono)">${d.toLocaleString('en-US',{month:'short'}).toLowerCase()}</text>`; }
+  // 52w hi/lo reference
+  const refs = `<line x1="${PADL}" y1="${Y(p.hi)}" x2="${CW-PADR}" y2="${Y(p.hi)}" stroke="var(--ink-faint)" stroke-width="1" stroke-dasharray="2 3"/>
+    <text x="${CW-PADR}" y="${Y(p.hi)-4}" text-anchor="end" fill="var(--ink-faint)" font-size="9" font-family="var(--mono)">52w high ${fmtPx(p.hi)}</text>
+    <line x1="${PADL}" y1="${Y(p.lo)}" x2="${CW-PADR}" y2="${Y(p.lo)}" stroke="var(--ink-faint)" stroke-width="1" stroke-dasharray="2 3"/>`;
+  // position zone (min→max rung) shaded + avg + stop
+  let overlay="";
+  if(p.rungs){
+    const rmin=Math.min(...p.rungs), rmax=Math.max(...p.rungs);
+    overlay += `<rect x="${PADL}" y="${Y(rmax).toFixed(1)}" width="${CW-PADL-PADR}" height="${(Y(rmin)-Y(rmax)).toFixed(1)}" fill="rgba(201,168,92,.08)"/>`;
+    overlay += `<line x1="${PADL}" y1="${Y(p.avg)}" x2="${CW-PADR}" y2="${Y(p.avg)}" stroke="var(--ink-2)" stroke-width="1.4" stroke-dasharray="5 3"/>
+      <text x="${PADL+4}" y="${Y(p.avg)-4}" fill="var(--ink-2)" font-size="9.5" font-family="var(--mono)">ø ${fmtPx(p.avg)}</text>`;
+    overlay += `<line x1="${PADL}" y1="${Y(p.stop)}" x2="${CW-PADR}" y2="${Y(p.stop)}" stroke="var(--alarm)" stroke-width="1.6"/>
+      <text x="${PADL+4}" y="${Y(p.stop)+12}" fill="var(--alarm)" font-size="9.5" font-family="var(--mono)">stop ${fmtPx(p.stop)}</text>`;
+    // rungs as dots near the right edge (they're all recent)
+    p.rungs.forEach(r=> overlay+=`<circle cx="${X(n-1)-6}" cy="${Y(r).toFixed(1)}" r="2.4" fill="var(--brass)"/>`);
+    if(p.bid!=null) overlay+=`<circle cx="${X(n-1)-6}" cy="${Y(p.bid).toFixed(1)}" r="3" fill="none" stroke="var(--amber)" stroke-width="1.4"/>`;
+  }
+  // emphasized endpoint (current price)
+  const endCol = p.avg&&p.price>=p.avg?"var(--gain)":(p.avg?"var(--loss)":"var(--cyan)");
+  overlay+=`<circle cx="${X(n-1)}" cy="${Y(p.price)}" r="4" fill="${endCol}"/><circle cx="${X(n-1)}" cy="${Y(p.price)}" r="8" fill="none" stroke="${endCol}" stroke-opacity=".4" stroke-width="1"/>`;
+
+  el.innerHTML = `<svg viewBox="0 0 ${CW} ${CH}" role="img" aria-label="${p.sym} 52-week price">
+    <defs><linearGradient id="ag" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="var(--cyan)" stop-opacity=".22"/><stop offset="1" stop-color="var(--cyan)" stop-opacity="0"/>
+    </linearGradient></defs>
+    ${g}${xlab}${refs}
+    <path d="${area}" fill="url(#ag)"/>
+    <path d="${line}" fill="none" stroke="var(--cyan)" stroke-width="1.6"/>
+    ${overlay}
+    <line id="cross" x1="0" y1="${PADT}" x2="0" y2="${CH-PADB}" stroke="var(--ink-2)" stroke-width="1" opacity="0"/>
+    <rect id="hit" x="${PADL}" y="0" width="${CW-PADL-PADR}" height="${CH}" fill="transparent"/>
+  </svg>`;
+  // hover crosshair + tooltip
+  const svg=el.querySelector("svg"), cross=el.querySelector("#cross"), hit=el.querySelector("#hit");
+  hit.addEventListener("mousemove", e=>{
+    const r=svg.getBoundingClientRect(); const px=(e.clientX-r.left)/r.width*CW;
+    let i=Math.round((px-PADL)/(CW-PADL-PADR)*(n-1)); i=Math.max(0,Math.min(n-1,i));
+    cross.setAttribute("x1",X(i)); cross.setAttribute("x2",X(i)); cross.setAttribute("opacity",".6");
+    const d=new Date((startTs+i*86400)*1000);
+    tip.style.opacity=1;
+    tip.innerHTML=`<span class="dim">${d.toLocaleString('en-US',{month:'short',day:'numeric'})}</span> ${fmtPx(series[i])}`;
+    const localX=X(i)/CW*r.width; tip.style.left=Math.min(r.width-90,localX+10)+"px"; tip.style.top="10px";
+  });
+  hit.addEventListener("mouseleave", ()=>{ cross.setAttribute("opacity","0"); tip.style.opacity=0; });
+}
+
+/* ── trade-zone (vertical ladder rail) ─────────────────────────────────── */
+function zoneChart(p){
+  const el=document.getElementById("zonechart");
+  if(!p.rungs){ el.innerHTML=`<div class="note" style="padding:24px 0;text-align:center">No open ladder — this pair is on watch.</div>`; return; }
+  const W=270,H=300,pl=8,pr=64,pt=8,pb=8;
+  const vals=[...p.rungs,p.avg,p.bid,p.price,p.stop];
+  const yMin=Math.min(...vals)*0.997, yMax=Math.max(...vals)*1.003;
+  const Y=v=> pt+(1-(v-yMin)/(yMax-yMin))*(H-pt-pb);
+  const xa=pl+26, xb=W-pr;
+  let s=`<line x1="${xa}" y1="${pt}" x2="${xa}" y2="${H-pb}" stroke="var(--line-2)" stroke-width="1"/>`;
+  // stop zone shading (below stop)
+  s+=`<rect x="${xa}" y="${Y(p.stop)}" width="${xb-xa}" height="${H-pb-Y(p.stop)}" fill="rgba(224,72,62,.07)"/>`;
+  // rungs
+  p.rungs.forEach(r=>{
+    const under=r>p.price;
+    s+=`<line x1="${xa}" y1="${Y(r).toFixed(1)}" x2="${xb}" y2="${Y(r).toFixed(1)}" stroke="var(--brass)" stroke-opacity=".55" stroke-width="1.4"/>
+        <circle cx="${xa}" cy="${Y(r).toFixed(1)}" r="2.4" fill="var(--brass)"/>`;
+  });
+  // avg
+  s+=`<line x1="${xa}" y1="${Y(p.avg)}" x2="${xb}" y2="${Y(p.avg)}" stroke="var(--ink-2)" stroke-width="1.4" stroke-dasharray="5 3"/>
+      <text x="${xb+4}" y="${Y(p.avg)+3}" fill="var(--ink-2)" font-size="10" font-family="var(--mono)">ø ${fmtPx(p.avg)}</text>`;
+  // bid (hollow)
+  s+=`<circle cx="${xa}" cy="${Y(p.bid)}" r="3.4" fill="none" stroke="var(--amber)" stroke-width="1.5"/>
+      <line x1="${xa}" y1="${Y(p.bid)}" x2="${xb}" y2="${Y(p.bid)}" stroke="var(--amber)" stroke-opacity=".5" stroke-width="1" stroke-dasharray="2 3"/>
+      <text x="${xb+4}" y="${Y(p.bid)+3}" fill="var(--amber)" font-size="10" font-family="var(--mono)">bid ${fmtPx(p.bid)}</text>`;
+  // price cursor
+  const col=p.price>=p.avg?"var(--gain)":"var(--loss)";
+  s+=`<line x1="${xa}" y1="${Y(p.price)}" x2="${xb}" y2="${Y(p.price)}" stroke="${col}" stroke-width="1.6"/>
+      <path d="M${xa-8} ${Y(p.price)-4} L${xa-8} ${Y(p.price)+4} L${xa-2} ${Y(p.price)} Z" fill="${col}"/>
+      <text x="${xb+4}" y="${Y(p.price)+3}" fill="${col}" font-size="10" font-family="var(--mono)">${fmtPx(p.price)}</text>`;
+  // stop
+  s+=`<line x1="${xa}" y1="${Y(p.stop)}" x2="${xb}" y2="${Y(p.stop)}" stroke="var(--alarm)" stroke-width="1.8"/>
+      <text x="${xb+4}" y="${Y(p.stop)+3}" fill="var(--alarm)" font-size="10" font-family="var(--mono)">stop</text>
+      <text x="${xb+4}" y="${Y(p.stop)+15}" fill="var(--alarm)" font-size="9" font-family="var(--mono)" opacity=".8">${((p.stop/p.avg-1)*100).toFixed(1)}%</text>`;
+  el.innerHTML=`<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="${p.sym} trade zone ladder">${s}</svg>`;
+}
+
+/* ── thesis + ledger + feed ────────────────────────────────────────────── */
+function renderThesis(p){
+  document.getElementById("thesisscore").textContent = `${p.score}/${p.denom} · required ${p.req}`;
+  const ul=document.getElementById("thesislist");
+  ul.innerHTML = SIGNALS.map((sg,i)=>{
+    const st=p.sig[i]; const m = st===F?["on","✓"]:st===NA?["na","⊘"]:["off","·"];
+    const naTag = st===NA ? `<span class="natag">n/a</span>` : "";
+    const reason = st===NA && p.naReason && p.naReason[i] ? `<span class="treason">${p.naReason[i]}</span>`:"";
+    return `<li><span class="tmark ${m[0]}">${m[1]}</span><span class="tname ${m[0]}">${sg.name}</span>${naTag}${reason}</li>`;
+  }).join("");
+  const foot=document.getElementById("thesisfoot");
+  if(p.rungs){
+    // conviction curve {0:1,1:2,2:3} keyed by (score − required); no 'starter'
+    // once the position has fills. next-tranche vol = the resting bid's real vol.
+    const delta = Math.max(0, (p.score||0)-(p.req||0));
+    const mult = [1,2,3][Math.min(delta,2)];
+    const bid0 = p.bids && p.bids[0];
+    const nextVol = bid0 && bid0.vol!=null ? bid0.vol
+      : (p.vols && p.vols.length ? p.vols[p.vols.length-1] : p.size/p.fills);
+    foot.innerHTML = `<b class="alarm">stop ${fmtPx(p.stop)}</b> · support-invalidation &nbsp;·&nbsp; next tranche <span class="violet mono">${fmtVol(nextVol)}</span> @ <span class="mono">${fmtPx(p.bid)}</span> <span class="dim">(conviction ${mult}×)</span>`;
+  } else if(p.cardStatus==="BUY"){
+    foot.innerHTML = `<b class="brass">Confirmed BUY signal</b> · ${p.score}/${p.denom} ≥ required ${p.req} — no position yet (awaiting entry: capacity / cooldown).`;
+  } else {
+    foot.innerHTML = `<span class="dim">On watch — score <b>${p.score}/${p.denom}</b>, needs <b>${p.req}</b> to confirm a BUY.</span>`;
+  }
+}
+function renderLedger(p){
+  const t=document.getElementById("ledgertbl");
+  document.getElementById("ledgersig").textContent = p.rungs ? `${p.fills}f · ${p.size} · ø ${fmtPx(p.avg)}` : "";
+  if(!p.rungs){ const msg=p.cardStatus==="BUY"?"Confirmed BUY — no fills yet (awaiting entry).":"No filled rungs — on watch."; t.innerHTML=`<tbody><tr><td class="l dim" colspan="7" style="padding:20px 0;text-align:center">${msg}</td></tr></tbody>`; return; }
+  const rows = p.rungs.map((r,i)=>{
+    const vi = p.vols ? p.vols[i] : p.size/p.fills;   // real conviction-sized vol, not the average
+    const up=(p.price-r)*vi;
+    return `<tr><td class="l dim">${i+1}</td><td class="violet">${fmtVol(vi)}</td><td class="mono" style="color:var(--ink)">${fmtPx(r)}</td>
+      <td class="dim">${fmtPx(p.price)}</td><td class="${pnlClass(up)}">${fmtUsd(up)}</td>
+      <td class="alarm">${fmtPx(p.stop)}</td><td class="l st-live">live</td></tr>`;
+  }).join("");
+  const bidList = p.bids && p.bids.length ? p.bids : (p.bid!=null ? [{price:p.bid, vol:null}] : []);
+  const restRows = bidList.map(b=>
+    `<tr class="rest"><td class="l">○</td><td>${b.vol!=null?fmtVol(b.vol):"—"}</td><td>@ ${fmtPx(b.price)}</td><td colspan="3" class="l">resting post-only</td><td></td></tr>`
+  ).join("");
+  t.innerHTML = `<thead><tr><th class="l">#</th><th>vol</th><th>entry</th><th>now</th><th>uP&L</th><th>stop</th><th class="l">state</th></tr></thead>
+    <tbody>${rows}${restRows}</tbody>
+    <tfoot><tr><td class="l">Σ</td><td class="violet">${p.size}</td><td>ø ${fmtPx(p.avg)}</td><td class="dim">now ${fmtPx(p.price)}</td>
+      <td class="${pnlClass(p.pnl)}">${fmtUsd(p.pnl)}</td><td class="alarm">${((p.stop/p.avg-1)*100).toFixed(1)}%</td><td></td></tr></tfoot>`;
+}
+function renderPairFeed(p){
+  const rows = JOURNAL.filter(j=>j[2]===p.sym+"/USD");
+  document.getElementById("feedsym").textContent = p.sym+"/USD";
+  const box=document.getElementById("pairfeed");
+  if(!rows.length){ box.innerHTML=`<div class="note" style="padding:12px 0">No events for ${p.sym} in the recent window.</div>`; return; }
+  box.innerHTML = rows.map(j=>`<div class="jrow" style="grid-template-columns:72px 56px 1fr">
+     <span class="jts">${j[0]}</span><span class="jkind k-${j[1]}">${j[1].toUpperCase()}</span><span class="jtext">${j[3]}</span></div>`).join("");
+}
+
+let curSym="LTC";
+async function openDetail(sym){
+  if(!PMAP[sym]) return;
+  curSym=sym;
+  setNav("detail");
+  document.getElementById("detailcrumb").textContent = `Field › ${sym}/USD`;
+  await fetchPair(sym);
+  renderDetail(PMAP[sym]);
+}
+function renderDetail(p){
+  if(!p) return;
+  const chgCls=(p.chg||0)>=0?"gain":"loss";
+  const buyish=p.rungs||p.cardStatus==="BUY";
+  document.getElementById("dhero").innerHTML = `
+    <div class="dsym">${p.sym}<span style="font-size:15px;color:var(--ink-dim)">/USD</span></div>
+    <div class="dpx ${p.avg&&p.price>=p.avg?'gain':(p.avg?'loss':'')}">${fmtPx(p.price)}</div>
+    <div class="dstat"><span class="k">24h</span><span class="val ${chgCls}">${fmtChg(p.chg)}</span></div>
+    <div class="dstat"><span class="k">Status</span><span class="val"><span class="pill ${buyish?'live':'mut'}">${p.status} ${p.score}/${p.denom}</span></span></div>
+    ${p.rungs?`
+      <div class="dstat"><span class="k">Position</span><span class="val violet">${p.fills}f · ${p.size}</span></div>
+      <div class="dstat"><span class="k">Avg entry</span><span class="val">${fmtPx(p.avg)}</span></div>
+      <div class="dstat"><span class="k">uP&amp;L</span><span class="val ${pnlClass(p.pnl||0)}">${fmtUsd(p.pnl)}</span></div>
+      <div class="dstat"><span class="k">Stop</span><span class="val alarm">${fmtPx(p.stop)} <span style="font-size:12px">${p.avg?((p.stop/p.avg-1)*100).toFixed(1):'—'}%</span></span></div>`
+    :`<div class="dstat"><span class="k">52w high</span><span class="val dim">${fmtPx(p.hi)}</span></div>`}
+    <div class="dstat"><span class="k">Above 52w low</span><span class="val gain">${p.pctLow!=null?'+'+p.pctLow+'%':'—'}</span></div>`;
+  document.getElementById("chartrange").textContent = `${fmtPx(p.lo)} — ${fmtPx(p.hi)}`;
+  document.getElementById("tradezonecard").style.display = p.rungs ? "" : "none";
+  bigChart(p); zoneChart(p); renderThesis(p); renderLedger(p); renderPairFeed(p);
+}
+
+/* ── spec view renderers ───────────────────────────────────────────────── */
+function renderSpec(){
+  const pal=[
+    ["--brass","#C9A85C","brass","THESIS — score, BUY, fills, detections"],
+    ["--teal","#4FBFA3","teal","HEALTH — link, recon, live, coherence"],
+    ["--gain","#57B98A","green","GAIN — positive P&L / up"],
+    ["--loss","#D45D5D","red","LOSS — negative P&L / down"],
+    ["--alarm","#E0483E","alarm","RISK — stop, near-stop, HALT, MISMATCH"],
+    ["--time","#6FB3D2","sky","TIME — clocks, ages, timestamps"],
+    ["--violet","#A98FD6","violet","QTY — counts, volume, margin"],
+    ["--amber","#E09B4C","amber","ATTN — STALE, resting bids, warnings"],
+    ["--cyan","#8FD1C6","cyan","IND — RSI / momentum / price line"],
+    ["--ink","#E7ECF0","ink","PRICE — primary data / measured values"],
+    ["--ink-dim","#6B747C","graphite","labels, units, chrome"],
+    ["--ink-faint","#3E454C","faint","idle rows, band tracks, separators"],
+  ];
+  document.getElementById("palette").innerHTML = pal.map(c=>`
+    <div class="swatch"><span class="sw" style="background:${c[1]}"></span>
+      <span><span class="nm">${c[2]}</span> <span class="hx">${c[1]}</span></span>
+      <span class="use">${c[3]}</span></div>`).join("");
+
+  const st=[
+    ["st buy","BUY","confirmed, actionable now"],
+    ["st buywait","BUY⏳","confirmed but on cooldown"],
+    ["st hold","HOLD","position open, thesis faded"],
+    ["st stale","STALE","data went quiet"],
+    ["st near","NEAR-STOP","one wick from the stop → fault tier"],
+    ["st wch","WCH","watched, below threshold"],
+    ["st idle","idle","not tracked / no position"],
+  ];
+  document.getElementById("states").innerHTML = st.map(s=>
+    `<span class="${s[0]}" style="border:1px solid var(--line-2);border-radius:6px;padding:5px 10px;font-size:12px" title="${s[2]}">${s[1]}</span>`
+  ).join("") + `<div class="note" style="width:100%;margin-top:8px">
+    Faults promote to the top of the field with a red rail: <b>near-stop</b> (price within 3% of the stop) and <b>stale-with-a-position</b> (old data while money rides on it). Stale <i>without</i> a position stays where its score puts it — old data only matters when it's load-bearing. Also carried: <b>▣ coherent / ▢ MISMATCH</b> per pair, the off-scale stop <b>◄</b> marker, and per-rung stop coverage.</div>`;
+
+  // spec band example (LTC)
+  document.getElementById("specband").innerHTML = bandSVG(PMAP.LTC, 700, 30);
+
+  // NEAR-STOP fault demo — an illustrative pair one wick from its stop
+  const demo={ sym:"XMPL", tier:"active", status:"NEAR-STOP", stStyle:"near",
+    price:0.7020, chg:-2.8, denom:7, req:5, score:5, sig:[1,1,1,0,0,1,1],
+    fills:20, size:100, pnl:-3.62, lo:0.15, hi:4.44, stop:0.6846, avg:0.7180,
+    bid:0.6990, pctLow:2, lev:10, rungs:[0.712,0.715,0.720,0.708,0.705,0.718] };
+  document.getElementById("faultrow").innerHTML = fieldRow(demo);
+}
+
+/* ── nav ───────────────────────────────────────────────────────────────── */
+function setNav(view){
+  document.querySelectorAll(".view").forEach(v=>v.classList.remove("active"));
+  document.getElementById("view-"+view).classList.add("active");
+  document.querySelectorAll("#appnav button").forEach(b=>b.classList.toggle("on", b.dataset.nav===view));
+  window.scrollTo({top:0, behavior:"instant" in window ? "instant":"auto"});
+  if(view==="detail") openDetail.__ready ? openDetail(curSym) : null;
+}
+document.querySelectorAll("#appnav button").forEach(b=>{
+  b.addEventListener("click", ()=>{ if(b.dataset.nav==="detail"){ openDetail(curSym); } else setNav(b.dataset.nav); });
+});
+document.getElementById("backbtn").addEventListener("click", ()=>setNav("field"));
+document.querySelectorAll("#fieldmode button").forEach(b=>{
+  b.addEventListener("click", ()=>{
+    document.querySelectorAll("#fieldmode button").forEach(x=>x.classList.toggle("on",x===b));
+    b.dataset.fm==="book" ? renderBook() : renderField();
+  });
+});
+document.querySelectorAll("#jfilter button").forEach(b=>{
+  b.addEventListener("click", ()=>{
+    document.querySelectorAll("#jfilter button").forEach(x=>x.classList.toggle("on",x===b));
+    jFilter=b.dataset.jf; renderJournal();
+  });
+});
+
+/* ── live feel: gentle simulated ticks (respects reduced-motion) ───────── */
+function liveTick(){
+  if(window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+  const actives=document.querySelectorAll(".frow.t-active .px");
+  actives.forEach(el=>{
+    if(Math.random()<0.5){
+      el.style.transition="color .15s"; el.style.color=Math.random()<0.5?"var(--gain)":"var(--loss)";
+      setTimeout(()=>{ el.style.color="var(--ink)"; }, 220);
+    }
+  });
+}
+setInterval(liveTick, 2600);
+
+/* ── live clock + countdowns (seeded from /api/state, ticked locally) ───── */
+let SPEC_DONE=false, HASH_DONE=false;
+const clock={mtH:0,mtM:0,mtS:0,upS:null,day:"",utc:"",dailyLeft:0,dailySpan:86400,weeklyLeft:0,weeklySpan:604800};
+const pad=n=>String(n|0).padStart(2,"0");
+const hms=s=>{ s=Math.max(0,s|0); return pad(s/3600|0)+":"+pad((s%3600)/60|0)+":"+pad(s%60); };
+const dhm=s=>{ s=Math.max(0,s|0); const d=s/86400|0; return (d>0?d+"d ":"")+pad((s%86400)/3600|0)+":"+pad((s%3600)/60|0); };
+function seedClock(h){
+  const t=(h.now_mt||"0:0:0").split(":"); clock.mtH=+t[0]||0; clock.mtM=+t[1]||0; clock.mtS=+t[2]||0;
+  clock.day=h.day||""; clock.utc=h.now_utc||""; if(h.uptime_s!=null) clock.upS=h.uptime_s;
+}
+function tickClock(){
+  clock.mtS++; if(clock.upS!=null) clock.upS++;
+  if(clock.mtS>=60){ clock.mtS=0; clock.mtM++; } if(clock.mtM>=60){ clock.mtM=0; clock.mtH=(clock.mtH+1)%24; }
+  clock.dailyLeft=Math.max(0,clock.dailyLeft-1); clock.weeklyLeft=Math.max(0,clock.weeklyLeft-1);
+  const up=clock.upS!=null?` · up <span class="num">${hms(clock.upS)}</span>`:"";
+  const tc=document.getElementById("topclock");
+  if(tc) tc.innerHTML=`${clock.day} · <span class="num">${pad(clock.mtH)}:${pad(clock.mtM)}:${pad(clock.mtS)}</span> mt · ${clock.utc} utc${up}`;
+  const df=document.getElementById("dailyFill");
+  if(df){ const dp=(1-clock.dailyLeft/clock.dailySpan)*100; df.style.width=dp.toFixed(0)+"%";
+    const e=document.getElementById("dailyPct"); if(e) e.textContent=dp.toFixed(0)+"%";
+    const t=document.getElementById("dailyTime"); if(t) t.textContent=hms(clock.dailyLeft); }
+  const wt=document.getElementById("weeklyTime"); if(wt) wt.textContent=dhm(clock.weeklyLeft);
+}
+setInterval(tickClock, 1000);
+
+/* ── health + regime renderers (from /api/state) ────────────────────────── */
+function renderHealth(h){
+  const el=document.getElementById("healthstrip"); if(!el) return;
+  const links=h.links;
+  const linkDots = links ? links.map(u=>`<span class="dot ${u?'up':'down'}"></span>`).join("") : `<span class="dim" style="font-size:13px">··</span>`;
+  const linkTxt = links ? links.filter(Boolean).length+" up" : "—";
+  const eqLive=h.equity!=null; const eqMain=eqLive?h.equity:h.peak;
+  const eqSub=eqLive?`peak $${(h.peak||0).toFixed(2)}`:`<span class="amber">live equity on next bot cycle</span>`;
+  const opnl=h.open_pnl||0;
+  const modePill = h.mode==='live'?`<span class="pill live">● LIVE</span>`
+    : h.mode==='off'?`<span class="pill mut">off · signal-only</span>`
+    : `<span class="pill warn">${h.mode}</span>`;
+  const haltPill = h.halt?`<span class="pill crit">● HALTED</span>`:`<span class="pill mut">— clear</span>`;
+  const lvl=h.margin_level, lvlCls=lvl==null?'dim':lvl>500?'teal':lvl>=150?'amber':'alarm';
+  const mtot=(h.margin_used||0)+(h.free_margin||0);
+  const marginRow = h.margin_used!=null
+    ? `<span class="mtrack"><span class="mfill" style="width:${(mtot?Math.min(100,h.margin_used/mtot*100):0).toFixed(0)}%"></span></span> <span class="violet">$${h.margin_used.toFixed(2)}</span> used · <span class="violet">$${(h.free_margin||0).toFixed(2)}</span> free · lvl <span class="${lvlCls}" style="font-weight:600">${lvl!=null?lvl+'%':'—'}</span> · capacity ≈ <span class="violet">${h.capacity!=null?h.capacity:'—'}</span> min-fills`
+    : `<span class="dim">equity / margin populate on the next bot cycle (broker-only values)</span>`;
+  el.innerHTML=`
+    <div><div class="hl">
+      <div class="stat"><span class="k">Link</span><span class="val" style="display:flex;gap:5px;align-items:center;height:26px">${linkDots}<span class="sub" style="margin-left:4px">${linkTxt}</span></span></div>
+      <div class="vsep"></div>
+      <div class="stat"><span class="k">Stops</span><span class="val ${h.stops_covered>=h.stops_total?'teal':'alarm'}">${h.stops_covered}/${h.stops_total}</span><span class="sub">${h.stops_covered>=h.stops_total?'all covered':'GAP'}</span></div>
+      <div class="vsep"></div>
+      <div class="stat"><span class="k">Reconcile</span><span class="val">${h.recon_ok?'<span class="teal">ok</span>':'<span class="alarm">MISMATCH</span>'} <span class="time" style="font-size:13px">${h.recon_time||''}</span></span><span class="sub">${h.pos_count} pos · ${h.stops_covered}/${h.stops_total}</span></div>
+      <div class="vsep"></div>
+      <div class="stat"><span class="k">Exec</span><span class="val" style="height:26px;display:flex;align-items:center">${modePill}</span></div>
+      <div class="vsep"></div>
+      <div class="stat"><span class="k">Halt</span><span class="val" style="height:26px;display:flex;align-items:center">${haltPill}</span></div>
+    </div></div>
+    <div>
+      <div class="equityrow">
+        <div class="stat"><span class="k">${eqLive?'Equity':'Peak equity'}</span><span class="val big">$${(eqMain||0).toFixed(2)}</span><span class="flagnote">${eqSub}</span></div>
+        <div class="stat"><span class="k">Open P&L</span><span class="val mid ${opnl>=0?'gain':'loss'}">${fmtUsd(opnl)} <span class="arrow">${opnl>=0?'▲':'▼'}</span></span><span class="sub">unrealized · mark-to-mkt</span></div>
+        <div class="stat"><span class="k">Realized</span><span class="val" style="font-size:14px"><span class="dim">day</span> ${fmtUsd(h.realized_day)} · <span class="dim">wk</span> <span class="${(h.realized_week||0)>=0?'gain':'loss'}">${fmtUsd(h.realized_week)}</span></span><span class="sub">closed P&L</span></div>
+        <div class="stat"><span class="k">Book</span><span class="val"><span class="violet">${h.pos_count}</span> <span class="dim" style="font-size:11px">pos</span> · <span class="violet">${h.bid_count}</span> <span class="dim" style="font-size:11px">bids</span></span></div>
+      </div>
+      <div class="marginbar"><span class="dim">margin</span> ${marginRow}</div>
+    </div>`;
+}
+function renderRegime(r){
+  const el=document.getElementById("regimestrip"); if(!el) return;
+  clock.dailyLeft=r.daily_left_s||0; clock.weeklyLeft=r.weekly_left_s||0;
+  el.innerHTML=`
+    <span class="eyebrow" style="letter-spacing:.14em">Regime</span>
+    <div class="cd"><span class="dim">daily</span><span class="cdtrack"><span class="cdfill" id="dailyFill" style="width:${r.daily_pct||0}%"></span></span><span class="dim" id="dailyPct">${r.daily_pct||0}%</span><span class="time" id="dailyTime">${hms(r.daily_left_s)}</span></div>
+    <div class="cd"><span class="dim">weekly</span><span class="cdtrack"><span class="cdfill" style="width:${r.weekly_pct||0}%"></span></span><span class="dim">${r.weekly_pct||0}%</span><span class="time" id="weeklyTime">${dhm(r.weekly_left_s)}</span></div>
+    <div><span class="dim">BTC</span> <span class="mono" style="color:var(--ink)">${fmtPx(r.btc_price)}</span> <span class="${(r.btc_chg||0)>=0?'gain':'loss'}">${fmtChg(r.btc_chg)}</span></div>
+    <div><span class="dim">·</span> ${r.label||'?'} <span class="dim">· ${r.note||''} · d-rsi</span> <span class="cyan">${r.daily_rsi!=null?r.daily_rsi:'—'}</span></div>`;
+}
+
+/* ── data layer: poll /api/state, fetch /api/pair on demand ──────────────── */
+async function fetchPair(sym){
+  if(CLOSES[sym]) return;
+  try{ const r=await fetch("/api/pair/"+encodeURIComponent(sym),{cache:"no-store"});
+    if(!r.ok) return; const d=await r.json(); CLOSES[sym]=d.closes||[]; START_TS[sym]=d.start_ts||0;
+  }catch(e){}
+}
+async function fetchState(){
+  try{
+    const r=await fetch("/api/state",{cache:"no-store"}); if(!r.ok) throw 0;
+    const st=await r.json();
+    PAIRS=st.pairs||[]; PMAP=Object.fromEntries(PAIRS.map(p=>[p.sym,p]));
+    JOURNAL=st.journal||[]; HEALTH=st.health||{}; REGIME=st.regime||{};
+    renderHealth(HEALTH); renderRegime(REGIME); seedClock(HEALTH);
+    const onBook=document.querySelector('#fieldmode button.on')?.dataset.fm==='book';
+    onBook ? renderBook() : renderField();
+    renderJournal();
+    if(document.getElementById("view-detail").classList.contains("active")) renderDetail(PMAP[curSym]);
+    if(!SPEC_DONE){ renderSpec(); SPEC_DONE=true; }
+    if(!HASH_DONE && location.hash){ const m=location.hash.match(/pair=([A-Za-z]+)/);
+      if(m && PMAP[m[1].toUpperCase()]){ HASH_DONE=true; openDetail(m[1].toUpperCase()); } }
+    const le=document.getElementById("liveerr"); if(le) le.style.display="none";
+  }catch(e){ const le=document.getElementById("liveerr"); if(le) le.style.display=""; }
+}
+setInterval(fetchState, 4000);
+fetchState();
+
+</script>

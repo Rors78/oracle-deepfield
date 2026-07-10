@@ -127,6 +127,12 @@ def _normalize_exec_mode(raw):
 
 EXEC_MODE = _normalize_exec_mode(os.environ.get("DEEPFIELD_EXEC_MODE", "off"))   # off | paper | validate | live
 
+# Web console — served in-process by the live bot (a daemon thread) so the one
+# desktop launch brings up TUI + web together. Read-only; set DEEPFIELD_WEB=0 to
+# disable. The desktop launcher opens the browser to this port.
+WEB_ENABLED = os.environ.get("DEEPFIELD_WEB", "1") != "0"
+WEB_PORT = int(os.environ.get("DEEPFIELD_WEB_PORT", "8787"))
+
 # Sizing. "min" (default, for now): buy the MINIMUM order per pair — positions so
 # small nothing meaningful is ever at risk, so liquidation is a non-issue. "risk":
 # 2% of equity off the stop (kept for later; revisit stop-vs-liquidation first).
