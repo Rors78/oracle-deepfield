@@ -448,7 +448,12 @@ def _open_pnl(appstate):
     total = 0.0
     for p in appstate.exec.get("positions", []):
         ps = appstate.pairs.get(p["symbol"])
-        cur = ps.last_tick.last if (ps and ps.last_tick) else None
+        tick = ps.last_tick if ps else None
+        card = ps.confirmed if ps else None
+        # SAME price selection as _pair_view: fall back to the last daily close
+        # (card.price) when there's no live tick, so this header total reconciles
+        # with the sum of the per-pair FIELD/LEDGER/BOOK rows (which do the same)
+        cur = tick.last if tick else (card.price if card else None)
         e_, v_ = p.get("entry"), p.get("volume")
         if None not in (cur, e_, v_):
             total += (cur - e_) * v_
@@ -835,6 +840,11 @@ def render_book(appstate, w, height):
             ph.append("   ", style=INK)
             ph.append("▣ coherent" if coherent else "▢ MISMATCH",
                       style=HEALTH if coherent else f"bold {RISK}")
+            # this is the BOOT-TIME Kraken volume reconcile, not live coverage —
+            # stamp it with the recon time so it can't be misread as current
+            # protection (live per-fill coverage is the 'live'/no-stop tag below)
+            if rec and rec.get("ts"):
+                ph.append(f" @recon {_local_hm(rec.get('ts'))}", style=TIME)
         lines.append(ph)
         price = v["price"]
         for idx, f in enumerate(reversed(v["fills"]), start=1):
@@ -845,7 +855,13 @@ def render_book(appstate, w, height):
             row.append(f" now {_fmt_price(price):>10}", style=PRICE)
             row.append(f"  {_fmt_usd(upnl):>9}", style=GAIN if (upnl or 0) >= 0 else LOSS)
             row.append(f"  stop {_fmt_price(f['stop'])}", style=RISK)
-            row.append("  live", style=HEALTH)
+            # 'live' == a resting stop order actually protects this fill. Gate on the
+            # stop TXID, not the mere stop price, so an unprotected fill (stop price
+            # recorded but no resting order) can't render as fine.
+            if f.get("stop_txid"):
+                row.append("  live", style=HEALTH)
+            else:
+                row.append("  ⚠ no-stop", style=f"bold {RISK}")
             lines.append(row)
         for p in v["pendings"]:
             row = Text("    ○   ", style=ATTN)

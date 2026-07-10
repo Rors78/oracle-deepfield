@@ -87,7 +87,7 @@ def _tick(last, chg=0.5):
 
 def _bp(sym, entry, stop, vol, lev=10):
     return {sym: {"fills": [{"id": 1, "ts": "2026-07-05T00:00:00+00:00", "vol": vol,
-                             "lev": lev, "entry": entry, "stop": stop}],
+                             "lev": lev, "entry": entry, "stop": stop, "stop_txid": "OSTOPX"}],
                   "pendings": [], "vol_sum": vol, "avg_entry": entry,
                   "upnl": None, "stop": stop}}
 

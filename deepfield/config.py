@@ -5,6 +5,9 @@ from AssetPairs at startup + daily. The numbers below are SEED/FALLBACK only —
 never trusted as truth (SPEC §7 F8, Appendix C).
 """
 import os
+import logging
+
+_log = logging.getLogger(__name__)
 
 # Paths (single 916G root disk; project island under home). RULINGS env ruling.
 _PKG_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -103,7 +106,26 @@ TG_CHAT = os.environ.get("ORACLE_TG_CHAT")
 # Deterministic: signal fires -> size -> open leveraged long -> rest stop -> log.
 # NO learning brain. Off by default; nothing can fire until EXEC_MODE flips.
 # ═══════════════════════════════════════════════════════════════════════════
-EXEC_MODE = os.environ.get("DEEPFIELD_EXEC_MODE", "off")   # off | paper | live
+# EXEC_MODE is fail-CLOSED: only the EXACT canonical strings arm anything. Any other
+# value — a case slip ('LIVE'), a trailing space ('paper ', trivial in .env/systemd),
+# or a safe-sounding typo ('test'/'sim'/'dry') — resolves to 'off' with a loud error.
+# We deliberately do NOT lower()/strip()-coerce: coercing 'LIVE'->'live' would arm real
+# money on a typo. Every downstream gate is a BLOCKLIST (mode=='off' returns early, else
+# the code falls THROUGH to the live AddOrder path), and poll_fills/verify_open_stops are
+# gated on exact 'live' — so an unrecognized mode that slipped past would place real
+# leveraged orders that never get a protective stop or fill-reconcile. Catch it here.
+_VALID_EXEC_MODES = ("off", "paper", "validate", "live")
+
+
+def _normalize_exec_mode(raw):
+    if raw in _VALID_EXEC_MODES:
+        return raw
+    _log.error("DEEPFIELD_EXEC_MODE=%r is not one of %s — refusing to arm; running OFF.",
+               raw, _VALID_EXEC_MODES)
+    return "off"
+
+
+EXEC_MODE = _normalize_exec_mode(os.environ.get("DEEPFIELD_EXEC_MODE", "off"))   # off | paper | validate | live
 
 # Sizing. "min" (default, for now): buy the MINIMUM order per pair — positions so
 # small nothing meaningful is ever at risk, so liquidation is a non-issue. "risk":

@@ -692,6 +692,7 @@ def test_verify_records_realized_pnl_on_stop_exit_bucketed_by_close(tmp_path, mo
     # reconcile fetches the stop status via the batch path; mirror fake_qo into it.
     monkeypatch.setattr(ex_mod.broker, "query_orders",
                         lambda txids: {t: fake_qo(t) for t in txids if t and fake_qo(t)})
+    monkeypatch.setattr(ex_mod.broker, "open_orders", lambda: {})
     monkeypatch.setattr(ex_mod.broker, "cancel_order", lambda t: {"count": 1})
     monkeypatch.setattr(ex_mod.broker, "private", lambda *a, **k: None)
     _exec(conn, mode="live").verify_open_stops()
@@ -832,17 +833,23 @@ def _pos(vol):
     return {"pair": "XXBTZUSD", "type": "buy", "vol": str(vol), "vol_closed": "0"}
 
 
-def _wire_broker(monkeypatch, positions, stop_status, sent):
-    """positions: dict of Kraken OpenPositions; stop_status: txid->status; sent: sink."""
+def _wire_broker(monkeypatch, positions, stop_status, sent, open_orders=None, cancel_ok=True):
+    """positions: Kraken OpenPositions; stop_status: txid->status (a value of None means
+    that txid is ABSENT from the batch map, i.e. status UNKNOWN — a failed query); sent:
+    sink; open_orders: Kraken OpenOrders map for the adopt path (default {} = nothing to
+    adopt); cancel_ok=False -> CancelOrder fails (returns None) after recording the try."""
     monkeypatch.setattr(ex_mod.broker, "open_positions", lambda: positions)
-    monkeypatch.setattr(ex_mod.broker, "query_order", lambda t: {"status": stop_status.get(t)} if t else None)
-    # reconcile batches its stop-status lookups through query_orders; mirror the
-    # per-txid mock above (a dict for every non-empty txid) so the batch map matches.
+    monkeypatch.setattr(ex_mod.broker, "open_orders", lambda: (open_orders or {}))
+    monkeypatch.setattr(ex_mod.broker, "query_order",
+                        lambda t: {"status": stop_status[t]} if t and stop_status.get(t) is not None else None)
+    # reconcile batches its stop-status lookups through query_orders; a txid whose status
+    # is None is OMITTED from the map so the call site reads it as None (UNKNOWN).
     monkeypatch.setattr(ex_mod.broker, "query_orders",
-                        lambda txids: {t: {"status": stop_status.get(t)} for t in txids if t})
+                        lambda txids: {t: {"status": stop_status[t]} for t in txids if t and stop_status.get(t) is not None})
     monkeypatch.setattr(ex_mod.broker, "private",
                         lambda ep, p=None, **kw: (sent.append(("private", p)) or {"txid": ["ONEWSTOP"]}))
-    monkeypatch.setattr(ex_mod.broker, "cancel_order", lambda t: sent.append(("cancel", t)) or {})
+    monkeypatch.setattr(ex_mod.broker, "cancel_order",
+                        lambda t: (sent.append(("cancel", t)) or ({} if cancel_ok else None)))
 
 
 def test_verify_stacked_triggered_row_not_reprotected(tmp_path, monkeypatch):
@@ -979,4 +986,90 @@ def test_verify_bails_on_unparseable_positions_shape(tmp_path, monkeypatch):
     _exec(conn, mode="live").verify_open_stops()
     assert conn.execute("SELECT status FROM orders WHERE id=?", (a,)).fetchone()[0] == "open"
     assert sent == []                                           # nothing canceled or placed
+    conn.close()
+
+
+# ── 2026-07-10 bug-hunt: reconcile hardening (ranks 2/3, pilot, gaps A/B) ─────
+
+def test_verify_executed_stop_closes_row_and_preserves_sibling_stop(tmp_path, monkeypatch):
+    """rank 2: a pair holds two stacked longs with DIFFERENT stops; the OLDER one's stop
+    executed, the newer survives. The executed row must close (P&L path) WITHOUT eating
+    the surviving sibling's backing — so the sibling's live stop is NOT canceled and no
+    stale-priced stop is re-placed against it. (Old oldest-first budgeting did both.)"""
+    conn = _conn(tmp_path)
+    older = _seed_open(conn, "OSTOP-OLD", vol=10, stop=95.0)   # its stop executed
+    newer = _seed_open(conn, "OSTOP-NEW", vol=10, stop=80.0)   # survives
+    sent = []
+    _wire_broker(monkeypatch,
+                 positions={"P": _pos(10)},                    # only 10 open = the survivor
+                 stop_status={"OSTOP-OLD": "closed", "OSTOP-NEW": "open"},
+                 sent=sent)
+    _exec(conn, mode="live").verify_open_stops()
+    st = dict(conn.execute("SELECT id,status FROM orders").fetchall())
+    assert st[older] == "closed"                               # executed row retired
+    assert st[newer] == "open"                                 # survivor kept
+    assert ("cancel", "OSTOP-NEW") not in sent                 # survivor's live stop NOT canceled
+    assert not any(kind == "private" for kind, _ in sent)      # no stale-priced re-place
+    conn.close()
+
+
+def test_verify_unbacked_cancel_failure_leaves_row_open(tmp_path, monkeypatch):
+    """pilot: an unbacked row whose orphan-stop CANCEL fails must stay 'open' and retry
+    next restart — closing it would strand a live stop that later opens a naked short."""
+    conn = _conn(tmp_path)
+    a = _seed_open(conn, "OSTOP-A", vol=0.1)
+    sent = []
+    _wire_broker(monkeypatch, positions={}, stop_status={"OSTOP-A": "open"},
+                 sent=sent, cancel_ok=False)                   # CancelOrder returns None
+    _exec(conn, mode="live").verify_open_stops()
+    assert ("cancel", "OSTOP-A") in sent                       # cancel WAS attempted
+    assert conn.execute("SELECT status FROM orders WHERE id=?", (a,)).fetchone()[0] == "open"
+    conn.close()
+
+
+def test_verify_unbacked_unknown_stop_leaves_row_open(tmp_path, monkeypatch):
+    """pilot: an unbacked row whose stop status is UNKNOWN (query failed/rate-limited)
+    must stay 'open' — we cannot prove the stop is gone, so closing it could strand it."""
+    conn = _conn(tmp_path)
+    a = _seed_open(conn, "OSTOP-A", vol=0.1)
+    sent = []
+    _wire_broker(monkeypatch, positions={},
+                 stop_status={"OSTOP-A": None},                # None -> absent from map -> UNKNOWN
+                 sent=sent)
+    _exec(conn, mode="live").verify_open_stops()
+    assert conn.execute("SELECT status FROM orders WHERE id=?", (a,)).fetchone()[0] == "open"
+    assert not any(kind == "cancel" for kind, _ in sent)       # never cancel on UNKNOWN
+    assert not any(kind == "private" for kind, _ in sent)
+    conn.close()
+
+
+def test_verify_adopts_resting_orphan_stop_no_duplicate(tmp_path, monkeypatch):
+    """rank 3 / gap A: a backed row whose ledger stop is gone but a stop IS resting on
+    Kraken (persist-race orphan) must ADOPT that stop, not place a duplicate — a doubled
+    stop-sell opens a naked short when triggered."""
+    conn = _conn(tmp_path)
+    a = _seed_open(conn, "OSTOP-A", vol=0.1)
+    sent = []
+    orphan = {"ORPHAN-1": {"descr": {"type": "sell", "ordertype": "stop-loss",
+                                     "pair": "XXBTZUSD"}, "vol": "0.1"}}
+    _wire_broker(monkeypatch, positions={"P": _pos(0.1)},      # backed
+                 stop_status={"OSTOP-A": "canceled"},          # ledger stop gone
+                 sent=sent, open_orders=orphan)
+    _exec(conn, mode="live").verify_open_stops()
+    assert conn.execute("SELECT stop_txid FROM orders WHERE id=?", (a,)).fetchone()[0] == "ORPHAN-1"
+    assert not any(kind == "private" for kind, _ in sent)      # NO duplicate stop placed
+    conn.close()
+
+
+def test_reprotect_naked_open_rests_missing_stop(tmp_path, monkeypatch):
+    """gap B: a live 'open' position whose stop-rest failed (stop_txid NULL) is
+    re-protected at runtime by poll_fills, not left naked until a manual restart."""
+    conn = _conn(tmp_path)
+    a = _seed_open(conn, None, vol=0.1)                        # open row, NO stop
+    sent = []
+    _wire_broker(monkeypatch, positions={"P": _pos(0.1)}, stop_status={}, sent=sent)
+    _exec(conn, mode="live").poll_fills()
+    stop_txid = conn.execute("SELECT stop_txid FROM orders WHERE id=?", (a,)).fetchone()[0]
+    assert stop_txid == "ONEWSTOP"                             # a stop was rested via AddOrder
+    assert any(kind == "private" for kind, _ in sent)
     conn.close()

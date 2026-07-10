@@ -95,13 +95,13 @@ def _build_by_pair(conn, appstate):
     snapshot convenience (last known tick); the FIELD LEDGER recomputes per-fill
     uP&L live at render from ps.last_tick (renderers own the live math)."""
     by_pair = {}
-    for oid, sym, ts, vol, lev, entry, stop in conn.execute(
-            "SELECT id, symbol, ts, volume, leverage, entry, stop FROM orders "
+    for oid, sym, ts, vol, lev, entry, stop, stop_txid in conn.execute(
+            "SELECT id, symbol, ts, volume, leverage, entry, stop, stop_txid FROM orders "
             "WHERE status='open' ORDER BY symbol, id"):
         d = by_pair.setdefault(sym, {"fills": [], "pendings": [], "vol_sum": 0.0,
                                      "avg_entry": None, "upnl": None, "stop": None})
         d["fills"].append({"id": oid, "ts": ts, "vol": vol, "lev": lev,
-                           "entry": entry, "stop": stop})
+                           "entry": entry, "stop": stop, "stop_txid": stop_txid})
     for sym, price, vol, ts in conn.execute(
             "SELECT symbol, entry, volume, ts FROM orders "
             "WHERE status='pending' ORDER BY symbol, id"):
@@ -281,7 +281,11 @@ def _startup(debug, announce=False):
         try:
             kr = broker.open_positions()
             ours = store.open_position_count(conn)
-            log.info("startup position check: ledger open=%d · Kraken open positions=%d", ours, len(kr))
+            # kr is None on an API failure — guard the len() so a transient blip in this
+            # cosmetic log line can't raise and skip verify_open_stops() below (which has
+            # its own None-handling and MUST run to re-place any missing/orphaned stops).
+            log.info("startup position check: ledger open=%d · Kraken open positions=%s",
+                     ours, len(kr) if kr is not None else "unavailable")
             ing.executor.verify_open_stops()   # re-place any missing protective stops
         except Exception:
             log.exception("startup position/stop check failed")

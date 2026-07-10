@@ -83,7 +83,17 @@ def run_series_equality(db_path=None):
         ws, rest = p["ws"], p["rest"]
         for interval in config.INTERVALS:
             db_closed = _closed_rows(conn, ws, interval)
-            res = fetch(rest, interval)  # asserts inside
+            res = fetch(rest, interval)  # None when < 20 closed candles (under-backfilled)
+            if res is None:
+                # don't subscript None — record the pair/interval as not-ok and move
+                # on, so one under-backfilled pair can't crash the whole M2 gate
+                report.append({
+                    "pair": ws, "interval": interval,
+                    "v44_len": 0, "db_closed": len(db_closed),
+                    "last_ts_match": False, "ok": False,
+                    "reason": "insufficient candles",
+                })
+                continue
             times = res[0]
             ok = (len(times) == len(db_closed)) and (times and db_closed and times[-1] == db_closed[-1][0])
             report.append({

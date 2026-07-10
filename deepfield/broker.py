@@ -177,6 +177,18 @@ def open_positions():
     return private("/0/private/OpenPositions")
 
 
+def open_orders():
+    """All currently-resting orders as {txid: order_info}, {} if none, or None on API
+    FAILURE. Kraken returns {'open': {txid: {...}}}; we hand back the inner map so a
+    caller can find a stop that IS resting on the book but whose txid the ledger lost
+    (a persist-race orphan) BEFORE blindly re-placing a duplicate. None (not {}) on
+    failure so 'could not check' is never read as 'nothing resting'."""
+    r = private("/0/private/OpenOrders")
+    if r is None:
+        return None
+    return r.get("open") or {}
+
+
 def cancel_order(txid):
     """Cancel an order by txid. Non-idempotent transport (no blind resend)."""
     if not txid:

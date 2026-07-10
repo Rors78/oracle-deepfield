@@ -30,7 +30,7 @@ def _tick(last, chg=0.5):
 
 def _fills(n, entry=150.0, stop=95.0, lev=10):
     return [{"id": i, "ts": "2026-07-05T00:00:00+00:00", "vol": 5.0, "lev": lev,
-             "entry": entry + i, "stop": stop} for i in range(n)]
+             "entry": entry + i, "stop": stop, "stop_txid": f"OSTOP{i}"} for i in range(n)]
 
 
 def _by_pair(fills):
@@ -273,3 +273,39 @@ def test_recon_mismatch_header_and_book():
     st.view = 2
     book = ui.export_frame_text(st, width=229, height=54)
     assert "MISMATCH" in book and "SUI" in book
+
+
+# ── RANK 7: BOOK 'live' tag is gated on the resting-stop txid ─────────────────
+
+def test_book_live_tag_gated_on_stop_txid():
+    """A fill carrying a stop PRICE but no resting stop TXID is unprotected and must
+    render the no-stop marker, not 'live' — a protected fill still reads live."""
+    st = AppState()
+    st.exec = dict(st.exec); st.exec["by_pair"] = {}
+    ps = st.pair("LTC/USD")
+    ps.confirmed = Card(status="BUY")
+    ps.last_tick = _tick(46.0); ps.last_tick_ts = time.time()
+    st.exec["by_pair"]["LTC/USD"] = _by_pair([
+        {"id": 1, "ts": "x", "vol": 5.0, "lev": 10, "entry": 45.0, "stop": 41.0, "stop_txid": "OSTOP1"},
+        {"id": 2, "ts": "x", "vol": 5.0, "lev": 10, "entry": 46.0, "stop": 41.0, "stop_txid": None},
+    ])
+    st.view = 2
+    txt = ui.export_frame_text(st, width=200, height=54)
+    assert "no-stop" in txt          # the unprotected fill is flagged
+    assert "live" in txt             # the protected fill still reads live
+
+
+# ── RANK 9: header 'open' P&L falls back to card.price when there's no tick ───
+
+def test_open_pnl_falls_back_to_card_price_without_tick():
+    """A position whose pair has no live tick must still count toward the header
+    'open' P&L, marked at the last daily close (card.price) — the SAME price
+    selection the per-pair rows use — so the header reconciles with the rows below.
+    Previously such a position was silently skipped."""
+    st = AppState()
+    st.exec = dict(st.exec)
+    ps = st.pair("LTC/USD")
+    ps.confirmed = Card(status="BUY"); ps.confirmed.price = 50.0   # last daily close
+    ps.last_tick = None                                            # no live tick
+    st.exec["positions"] = [{"symbol": "LTC/USD", "entry": 45.0, "volume": 2.0}]
+    assert ui._open_pnl(st) == (50.0 - 45.0) * 2.0                 # marked at card.price, not skipped

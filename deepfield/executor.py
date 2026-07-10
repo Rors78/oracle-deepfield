@@ -45,6 +45,20 @@ def _round_price(x, decimals):
     return round(x, decimals)
 
 
+# Kraken echoes a pair as a canonical key, an X-prefixed altname, or a base with a
+# ':SUFFIX' (margin). Normalize all three to the canonical `rest` key so ledger rows,
+# OpenPositions, and OpenOrders compare on ONE identity. (Hydra field-verified map.)
+_ALT_TO_KEY = {"XBTUSD": "XXBTZUSD", "ETHUSD": "XETHZUSD",
+               "XRPUSD": "XXRPZUSD", "LTCUSD": "XLTCZUSD"}
+
+
+def _norm_pair_key(pr):
+    base = str(pr or "").split(":")[0]
+    if not base:
+        return ""
+    return base if base in {p["rest"] for p in config.PAIRS} else _ALT_TO_KEY.get(base, base)
+
+
 def _age_secs(ts_iso):
     """Seconds since an ISO-8601 order timestamp; 0.0 (treated as never-stale) if the
     value is missing or unparseable, so a bad ts can never trigger a cancel."""
@@ -174,7 +188,8 @@ class Executor:
         EXEC_SIZE_MODE='min' (default): buy the minimum order — tiny, no liquidation
         worry. With a `card`, the min order is CONVICTION-WEIGHTED (Tier 1): the same
         engine.tranche the champion card displays scales the min-fill by score-over-
-        required (delta 0 -> 1.0x STARTER, +1 -> 1.5x, +2 -> 2.0x), so the live fill
+        required (delta 0 -> 1.0x STARTER, +1 -> 2.0x, +2 -> 3.0x; config.CONVICTION),
+        so the live fill
         matches the shown tranche. No card -> flat 1.0x min (ladder/plan preview).
         'risk': volume = risk_usd/(entry-stop), margin-capped, min-floored."""
         info = store.get_pair_info(self.conn, symbol) or {}
@@ -287,11 +302,16 @@ class Executor:
         # valid min order is ~$3-8, so this only ever trips on a corrupt pairs row or a
         # flipped size mode producing an order orders-of-magnitude too large. Refuse it
         # (never halt the bot); the loud ERROR is the audit trail.
-        ceiling = config.EXEC_MAX_ORDER_NOTIONAL_USD
-        if ceiling > 0 and sizing["notional"] > ceiling:
-            log.error("EXEC %s REFUSED: order notional $%.2f exceeds ceiling $%.2f — not sending "
-                      "(sanity guard, not a rail; check the pairs row / EXEC_SIZE_MODE)",
-                      symbol, sizing["notional"], ceiling)
+        # Conviction-SCALED (operator decision 2026-07-10): a legit Nx-conviction order
+        # gets an Nx budget, so the steepened 2x/3x curve's strongest signals aren't
+        # refused, while a corrupt row (orders of magnitude larger) still trips at every
+        # tier. Guard on the BASE ceiling>0 so 0 still fully disables.
+        cmult = sizing.get("conviction_mult", 1.0)
+        ceiling = config.EXEC_MAX_ORDER_NOTIONAL_USD * cmult
+        if config.EXEC_MAX_ORDER_NOTIONAL_USD > 0 and sizing["notional"] > ceiling:
+            log.error("EXEC %s REFUSED: order notional $%.2f exceeds %gx-conviction ceiling $%.2f "
+                      "— not sending (sanity guard, not a rail; check the pairs row / EXEC_SIZE_MODE)",
+                      symbol, sizing["notional"], cmult, ceiling)
             return None
 
         margin_pair = config.MARGIN_PAIR[symbol]
@@ -304,7 +324,6 @@ class Executor:
             px = _round_price(entry_price, tick)
         stop_px = _round_price(stop, tick)
         vol = sizing["volume"]
-        cmult = sizing.get("conviction_mult", 1.0)
         tag = (f" ({cmult:g}x conviction)" if cmult > 1.0
                else " (FLOORED-min)" if sizing["floored_to_min"]
                else " (CAPPED)" if sizing["capped"] else "")
@@ -435,6 +454,43 @@ class Executor:
                                   (f"entry {status}, unfilled", oid))
                 self.conn.commit()
                 log.info("ENTRY %s: %s unfilled — no position", sym, status)
+        # Runtime safety net: re-protect any 'open' position whose stop-rest failed.
+        self._reprotect_naked_open()
+
+    def _reprotect_naked_open(self):
+        """Runtime safety net (gap B): a fill whose protective stop-rest FAILED
+        (poll_fills commits 'open' then _rest_stop errors on a broker/API failure)
+        stays status='open' with stop_txid NULL and is otherwise never revisited until
+        a manual restart — a naked leveraged long. Re-rest it each poll cycle. Adopt a
+        stop already resting on Kraken (persist-race orphan) before placing, so a retry
+        never doubles the stop. Isolated — never raises into poll_fills. No API call in
+        the healthy case (early-returns when nothing is naked)."""
+        if self.mode != "live" or not config.PROTECTIVE_STOP:
+            return
+        try:
+            naked = self.conn.execute(
+                "SELECT id, symbol, margin_pair, volume, leverage, stop FROM orders "
+                "WHERE status='open' AND stop_txid IS NULL").fetchall()
+            if not naked:
+                return
+            kr_open_orders = broker.open_orders()
+            claimed = {t for (t,) in self.conn.execute(
+                "SELECT stop_txid FROM orders WHERE stop_txid IS NOT NULL")}
+            for oid, sym, mpair, vol, lev, stop in naked:
+                adopt = self._find_adoptable_stop(kr_open_orders, claimed, mpair, float(vol or 0))
+                if adopt:
+                    self.conn.execute("UPDATE orders SET stop_txid=? WHERE id=?", (adopt, oid))
+                    self.conn.commit()
+                    claimed.add(adopt)
+                    log.warning("REPROTECT %s: adopted resting orphan stop %s for naked open row %d",
+                                sym, adopt, oid)
+                    self._journal("stop", sym, f"reprotect: adopted resting stop {adopt}")
+                    continue
+                log.warning("REPROTECT %s: open row %d unprotected (stop-rest failed earlier) — "
+                            "resting stop now", sym, oid)
+                self._rest_stop(sym, mpair, stop, vol, lev, oid, paper=False)
+        except Exception:
+            log.exception("reprotect pass failed (poll_fills unaffected)")
 
     def _place_ladder_rung(self, symbol, margin_pair, leverage, stop, filled_price,
                            score=None, required=None):
@@ -490,10 +546,10 @@ class Executor:
                 log.warning("LADDER %s: sizing produced nothing — no rung", symbol)
                 return
             cmult = sizing.get("conviction_mult", 1.0)
-            ceiling = config.EXEC_MAX_ORDER_NOTIONAL_USD
-            if ceiling > 0 and sizing["notional"] > ceiling:
-                log.error("LADDER %s REFUSED: rung notional $%.2f exceeds ceiling $%.2f",
-                          symbol, sizing["notional"], ceiling)
+            ceiling = config.EXEC_MAX_ORDER_NOTIONAL_USD * cmult   # conviction-scaled (see _place_entry)
+            if config.EXEC_MAX_ORDER_NOTIONAL_USD > 0 and sizing["notional"] > ceiling:
+                log.error("LADDER %s REFUSED: rung notional $%.2f exceeds %gx-conviction ceiling $%.2f",
+                          symbol, sizing["notional"], cmult, ceiling)
                 return
             vol = sizing["volume"]
             params = {"pair": margin_pair, "type": "buy", "ordertype": "limit",
@@ -521,6 +577,36 @@ class Executor:
             self._journal("order", symbol, f"ladder: next rung {vol:g} resting @ {target}{conv_tag}")
         except Exception:
             log.exception("LADDER %s: place next rung failed (fill/stop unaffected)", symbol)
+
+    def _find_adoptable_stop(self, kr_open_orders, claimed, margin_pair, want_vol):
+        """A protective stop that IS resting on Kraken's book for this pair but whose
+        txid no ledger row tracks (a persist-race orphan: AddOrder landed, the DB write
+        that records stop_txid then failed). ADOPT it instead of placing a duplicate —
+        a doubled stop-sell, when triggered, opens a naked short (rank 3 / gap A).
+        Matches a resting sell stop-loss on the same normalized pair, not already
+        claimed by another row; prefers the closest volume match. Returns a txid or None
+        (None also when OpenOrders was unavailable, i.e. kr_open_orders is falsy)."""
+        if not kr_open_orders:
+            return None
+        target = _norm_pair_key(margin_pair)
+        cands = []
+        for txid, od in kr_open_orders.items():
+            if txid in claimed:
+                continue
+            d = od.get("descr") or {}
+            if str(d.get("type")).lower() != "sell" or "stop" not in str(d.get("ordertype", "")).lower():
+                continue
+            if _norm_pair_key(d.get("pair", "")) != target:
+                continue
+            try:
+                ovol = float(od.get("vol", 0) or 0)
+            except (TypeError, ValueError):
+                ovol = 0.0
+            cands.append((abs(ovol - want_vol), txid))
+        if not cands:
+            return None
+        cands.sort()
+        return cands[0][1]
 
     def verify_open_stops(self):
         """On live restart: reconcile each pair's OPEN ledger rows and their
@@ -556,16 +642,8 @@ class Executor:
         # exclude a position only when it is EXPLICITLY typed 'sell' — a missing/odd
         # type still counts, so an unexpected response shape can never silently zero a
         # pair and strip real stops.
-        _ALT_TO_KEY = {"XBTUSD": "XXBTZUSD", "ETHUSD": "XETHZUSD",
-                       "XRPUSD": "XXRPZUSD", "LTCUSD": "XLTCZUSD"}
-        canon_keys = {p["rest"] for p in config.PAIRS}
         rest_by_ws = {p["ws"]: p["rest"] for p in config.PAIRS}
-
-        def _norm_pair(pr):
-            base = str(pr or "").split(":")[0]
-            if not base:
-                return ""
-            return base if base in canon_keys else _ALT_TO_KEY.get(base, base)
+        _norm_pair = _norm_pair_key   # module-level; shared with the stop-adopt helper
 
         def _long_vol(pos):
             if str(pos.get("type", "")).lower() == "sell":
@@ -603,6 +681,12 @@ class Executor:
         # restart. A stop_txid absent from this map reads as None below -> 'status
         # UNKNOWN', identical to the old per-row query_order failure (never re-placed).
         stop_info = broker.query_orders([r[6] for r in rows])   # r[6] = stop_txid
+        # Kraken's actually-resting orders, so PASS 2 can ADOPT a stop that rests on the
+        # book but whose txid the ledger lost (persist-race orphan) instead of placing a
+        # duplicate -> naked short (rank 3 / gap A). None on API failure -> adoption is
+        # skipped and we fall back to the (already UNKNOWN-guarded) re-place path.
+        kr_open_orders = broker.open_orders()
+        claimed_stops = {r[6] for r in rows if r[6]}   # stop txids already tracked by a row
 
         # PASS 1 — classify each row against its pair's DEFINITE open-volume budget and
         # do all REMOVALS now (close unbacked rows, cancel their orphan stops). Only
@@ -622,22 +706,46 @@ class Executor:
                 volf = float(vol or 0)
             except (TypeError, ValueError):
                 volf = 0.0
-            # No open volume left to back this row -> position gone (stop triggered /
-            # manual close). Close it; if a stop somehow still rests, CANCEL the orphan
-            # (a stop-sell with no position opens a short). DEFINITE state — kr not None.
-            if budget[key] < volf - 1e-8:
-                o = stop_info.get(stop_txid) if stop_txid else None
-                if (o or {}).get("status") in ("open", "pending"):
-                    broker.cancel_order(stop_txid)
-                    log.warning("startup: %s order %d unbacked (pair open %.8g < %.8g) — "
-                                "canceled orphan stop %s", sym, oid, budget[key], volf, stop_txid)
-                    self._journal("stop", sym, f"canceled orphan stop {stop_txid} (row unbacked)")
-                # Finding 6: if the stop actually EXECUTED, record realized P&L (from
-                # Kraken's own execution records) bucketed by close time, so the daily/
-                # weekly loss caps see real stop-outs. Manual/unknown closes stay unrecorded.
+            o = stop_info.get(stop_txid) if stop_txid else None
+            ostatus = (o or {}).get("status")
+            # (rank 2) This row's OWN stop EXECUTED -> the position is definitively gone,
+            # regardless of the pair's remaining open volume (which backs SURVIVING
+            # siblings). Close it and record the stop-out P&L, but do NOT consume budget:
+            # letting an executed-stop row eat a surviving sibling's backing is exactly
+            # what made oldest-first budgeting cancel a live stop and re-place a stale
+            # one against the wrong position. Handle this BEFORE the volume budget.
+            if ostatus == "closed":
                 pnl_json = self._stop_exit_pnl_json(sym, oid, entry_txid, o)
                 self.conn.execute("UPDATE orders SET status='closed', error=COALESCE(?, error) WHERE id=?",
                                   (pnl_json, oid))
+                self.conn.commit()
+                recon[sym]["closed"] += 1
+                log.info("startup: %s order %d stop executed — closed w/ P&L, budget preserved for siblings",
+                         sym, oid)
+                continue
+            # No open volume left to back this row (and its stop did NOT execute) ->
+            # position gone by manual close / liquidation. Its stop, if any, is now an
+            # orphan (a stop-sell with no position opens a short). Close the row ONLY once
+            # the orphan is PROVABLY neutralized; on cancel failure or UNKNOWN status leave
+            # it 'open' and converge next restart — never strand a possibly-live stop by
+            # closing its row (the row is then filtered out of every future reconcile).
+            if budget[key] < volf - 1e-8:
+                if ostatus in ("open", "pending"):
+                    if broker.cancel_order(stop_txid) is None:
+                        log.warning("startup: %s order %d unbacked but orphan-stop cancel FAILED — "
+                                    "leaving open, retry next restart", sym, oid)
+                        recon[sym]["unknown"] += 1
+                        continue
+                    log.warning("startup: %s order %d unbacked (pair open %.8g < %.8g) — "
+                                "canceled orphan stop %s", sym, oid, budget[key], volf, stop_txid)
+                    self._journal("stop", sym, f"canceled orphan stop {stop_txid} (row unbacked)")
+                elif o is None and stop_txid:
+                    log.warning("startup: %s order %d unbacked but stop status UNKNOWN — "
+                                "leaving open, retry next restart", sym, oid)
+                    recon[sym]["unknown"] += 1
+                    continue
+                # orphan gone (canceled/expired) or no stop_txid: nothing live to strand.
+                self.conn.execute("UPDATE orders SET status='closed' WHERE id=?", (oid,))
                 self.conn.commit()
                 recon[sym]["closed"] += 1
                 log.info("startup: %s order %d not backed by open volume — closed, no re-place", sym, oid)
@@ -661,8 +769,21 @@ class Executor:
                 continue
             if not config.PROTECTIVE_STOP:                 # stops disabled -> never place one
                 continue
-            # Stop DEFINITELY gone (closed/canceled/expired) or never placed, and the
-            # position is backed: re-place once, non-idempotent transport.
+            # (rank 3 / gap A) Before placing, adopt a stop that IS resting on Kraken's
+            # book for this pair but whose txid the ledger lost (persist-race orphan) —
+            # placing a duplicate would double the stop-sell -> naked short when hit.
+            adopt = self._find_adoptable_stop(kr_open_orders, claimed_stops, mpair, float(vol or 0))
+            if adopt:
+                self.conn.execute("UPDATE orders SET stop_txid=? WHERE id=?", (adopt, oid))
+                self.conn.commit()
+                claimed_stops.add(adopt)
+                recon[sym]["resting"] += 1
+                log.warning("startup: %s order %d adopted resting orphan stop %s (ledger had %s) — "
+                            "no duplicate placed", sym, oid, adopt, stop_txid or "none")
+                self._journal("stop", sym, f"adopted resting orphan stop {adopt}")
+                continue
+            # Stop DEFINITELY gone (closed/canceled/expired) or never placed, no orphan to
+            # adopt, and the position is backed: re-place once, non-idempotent transport.
             log.warning("startup: %s order %d position backed but stop %s — re-placing",
                         sym, oid, status or "missing")
             res = broker.private("/0/private/AddOrder", {
@@ -672,6 +793,7 @@ class Executor:
             if res and res.get("txid"):
                 self.conn.execute("UPDATE orders SET stop_txid=? WHERE id=?", (res["txid"][0], oid))
                 self.conn.commit()
+                claimed_stops.add(res["txid"][0])   # a sibling row must not adopt it
                 recon[sym]["replaced"] += 1
                 log.info("PROTECT %s: re-placed stop @ %s (%s)", sym, stop, res["txid"][0])
                 self._journal("stop", sym, f"re-placed missing stop @ {stop}")
@@ -729,9 +851,18 @@ class Executor:
             if e_cost <= 0:
                 return None
             pnl = (s_cost - s_fee) - (e_cost + e_fee)
-            now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+            # Bucket by the stop's ACTUAL execution time (Kraken 'closetm'), not restart
+            # 'now' — a stop that triggered on a prior day/week must land in THAT window's
+            # realized-loss cap, not the restart moment (rank 8; mirrors F6's closed_ts
+            # bucketing intent). Fall back to now only when closetm is absent/unparseable.
+            ct = stop_order.get("closetm")
+            try:
+                closed_ts = (datetime.datetime.fromtimestamp(float(ct), datetime.timezone.utc).isoformat()
+                             if ct else datetime.datetime.now(datetime.timezone.utc).isoformat())
+            except (TypeError, ValueError):
+                closed_ts = datetime.datetime.now(datetime.timezone.utc).isoformat()
             log.info("PNL %s: order %d realized $%.4f (stop exit)", sym, oid, pnl)
-            return json.dumps({"pnl": round(pnl, 8), "exit": "stop", "closed_ts": now})
+            return json.dumps({"pnl": round(pnl, 8), "exit": "stop", "closed_ts": closed_ts})
         except Exception:
             log.exception("PNL record failed for order %d (closing anyway)", oid)
             return None
