@@ -503,8 +503,16 @@ class Executor:
         don't move intraday; across a daily close they can, but the ladder does not
         re-score — a high-conviction entry keeps doubling down even if the signal later
         decays). Bounded by a NATURAL FLOOR: a rung at/under the stop is not placed.
-        One resting rung per symbol. Fully isolated — never raises into poll_fills, so
-        the fill/stop just secured is never unwound. NULL score -> flat 1.0x min."""
+        At most one LADDER rung per symbol — best-effort, NOT a hard invariant: the
+        has_pending_entry check + insert below run on the poll_fills connection while a
+        close-triggered _place_entry (which by design does NOT dedup — see the boot-arm
+        note in ingest, close bids stack) can insert its own bid on the dispatch thread,
+        so a close bid can coexist with a rung (and, in the microsecond check→insert
+        window, a second rung). Benign: each bid carries its own txid + stop and
+        reconciles independently; a shared lock would gain almost nothing since the
+        entry path is unguarded anyway (operator no-blockers stance). Fully isolated —
+        never raises into poll_fills, so the fill/stop just secured is never unwound.
+        NULL score -> flat 1.0x min."""
         try:
             if not config.LADDER_CONTINUOUS or self.mode != "live":
                 return
@@ -514,7 +522,7 @@ class Executor:
             if not filled_price or filled_price <= 0:
                 return
             if store.has_pending_entry(self.conn, symbol):
-                return                                  # one resting rung per symbol
+                return                                  # skip if a bid already rests (best-effort; see docstring)
             tick = config.MARGIN_TICK_DECIMALS.get(symbol, 2)
             target = _round_price(filled_price * (1 - config.LADDER_STEP_PCT), tick)
             if stop and target <= stop * (1 + config.LADDER_STOP_BUFFER):
