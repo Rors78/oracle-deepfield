@@ -597,6 +597,13 @@ class Executor:
             "SELECT id, symbol, margin_pair, volume, leverage, stop, stop_txid, txid "
             "FROM orders WHERE status='open' ORDER BY id").fetchall()
 
+        # Batch every row's stop status into ONE QueryOrders sweep (50 txids/call)
+        # instead of one call per row: a 60-position reconcile otherwise fires 60+
+        # back-to-back QueryOrders and trips Kraken's private-API rate limit on every
+        # restart. A stop_txid absent from this map reads as None below -> 'status
+        # UNKNOWN', identical to the old per-row query_order failure (never re-placed).
+        stop_info = broker.query_orders([r[6] for r in rows])   # r[6] = stop_txid
+
         # PASS 1 — classify each row against its pair's DEFINITE open-volume budget and
         # do all REMOVALS now (close unbacked rows, cancel their orphan stops). Only
         # reductions here, so resting-stop volume can never transiently exceed open vol.
@@ -619,7 +626,7 @@ class Executor:
             # manual close). Close it; if a stop somehow still rests, CANCEL the orphan
             # (a stop-sell with no position opens a short). DEFINITE state — kr not None.
             if budget[key] < volf - 1e-8:
-                o = broker.query_order(stop_txid) if stop_txid else None
+                o = stop_info.get(stop_txid) if stop_txid else None
                 if (o or {}).get("status") in ("open", "pending"):
                     broker.cancel_order(stop_txid)
                     log.warning("startup: %s order %d unbacked (pair open %.8g < %.8g) — "
@@ -641,7 +648,7 @@ class Executor:
         # PASS 2 — ADDITIONS only, after every removal is done: ensure each backed row
         # has exactly one resting stop; re-place only a DEFINITELY-gone/missing one.
         for oid, sym, mpair, vol, lev, stop, stop_txid in backed:
-            o = broker.query_order(stop_txid) if stop_txid else None
+            o = stop_info.get(stop_txid) if stop_txid else None
             status = (o or {}).get("status")
             if status in ("open", "pending"):
                 recon[sym]["resting"] += 1

@@ -689,6 +689,9 @@ def test_verify_records_realized_pnl_on_stop_exit_bucketed_by_close(tmp_path, mo
             return {"status": "closed", "vol_exec": "0.1", "cost": "10.0", "fee": "0.03"}
         return None
     monkeypatch.setattr(ex_mod.broker, "query_order", fake_qo)
+    # reconcile fetches the stop status via the batch path; mirror fake_qo into it.
+    monkeypatch.setattr(ex_mod.broker, "query_orders",
+                        lambda txids: {t: fake_qo(t) for t in txids if t and fake_qo(t)})
     monkeypatch.setattr(ex_mod.broker, "cancel_order", lambda t: {"count": 1})
     monkeypatch.setattr(ex_mod.broker, "private", lambda *a, **k: None)
     _exec(conn, mode="live").verify_open_stops()
@@ -833,6 +836,10 @@ def _wire_broker(monkeypatch, positions, stop_status, sent):
     """positions: dict of Kraken OpenPositions; stop_status: txid->status; sent: sink."""
     monkeypatch.setattr(ex_mod.broker, "open_positions", lambda: positions)
     monkeypatch.setattr(ex_mod.broker, "query_order", lambda t: {"status": stop_status.get(t)} if t else None)
+    # reconcile batches its stop-status lookups through query_orders; mirror the
+    # per-txid mock above (a dict for every non-empty txid) so the batch map matches.
+    monkeypatch.setattr(ex_mod.broker, "query_orders",
+                        lambda txids: {t: {"status": stop_status.get(t)} for t in txids if t})
     monkeypatch.setattr(ex_mod.broker, "private",
                         lambda ep, p=None, **kw: (sent.append(("private", p)) or {"txid": ["ONEWSTOP"]}))
     monkeypatch.setattr(ex_mod.broker, "cancel_order", lambda t: sent.append(("cancel", t)) or {})

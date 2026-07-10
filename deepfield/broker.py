@@ -190,12 +190,30 @@ def trade_balance_full():
     return private("/0/private/TradeBalance", {"asset": "ZUSD"})
 
 
+def query_orders(txids):
+    """Batch order-info lookup: {txid: info_dict} for many txids in as few calls as
+    possible (Kraken QueryOrders takes up to 50 comma-separated txids per request).
+    A 60-position startup reconcile otherwise fires 60+ QueryOrders back-to-back and
+    trips the private-API rate limit on every restart; this collapses it to ~2 calls.
+    A txid ABSENT from the returned map means its status is UNKNOWN — callers must
+    treat a missing key exactly like query_order's None (never 'definitely gone',
+    which could trigger a blind stop re-place -> duplicate stop -> short). On API
+    failure the chunk contributes nothing, so all its txids read as unknown."""
+    ids = [t for t in (txids or []) if t]
+    out = {}
+    for i in range(0, len(ids), 50):                # Kraken cap: 50 txids per call
+        r = private("/0/private/QueryOrders", {"txid": ",".join(ids[i:i + 50])})
+        if r:
+            out.update(r)
+    return out
+
+
 def query_order(txid):
-    """Order info dict for a txid (has 'status': open|closed|canceled|...) or None."""
+    """Order info dict for a txid (has 'status': open|closed|canceled|...) or None.
+    Single-txid case of query_orders (ONE definition, so both paths agree)."""
     if not txid:
         return None
-    r = private("/0/private/QueryOrders", {"txid": txid})
-    return (r or {}).get(txid)
+    return query_orders([txid]).get(txid)
 
 
 def setup_raw_log(log_dir):
