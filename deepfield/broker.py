@@ -39,6 +39,13 @@ _LAST_NONCE = 0
 # equity refresh). Without this lock two threads can mint the SAME microsecond nonce
 # -> one call rejected 'EAPI:Invalid nonce', and the file write can tear (Finding 7).
 _NONCE_LOCK = threading.Lock()
+# _NONCE_LOCK alone isn't enough: it serializes nonce MINTING, but the lock is freed
+# before the HTTP send, so two threads can mint n and n+1 then have their requests
+# ARRIVE at Kraken out of order (n+1 first) — Kraken rejects the later, lower nonce
+# ('EAPI:Invalid nonce'). Kraken's nonce is strictly-increasing per key, so private
+# calls simply cannot be concurrent: _SEND_LOCK makes mint→send atomic, so requests
+# reach Kraken in the same monotonic order their nonces were minted.
+_SEND_LOCK = threading.Lock()
 _KEY = None
 _SECRET = None
 _KEY_SRC = None
@@ -114,38 +121,47 @@ def private(endpoint, params=None, idempotent=True):
     base = dict(params or {})
     url = BASE_URL + endpoint
     for attempt in range(5):
-        p = dict(base)
-        p["nonce"] = _next_nonce()
-        postdata = urllib.parse.urlencode(p)
-        sig = sign(endpoint, postdata, p["nonce"], secret)
-        headers = {"API-Key": key, "API-Sign": sig,
-                   "Content-Type": "application/x-www-form-urlencoded", "User-Agent": "DEEPFIELD/1"}
-        try:
-            _raw.info("REQ %s %s", endpoint, postdata.replace(p["nonce"], "<nonce>"))
-            req = urllib.request.Request(url, data=postdata.encode(), headers=headers)
-            with urllib.request.urlopen(req, timeout=15) as r:
-                raw = r.read()
-            _raw.info("RESP %s %s", endpoint, raw.decode("utf-8", "replace"))
-            data = json.loads(raw)
-            err = data.get("error")
-            if err:
-                es = str(err)
-                if ("Nonce" in es or "nonce" in es or "Invalid key" in es) and attempt < 4:
-                    time.sleep(0.4)
-                    continue
-                if "Rate limit" in es and attempt < 4:
-                    time.sleep(5)
-                    continue
-                log.error("private API error %s: %s", endpoint, es)
-                return None
-            return data.get("result")
-        except Exception as e:
-            log.warning("private API attempt %d failed: %s", attempt + 1, e)
-            if not idempotent:
-                log.error("%s not retried after network error — may or may not have "
-                          "landed; caller must NOT blind-resend", endpoint)
-                return None
-            time.sleep(2)
+        wait = 0.0                              # backoff before the next attempt; 0 = give up
+        # Hold _SEND_LOCK across mint→send so Kraken sees monotonic nonces (a request
+        # can never overtake an earlier one with a lower nonce). Backoff sleeps happen
+        # AFTER the lock is released, so a retry never stalls other callers.
+        with _SEND_LOCK:
+            p = dict(base)
+            p["nonce"] = _next_nonce()
+            postdata = urllib.parse.urlencode(p)
+            sig = sign(endpoint, postdata, p["nonce"], secret)
+            headers = {"API-Key": key, "API-Sign": sig,
+                       "Content-Type": "application/x-www-form-urlencoded", "User-Agent": "DEEPFIELD/1"}
+            try:
+                _raw.info("REQ %s %s", endpoint, postdata.replace(p["nonce"], "<nonce>"))
+                req = urllib.request.Request(url, data=postdata.encode(), headers=headers)
+                with urllib.request.urlopen(req, timeout=15) as r:
+                    raw = r.read()
+                _raw.info("RESP %s %s", endpoint, raw.decode("utf-8", "replace"))
+                data = json.loads(raw)
+                err = data.get("error")
+                if err:
+                    es = str(err)
+                    if ("Nonce" in es or "nonce" in es or "Invalid key" in es) and attempt < 4:
+                        wait = 0.4
+                    elif "Rate limit" in es and attempt < 4:
+                        wait = 5.0
+                    else:
+                        log.error("private API error %s: %s", endpoint, es)
+                        return None
+                else:
+                    return data.get("result")
+            except Exception as e:
+                log.warning("private API attempt %d failed: %s", attempt + 1, e)
+                if not idempotent:
+                    log.error("%s not retried after network error — may or may not have "
+                              "landed; caller must NOT blind-resend", endpoint)
+                    return None
+                wait = 2.0
+        if wait:                                # lock released — back off, then retry
+            time.sleep(wait)
+            continue
+        return None
     return None
 
 
