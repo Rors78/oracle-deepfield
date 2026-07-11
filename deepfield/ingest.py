@@ -395,6 +395,20 @@ class Ingest:
             log.info("startup-arm: %s already has a resting pending entry — skipping re-fire", symbol)
             self._journal("order", symbol, "boot-arm skipped — entry already resting")
             return
+        # Own each level once: if we already hold an OPEN rung within a ladder step of the
+        # live price, the boot arm would just re-stack a near-market rung on EVERY restart
+        # (it bids near the live tick, not at a dip) — a slow restart-driven drip. The
+        # has_pending_entry check above covers a resting BID; this covers an already-FILLED
+        # rung near price. Reuses the same guard continuous laddering uses. Only when an
+        # executor exists (off mode is signal-only — no rungs to stack).
+        live_px = ps.last_tick.last if ps.last_tick else None
+        if (live_px and self.executor is not None
+                and self.executor._owns_level_near(symbol, live_px, config.LADDER_STEP_PCT)):
+            self._armed_buys.add(symbol)
+            log.info("startup-arm: %s already owns a rung within a step of %.6g — skipping "
+                     "re-fire (own each level once)", symbol, live_px)
+            self._journal("order", symbol, "boot-arm skipped — own a rung near price")
+            return
         self._armed_buys.add(symbol)   # one-shot: never retry this symbol on later ticks
         log.info("startup-arm: %s already confirmed BUY %d/%d — firing on first fresh tick",
                  symbol, card.score, card.denom)

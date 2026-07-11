@@ -257,6 +257,52 @@ def test_finding3_boot_time_buy_still_arms(tmp_path, monkeypatch):
     conn.close()
 
 
+def _own_rung(conn, entry):
+    store.insert_order(conn, {
+        "ts": "2026-07-11T00:00:00+00:00", "symbol": "TEST/USD", "margin_pair": "TESTUSD:BTNL",
+        "side": "buy", "ordertype": "limit", "mode": "paper", "entry": entry, "stop": entry * 0.9,
+        "volume": 1.0, "leverage": 2, "notional": entry * 2, "margin": entry, "risk_usd": 1.0,
+        "score": 5, "required": 5, "txid": "PAPER-1", "stop_txid": "PAPER-STOP-1",
+        "status": "open", "error": None})
+
+
+def _armed_ingest(conn, monkeypatch):
+    monkeypatch.setattr("deepfield.ingest.config.PAIRS", _TEST_PAIRS)
+    monkeypatch.setattr("deepfield.config.EXEC_MODE", "paper")   # so ingest builds an executor
+    ing = Ingest(conn, AppState(), profile=FULL)
+    monkeypatch.setattr(ing, "_recompute_regime", lambda: None)
+    monkeypatch.setattr(engine, "evaluate", lambda *a, **k: _Buy())
+    ing.startup_sweep()                          # boot: TEST is BUY -> boot snapshot
+    fires = []
+    monkeypatch.setattr(ing, "_maybe_alert", lambda s, c, kind: fires.append(s))
+    return ing, fires
+
+
+def test_boot_arm_skips_when_owns_rung_near_price(tmp_path, monkeypatch):
+    """Boot arm must NOT re-stack a near-market rung on restart when an OPEN position
+    already sits within a ladder step of the live price (own each level once) — the
+    restart-drip guard. has_pending_entry covers a resting BID; this covers a FILLED rung."""
+    conn = store.connect(str(tmp_path / "t.db"))
+    _seed_minimal(conn, int(time.time()))
+    _own_rung(conn, 10.0)                         # filled rung AT the live price
+    ing, fires = _armed_ingest(conn, monkeypatch)
+    ing.handle_tick(_fresh_tick(10.0))           # live px 10.0, own a rung at 10.0 (< 1 step)
+    assert fires == []                           # boot arm skipped
+    conn.close()
+
+
+def test_boot_arm_still_fires_when_owned_rung_is_far(tmp_path, monkeypatch):
+    """Price-sensitive: an OPEN rung far from the live price (> a ladder step) does NOT
+    block the boot arm — the guard suppresses only near-market restart re-stacking."""
+    conn = store.connect(str(tmp_path / "t.db"))
+    _seed_minimal(conn, int(time.time()))
+    _own_rung(conn, 5.0)                          # far below the 10.0 live price
+    ing, fires = _armed_ingest(conn, monkeypatch)
+    ing.handle_tick(_fresh_tick(10.0))
+    assert fires == ["TEST/USD"]                 # rung at 5.0 is >1 step from 10.0 -> arm fires
+    conn.close()
+
+
 def test_finding2_restart_border_no_duplicate_fire(tmp_path, monkeypatch):
     """Restart-at-border: _last_fired is in-process and cleared by a restart. Seeding it
     from the DB's max closed ts at boot means a late WS close for the already-closed
