@@ -31,7 +31,7 @@ def test_plan_is_pure_min_size_default(tmp_path):
     store.upsert_pair(conn, "XXBTZUSD", SYM, "BTC", 0.00005, 0.5, 8)
     e = ex_mod.Executor(conn)
     plan = e.plan(SYM, 63000.0, Card(), 1000.0)
-    assert plan["leverage"] == 2              # fork-A de-lever (fixed, hardcoded; was 10)
+    assert plan["leverage"] == 10             # fixed, hardcoded (not derived)
     assert plan["size_mode"] == "min"         # default: minimum order
     assert plan["volume"] >= 0.00005 and plan["margin"] > 0
     assert plan["stop"] < 63000.0

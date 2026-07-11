@@ -189,7 +189,7 @@ def test_paper_mode_records_open_order_and_stop(tmp_path):
     assert row[0] == SYM
     assert row[1] == "XBTUSD:BTNL"          # :BTNL routing
     assert row[2] == "paper" and row[3] == "open"
-    assert row[4] == 2                        # fork-A de-lever (2x; was BTC 10x)
+    assert row[4] == 10                       # BTC max leverage
     assert row[5] and row[5].startswith("PAPER-STOP")   # protective stop rested (sim)
     conn.close()
 
@@ -751,7 +751,7 @@ def test_validate_mode_builds_order_without_executing(tmp_path, monkeypatch):
     oid = e.place_entry(SYM, 100.0, Card(low_52w=92.0))
     assert captured["params"]["validate"] == "true"          # never executes
     assert captured["params"]["pair"] == "XBTUSD:BTNL"
-    assert captured["params"]["leverage"] == "2"             # fork-A de-lever (was 10)
+    assert captured["params"]["leverage"] == "10"
     assert captured["params"]["ordertype"] == "limit"        # post-only maker (NO market)
     assert captured["params"]["oflags"] == "post"
     row = conn.execute("SELECT status FROM orders WHERE id=?", (oid,)).fetchone()

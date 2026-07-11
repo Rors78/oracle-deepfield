@@ -182,30 +182,15 @@ MARGIN_CAP_PCT = 0.90               # a single position may post at most this fr
 
 # FORK A regime gate: accumulate in weakness, not strength. When True, new confirmed
 # entries AND ladder rungs are placed ONLY when the BTC regime is not confirmed BULL
-# ("stop adding once BULL" — buy the fall/turn, harvest the recovery). FAILS OPEN: an
+# ("stop adding once BULL" — buy the fall/turn, not the strength). FAILS OPEN: an
 # unknown/missing/other regime (BEAR/RECOVERY/NEUTRAL/UNKNOWN) still accumulates, so a
 # stale or unavailable regime can never silently halt entries (operator no-blockers
 # stance). Only the unambiguous BULL state pauses accumulation. Set False to disable.
 ACCUMULATE_ONLY_IN_BEAR = True
 NO_ACCUMULATE_REGIMES = ("BULL",)   # regimes that pause new entries/rungs when the gate is on
-
-# FORK A harvest / gain-realization (pt2): rest a post-only SELL limit at
-# entry x (1 + HARVEST_TARGET_PCT) so a position can EXIT at a profit target — the
-# 'sell side' the strategy never had (today the only exit is the stop, a loss).
-# DEFAULT OFF. Kraken spot-margin AddOrder SILENTLY IGNORES reduce_only (probe
-# 2026-07-11: a garbage param validates identically), so every resting sell is a
-# genuine market-open sell that would open a SHORT if it outran the live position.
-# Safety therefore rests on: (a) sizing each harvest to the REAL position volume
-# (new fills use vol_exec; the retrofit is budgeted against live open volume),
-# (b) poll-cadence OCO (Executor.poll_harvest_oco cancels the stop the instant the
-# harvest fills, and the harvest the instant the stop fills — window ~one poll, not
-# ~one hour), and (c) reconcile orphan-cancellation. ENABLE ONLY after a validate-
-# probe and one tiny live harvest. Harvest+stop are ~ (target+stopdist) apart, so a
-# naked short would need that full reversal inside one poll — practically impossible.
-HARVEST_ENABLED = False             # DISABLED 2026-07-11 — harvest sells can open shorts (no
-                                    # reduce_only on Kraken); strategy is LONG ONLY, so the
-                                    # sell-side is backed out. Do not re-enable.
-HARVEST_TARGET_PCT = 0.20           # post-only sell at entry x (1 + this) — +20% take-profit
+# NOTE: the strategy is LONG ONLY. There is intentionally NO automated sell-side / take-
+# profit ("harvest") — a resting sell can net short (Kraken spot-margin has no reduce_only).
+# The only sells are protective STOPS (sized to close a long). Do not add resting sells.
 
 # Risk rails (deterministic hard limits, from GoldenEye — NOT learners).
 # OPERATOR OVERRIDE: automatic circuit breakers OFF ("no circuit breakers, no

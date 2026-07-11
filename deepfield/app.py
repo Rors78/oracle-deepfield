@@ -75,7 +75,6 @@ def _poll_fills_threaded():
         e = executor_mod.Executor(c)
         e.mode = "live"
         e.poll_fills()
-        e.poll_harvest_oco()   # FORK A: poll-cadence OCO — cancel the sibling the instant a stop/harvest fills
     except Exception:
         log.exception("poll_fills failed")
     finally:
@@ -324,7 +323,6 @@ def _startup(debug, announce=False):
             log.info("startup position check: ledger open=%d · Kraken open positions=%s",
                      ours, len(kr) if kr is not None else "unavailable")
             ing.executor.verify_open_stops()   # re-place any missing protective stops
-            ing.executor._reconcile_harvests() # FORK A: place/retrofit target-sells (budgeted to live open vol)
         except Exception:
             log.exception("startup position/stop check failed")
     log.info("startup sweep complete: %d pairs, regime=%s",

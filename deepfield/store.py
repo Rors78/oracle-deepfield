@@ -38,7 +38,7 @@ CREATE TABLE IF NOT EXISTS orders(
     entry REAL, stop REAL, volume REAL, leverage INTEGER,
     notional REAL, margin REAL, risk_usd REAL,
     score INTEGER, required INTEGER,             -- entry conviction (rides down the ladder chain)
-    txid TEXT, stop_txid TEXT, harvest_txid TEXT, status TEXT, error TEXT
+    txid TEXT, stop_txid TEXT, status TEXT, error TEXT
 );
 """
 
@@ -69,8 +69,7 @@ def connect(db_path):
     conn.executescript(SCHEMA)
     # Additive migration for DBs created before the orders conviction columns
     # (existing rows -> NULL score/required -> ladder falls back to flat min).
-    _ensure_columns(conn, "orders", [("score", "INTEGER"), ("required", "INTEGER"),
-                                     ("harvest_txid", "TEXT")])
+    _ensure_columns(conn, "orders", [("score", "INTEGER"), ("required", "INTEGER")])
     conn.commit()
     return conn
 
