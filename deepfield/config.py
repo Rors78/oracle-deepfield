@@ -202,7 +202,7 @@ NO_ACCUMULATE_REGIMES = ("BULL",)   # regimes that pause new entries/rungs when 
 # ~one hour), and (c) reconcile orphan-cancellation. ENABLE ONLY after a validate-
 # probe and one tiny live harvest. Harvest+stop are ~ (target+stopdist) apart, so a
 # naked short would need that full reversal inside one poll — practically impossible.
-HARVEST_ENABLED = False
+HARVEST_ENABLED = True              # ENABLED 2026-07-11 — retrofit target-sells across the book
 HARVEST_TARGET_PCT = 0.20           # post-only sell at entry x (1 + this) — +20% take-profit
 
 # Risk rails (deterministic hard limits, from GoldenEye — NOT learners).
