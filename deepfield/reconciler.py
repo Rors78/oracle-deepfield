@@ -32,6 +32,7 @@ def gap_heal(conn, symbols, fetch_ohlc, intervals=config.INTERVALS, recent=10):
                 continue
             now = int(time.time())
             checked = updated = 0
+            repairs_before = repairs
             for r in rows[-recent:]:
                 ts = int(r[0])
                 o, h, l, c, v = float(r[1]), float(r[2]), float(r[3]), float(r[4]), float(r[6])
@@ -58,6 +59,12 @@ def gap_heal(conn, symbols, fetch_ohlc, intervals=config.INTERVALS, recent=10):
                     store.upsert_candle(conn, ws, interval, ts, o, h, l, c, v, closed)
                     updated += 1
             conn.commit()
-            log.info("RECON gap-heal %s/%s: checked=%d updated=%d repairs+=%d",
-                     ws, interval, checked, updated, repairs)
+            # This summary ran 30x per hourly cycle at INFO, almost always the steady-state
+            # "updated=0 repairs+=0" — pure noise that buried real events. Demote to debug
+            # unless THIS pass actually repaired a missing/changed CLOSED bar (each such
+            # repair already logs its own INFO line above; routine forming-bar 'updated'
+            # churn is not a repair).
+            level = log.info if repairs > repairs_before else log.debug
+            level("RECON gap-heal %s/%s: checked=%d updated=%d repairs+=%d",
+                  ws, interval, checked, updated, repairs)
     return repairs
