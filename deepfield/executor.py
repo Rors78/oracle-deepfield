@@ -271,6 +271,21 @@ class Executor:
 
     # ── placement ────────────────────────────────────────────────────────────
 
+    def _accumulation_allowed(self):
+        """FORK A regime gate (config.ACCUMULATE_ONLY_IN_BEAR): accumulate in weakness,
+        pause in confirmed strength. Returns (ok, reason). FAILS OPEN — only an
+        unambiguous BULL regime (config.NO_ACCUMULATE_REGIMES) pauses new entries/rungs;
+        an unknown/missing/other regime still accumulates, so a stale or unavailable
+        regime can never silently halt entries (operator no-blockers stance). The
+        regime label is persisted to meta by ingest._recompute_regime."""
+        if not getattr(config, "ACCUMULATE_ONLY_IN_BEAR", False):
+            return True, ""
+        regime = store.meta_get(self.conn, "regime", None)
+        blocked = getattr(config, "NO_ACCUMULATE_REGIMES", ("BULL",))
+        if regime and regime in blocked:
+            return False, f"regime={regime} (accumulate only outside {tuple(blocked)})"
+        return True, ""
+
     def place_entry(self, symbol, entry_price, card):
         if self.mode == "off":
             return None
@@ -283,6 +298,10 @@ class Executor:
     def _place_entry(self, symbol, entry_price, card):
         if symbol not in config.MARGIN_PAIR:
             log.error("no :BTNL margin pair for %s — cannot execute", symbol)
+            return None
+        ok_acc, why = self._accumulation_allowed()
+        if not ok_acc:
+            log.info("EXEC %s: accumulation paused (regime gate) — %s", symbol, why)
             return None
         equity = self.portfolio_value()
         ok, reason = self.rails_ok(equity)
@@ -518,6 +537,10 @@ class Executor:
                 return
             if os.path.exists(config.HALT_FILE):
                 log.info("LADDER %s: HALT present — no next rung", symbol)
+                return
+            ok_acc, why = self._accumulation_allowed()
+            if not ok_acc:
+                log.info("LADDER %s: accumulation paused (regime gate) — %s", symbol, why)
                 return
             if not filled_price or filled_price <= 0:
                 return

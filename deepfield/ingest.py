@@ -307,6 +307,13 @@ class Ingest:
         weekly, daily = store.load_weekly_daily_closed(self.conn, BTC_SYMBOL)
         wc, dc = weekly[3], daily[0]
         self.state.regime = engine.regime(wc, dc, self.profile)
+        # Persist the regime label so the executor (which holds only the DB conn, not
+        # AppState) can gate accumulation on it (config.ACCUMULATE_ONLY_IN_BEAR). Guarded
+        # — a meta write must never break the regime recompute / writer.
+        try:
+            store.meta_set(self.conn, "regime", getattr(self.state.regime, "label", "UNKNOWN"))
+        except Exception:
+            log.exception("regime meta persist failed (regime state unaffected)")
 
     def _compute_tranche(self, symbol, card):
         """F8, computed here (not in engine.evaluate — that signature is locked

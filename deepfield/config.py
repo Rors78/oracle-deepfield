@@ -180,6 +180,15 @@ LADDER_STEP_PCT = 0.01              # next rung this far below the fill (1% ~= 8
 LADDER_STOP_BUFFER = 0.0            # extra margin ABOVE the stop below which no rung is placed
 MARGIN_CAP_PCT = 0.90               # a single position may post at most this frac of free margin
 
+# FORK A regime gate: accumulate in weakness, not strength. When True, new confirmed
+# entries AND ladder rungs are placed ONLY when the BTC regime is not confirmed BULL
+# ("stop adding once BULL" — buy the fall/turn, harvest the recovery). FAILS OPEN: an
+# unknown/missing/other regime (BEAR/RECOVERY/NEUTRAL/UNKNOWN) still accumulates, so a
+# stale or unavailable regime can never silently halt entries (operator no-blockers
+# stance). Only the unambiguous BULL state pauses accumulation. Set False to disable.
+ACCUMULATE_ONLY_IN_BEAR = True
+NO_ACCUMULATE_REGIMES = ("BULL",)   # regimes that pause new entries/rungs when the gate is on
+
 # Risk rails (deterministic hard limits, from GoldenEye — NOT learners).
 # OPERATOR OVERRIDE: automatic circuit breakers OFF ("no circuit breakers, no
 # fear"). RAILS_ENABLED=False makes rails_ok skip the drawdown kill-switch, the
@@ -196,11 +205,17 @@ HALT_FILE = os.path.join(PROJECT_ROOT, "deepfield.HALT_ENTRIES")  # touch to hal
 
 # Per-pair leverage — a FIXED hardcoded value Kraken must accept verbatim (it must
 # be present in the pair's leverage_buy array). Sent exactly as-is on every order,
-# hydra-style. Verified 2026-07-04 == max Kraken leverage_buy per pair.
+# hydra-style. FORK A DE-LEVER (2026-07-11): dropped 10x/5x -> 2x across the board.
+# The signal-vs-baseline backtest found NO timing edge (returns are beta, not alpha);
+# 10x + funding + no gain-realization subtracts value from undifferentiated beta, so
+# 2x cuts funding/liquidation/ruin ~5x while still capturing the up-drift. 2x is the
+# Kraken spot-margin floor (present in every pair's leverage_buy array; validate-
+# confirmed 2026-07-11). Affects NEW entries only — existing positions keep the
+# leverage they opened at. Restore per-pair max values to re-lever.
 PER_PAIR_LEVERAGE = {
-    "BTC/USD": 10, "ETH/USD": 10, "XRP/USD": 10, "SOL/USD": 10, "DOGE/USD": 10,
-    "ADA/USD": 10, "LINK/USD": 10, "SUI/USD": 10, "LTC/USD": 10, "AVAX/USD": 10,
-    "AAVE/USD": 5, "UNI/USD": 5, "DOT/USD": 5, "BCH/USD": 5, "ALGO/USD": 2,
+    "BTC/USD": 2, "ETH/USD": 2, "XRP/USD": 2, "SOL/USD": 2, "DOGE/USD": 2,
+    "ADA/USD": 2, "LINK/USD": 2, "SUI/USD": 2, "LTC/USD": 2, "AVAX/USD": 2,
+    "AAVE/USD": 2, "UNI/USD": 2, "DOT/USD": 2, "BCH/USD": 2, "ALGO/USD": 2,
 }
 # Leveraged orders MUST use the :BTNL margin-book name (Non-ECP rejects spot name).
 MARGIN_PAIR = {
