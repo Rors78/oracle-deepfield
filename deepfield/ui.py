@@ -367,13 +367,18 @@ def render_exec_line(appstate):
         t.append(" · equity ", style=INK)
         t.append(f"${eq:,.2f}", style=PRICE)
     # 'open' = unrealized mark-to-market of live positions (lifetime, not today);
-    # 'day' = realized P&L closed since day0. Two different questions, two labels.
+    # 'day'  = realized P&L closed since day0 (only moves on a CLOSE -> $0 until a stop);
+    # 'swing' = live mark-to-market MOVE since UTC midnight (how the book did today).
     upnl = _open_pnl(appstate)
     rpnl = ex.get("realized_day", 0.0) or 0.0
     t.append(" · open ", style=INK)
     t.append(_fmt_usd(upnl), style=GAIN if upnl >= 0 else LOSS)
     t.append(" · day ", style=INK)
     t.append(_fmt_usd(rpnl), style=GAIN if rpnl >= 0 else LOSS)
+    swing = ex.get("swing_day")
+    if swing is not None:
+        t.append(" · swing ", style=INK)
+        t.append(_fmt_usd(swing), style=GAIN if swing >= 0 else LOSS)
     t.append(" · ", style=INK)
     t.append(f"{ex.get('open_count', 0)} pos", style=QTY)
     t.append(" · ", style=INK)

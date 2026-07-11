@@ -206,6 +206,27 @@ async def _exec_state_refresh(appstate, conn, ing, interval=15):
                 except Exception:
                     log.exception("realized_pnl_since failed (display value only)")
                     return 0.0
+
+            def _day_swing(eq):
+                """Daily book SWING = equity now − equity at the first read of the UTC day.
+                Complements 'day' (realized): realized only moves when something CLOSES (for
+                a long-only, stops-only book that's $0 until a stop -> a loss), so the swing
+                is the live mark-to-market move that actually tracks how the book did today.
+                Baseline is persisted in meta, so it survives the day's restarts (best-effort:
+                if the bot was down over midnight the baseline is the first read after).
+                Display-only; None when equity is unknown."""
+                if eq is None:
+                    return None
+                try:
+                    today = now.date().isoformat()
+                    d, _, base = (store.meta_get(conn, "day_open_equity") or "").partition("|")
+                    if d != today or not base:
+                        store.meta_set(conn, "day_open_equity", f"{today}|{eq}")
+                        return 0.0
+                    return eq - float(base)
+                except Exception:
+                    log.exception("day swing calc failed (display value only)")
+                    return None
             # live stop coverage: open rows carrying a resting stop txid (header
             # safety-reading number — tracks the live book, not the boot recon stamp)
             scov = conn.execute(
@@ -222,6 +243,8 @@ async def _exec_state_refresh(appstate, conn, ing, interval=15):
                 "journal_tail": store.recent_journal(conn, 200),
                 "realized_day": _realized(day0),
                 "realized_week": _realized(wk0),
+                "swing_day": _day_swing(equity),   # live mark-to-market move since UTC midnight
+
                 "capacity": _snapshot_capacity(conn, appstate, free_margin),
                 "last_recon": store.meta_get(conn, "last_recon"),
                 "stops_total": scov[0], "stops_covered": scov[1],

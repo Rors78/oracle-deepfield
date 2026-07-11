@@ -253,6 +253,16 @@ def _assemble(conn):
     bid_count = conn.execute("SELECT COUNT(*) FROM orders WHERE status='pending'").fetchone()[0]
     peak = _num(store.meta_get(conn, "peak_equity"))
     equity = live.get("equity") if live.get("_fresh") else None
+    # daily SWING = equity now − equity at the day's first read (baseline written by the
+    # bot loop; read-only here). Complements realized 'day', which is $0 until a close.
+    swing_day = None
+    if equity is not None:
+        dd, _, base = (store.meta_get(conn, "day_open_equity") or "").partition("|")
+        if base and dd == day0[:10]:
+            try:
+                swing_day = round(equity - float(base), 2)
+            except (TypeError, ValueError):
+                swing_day = None
     recon = _recon(store.meta_get(conn, "last_recon"))
     # exec mode: the web process doesn't inherit the bot's env var, so prefer the
     # bot's persisted value, then infer from what the live orders were placed under.
@@ -275,6 +285,7 @@ def _assemble(conn):
         "equity": equity, "equity_live": bool(live.get("_fresh") and equity is not None),
         "peak": peak, "open_pnl": round(open_pnl, 2),
         "realized_day": round(rday, 2), "realized_week": round(rweek, 2),
+        "swing_day": swing_day,
         "pos_count": scov[0], "bid_count": bid_count,
         "stops_covered": scov[1], "stops_total": scov[0],
         "margin_used": live.get("margin_used") if live.get("_fresh") else None,

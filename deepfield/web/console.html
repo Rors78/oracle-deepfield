@@ -940,6 +940,7 @@ function renderHealth(h){
       <div class="equityrow">
         <div class="stat"><span class="k">${eqLive?'Equity':'Peak equity'}</span><span class="val big">$${(eqMain||0).toFixed(2)}</span><span class="flagnote">${eqSub}</span></div>
         <div class="stat"><span class="k">Open P&L</span><span class="val mid ${opnl>=0?'gain':'loss'}">${fmtUsd(opnl)} <span class="arrow">${opnl>=0?'▲':'▼'}</span></span><span class="sub">unrealized · mark-to-mkt</span></div>
+        <div class="stat"><span class="k">Today</span><span class="val mid ${(h.swing_day||0)>=0?'gain':'loss'}">${h.swing_day==null?'—':fmtUsd(h.swing_day)+' '+((h.swing_day||0)>=0?'▲':'▼')}</span><span class="sub">book swing · since 00:00 UTC</span></div>
         <div class="stat"><span class="k">Realized</span><span class="val" style="font-size:14px"><span class="dim">day</span> ${fmtUsd(h.realized_day)} · <span class="dim">wk</span> <span class="${(h.realized_week||0)>=0?'gain':'loss'}">${fmtUsd(h.realized_week)}</span></span><span class="sub">closed P&L</span></div>
         <div class="stat"><span class="k">Book</span><span class="val"><span class="violet">${h.pos_count}</span> <span class="dim" style="font-size:11px">pos</span> · <span class="violet">${h.bid_count}</span> <span class="dim" style="font-size:11px">bids</span></span></div>
       </div>
