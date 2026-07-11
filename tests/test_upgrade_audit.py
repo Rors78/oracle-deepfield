@@ -160,6 +160,53 @@ def test_finding2_duplicate_close_does_not_double_fire(tmp_path, monkeypatch):
     conn.close()
 
 
+# ── Finding 2b: coincident daily+weekly close (Thu 00:00 UTC) fires ONCE ──────
+
+def test_coincident_daily_weekly_close_fires_once(tmp_path, monkeypatch):
+    """Every Thu 00:00 UTC (Kraken's weekly boundary) the daily (1440) AND weekly
+    (10080) bars close at the SAME instant. The confirmed BUY is one verdict, but a
+    per-(symbol,interval) fire-dedup let each interval fire it -> two live orders (the
+    ADA 2026-07-09 rung). Keyed on the close INSTANT it must fire ONCE. Order-independent:
+    WS arrival order of the two closes is nondeterministic, so it must collapse to one
+    for BOTH orderings. And the next daily close must still fire (no over-suppression)."""
+    class Card:
+        status = "BUY"; price = 10.0; score = 5; denom = 7; required = 5; fired = ["x"]
+
+    for daily_first in (True, False):
+        conn = store.connect(str(tmp_path / f"t_{daily_first}.db"))
+        now = int(time.time())
+        _seed_minimal(conn, now)
+        ing = Ingest(conn, AppState(), profile=FULL)
+        ing.handle_tick(_fresh_tick(10.0))           # fresh tick so the alert isn't stale-suppressed
+        monkeypatch.setattr(engine, "evaluate", lambda *a, **k: Card())
+        fires = []
+        monkeypatch.setattr(ing, "_maybe_alert", lambda sym, card, kind: fires.append((sym, kind)))
+
+        # two bars of DIFFERENT intervals that close at the SAME instant
+        close_at = now - (now % 86400)               # a daily boundary instant
+        d_begin = close_at - 1440 * 60               # daily bar closing at close_at
+        w_begin = close_at - 10080 * 60              # weekly bar closing at the SAME instant
+        store.upsert_candle(conn, SYM, 1440, d_begin, 10, 11, 9, 10, 50, closed=1)
+        store.upsert_candle(conn, SYM, 10080, w_begin, 10, 11, 9, 10, 50, closed=1)
+        conn.commit()
+
+        d = events.CandleClosed(SYM, 1440, d_begin)
+        w = events.CandleClosed(SYM, 10080, w_begin)
+        first, second = (d, w) if daily_first else (w, d)
+        ing.handle_candle_closed(first)
+        ing.handle_candle_closed(second)
+        assert fires == [(SYM, "confirmed")], f"daily_first={daily_first}: {fires}"
+
+        # the NEXT daily close must still fire — the coincident weekly must not advance
+        # the edge past the following day and swallow normal daily cadence.
+        nd_begin = close_at                          # next daily bar closes at close_at + 86400
+        store.upsert_candle(conn, SYM, 1440, nd_begin, 10, 11, 9, 10, 50, closed=1)
+        conn.commit()
+        ing.handle_candle_closed(events.CandleClosed(SYM, 1440, nd_begin))
+        assert fires == [(SYM, "confirmed"), (SYM, "confirmed")], f"daily_first={daily_first}: {fires}"
+        conn.close()
+
+
 # ── Finding 3: reconciler resweep must not fire the boot arm ──────────────────
 
 _TEST_PAIRS = [{"rest": "XTEST", "wsname": "TEST/USD", "ws": "TEST/USD",

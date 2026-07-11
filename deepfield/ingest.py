@@ -50,12 +50,14 @@ class Ingest:
         self._bg_tasks = set()   # strong refs so fire-and-forget dispatch isn't GC'd
         self._armed_buys = set()  # symbols already-BUY at startup that have fired their
                                   # one-shot boot arm this session (see handle_tick)
-        self._last_fired = {}     # (symbol, interval) -> last interval_begin that fired a
-                                  # confirmed alert/order. The WS feed AND the clock-close
-                                  # watchdog both emit CandleClosed for the same bar, so the
-                                  # edge must be tracked explicitly — flip_closed's rowcount
-                                  # can't be trusted (upsert_candle already set closed=1 on
-                                  # the clock-close/late-update path). Fire once per NEW bar.
+        self._last_fired = {}     # symbol -> last close INSTANT (interval_begin+interval*60)
+                                  # that fired a confirmed alert/order. Keyed on the close
+                                  # instant, NOT (symbol, interval): the WS feed AND the
+                                  # clock-close watchdog emit CandleClosed for the same bar,
+                                  # AND the daily+weekly bars close at the SAME instant every
+                                  # Thu 00:00 UTC — both must collapse to ONE fire. (flip_closed's
+                                  # rowcount can't be trusted: upsert_candle already set closed=1
+                                  # on the clock-close/late-update path.) Fire once per NEW instant.
         self._boot_buys = None    # set of symbols BUY at BOOT (first startup_sweep). The
                                   # one-shot arm may fire ONLY these — otherwise a reconciler
                                   # resweep / 'f'-key that flips a symbol to BUY mid-session
@@ -120,16 +122,19 @@ class Ingest:
         # The old provisional card still counts the just-closed bar as forming —
         # honest display is "unknown" until fresh forming data arrives (seconds).
         self.state.pair(ev.symbol).provisional = None
-        # Edge-gate the alert/exec on FIRST sight of this bar close. The WS feed and
-        # the clock-close watchdog both emit CandleClosed for the same bar; without
-        # this, one close places two live orders (Finding 2). Tracked explicitly per
-        # (symbol, interval) rather than via flip_closed's rowcount, which is unreliable
-        # here (upsert_candle already flips closed=1 on the clock-close/late-update path,
-        # so the rowcount would be 0 and wrongly SUPPRESS the fire on quiet pairs).
-        fkey = (ev.symbol, ev.interval)
-        fire = ev.interval_begin > self._last_fired.get(fkey, -1)
+        # Edge-gate the alert/exec on FIRST sight of this bar close. Two distinct
+        # duplicate-sources exist: (1) the WS feed AND the clock-close watchdog both emit
+        # CandleClosed for the same bar, and (2) the daily (1440) and weekly (10080) bars
+        # close at the SAME instant every Thu 00:00 UTC (Kraken's weekly boundary) — one
+        # confirmed-BUY verdict that, keyed per-interval, fired TWICE and double-placed a
+        # live order (the ADA 2026-07-09 rung). Key the edge on the close INSTANT
+        # (interval_begin + interval*60) per symbol so both collapse to ONE fire. (Not
+        # flip_closed's rowcount: upsert_candle already flips closed=1 on the clock-close/
+        # late-update path, so it would be 0 and wrongly SUPPRESS the fire on quiet pairs.)
+        close_at = ev.interval_begin + ev.interval * 60
+        fire = close_at > self._last_fired.get(ev.symbol, -1)
         if fire:
-            self._last_fired[fkey] = ev.interval_begin
+            self._last_fired[ev.symbol] = close_at
         self._recompute_confirmed(ev.symbol, fire=fire)
         if ev.symbol == BTC_SYMBOL:
             self._recompute_regime()
@@ -197,12 +202,15 @@ class Ingest:
             # Seed the per-close fire-dedup from the DB so a restart doesn't re-fire a
             # bar that already closed (and fired) pre-restart: a late WS close for the
             # straddled border would otherwise fire AGAIN on top of the boot arm — two
-            # orders from one restart. A genuinely newer bar (ts > seed) still fires.
+            # orders from one restart. A genuinely newer bar (close instant > seed) still
+            # fires. Seed the same close-INSTANT the edge compares (interval_begin +
+            # interval*60), per symbol; the latest daily close instant dominates the weekly.
             for p in config.PAIRS:
                 for interval in config.INTERVALS:
                     mt = store.max_closed_ts(self.conn, p["ws"], interval)
                     if mt is not None:
-                        self._last_fired[(p["ws"], interval)] = mt
+                        self._last_fired[p["ws"]] = max(
+                            self._last_fired.get(p["ws"], -1), mt + interval * 60)
         self._recompute_regime()
 
     # ── §5(b) clock-close fallback ───────────────────────────────────────────
