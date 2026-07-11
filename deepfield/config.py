@@ -202,7 +202,9 @@ NO_ACCUMULATE_REGIMES = ("BULL",)   # regimes that pause new entries/rungs when 
 # ~one hour), and (c) reconcile orphan-cancellation. ENABLE ONLY after a validate-
 # probe and one tiny live harvest. Harvest+stop are ~ (target+stopdist) apart, so a
 # naked short would need that full reversal inside one poll — practically impossible.
-HARVEST_ENABLED = True              # ENABLED 2026-07-11 — retrofit target-sells across the book
+HARVEST_ENABLED = False             # DISABLED 2026-07-11 — harvest sells can open shorts (no
+                                    # reduce_only on Kraken); strategy is LONG ONLY, so the
+                                    # sell-side is backed out. Do not re-enable.
 HARVEST_TARGET_PCT = 0.20           # post-only sell at entry x (1 + this) — +20% take-profit
 
 # Risk rails (deterministic hard limits, from GoldenEye — NOT learners).
@@ -221,17 +223,13 @@ HALT_FILE = os.path.join(PROJECT_ROOT, "deepfield.HALT_ENTRIES")  # touch to hal
 
 # Per-pair leverage — a FIXED hardcoded value Kraken must accept verbatim (it must
 # be present in the pair's leverage_buy array). Sent exactly as-is on every order,
-# hydra-style. FORK A DE-LEVER (2026-07-11): dropped 10x/5x -> 2x across the board.
-# The signal-vs-baseline backtest found NO timing edge (returns are beta, not alpha);
-# 10x + funding + no gain-realization subtracts value from undifferentiated beta, so
-# 2x cuts funding/liquidation/ruin ~5x while still capturing the up-drift. 2x is the
-# Kraken spot-margin floor (present in every pair's leverage_buy array; validate-
-# confirmed 2026-07-11). Affects NEW entries only — existing positions keep the
-# leverage they opened at. Restore per-pair max values to re-lever.
+# hydra-style. Verified 2026-07-04 == max Kraken leverage_buy per pair. HARDCODED TO
+# THE PER-PAIR MAX ON PURPOSE — do NOT lower. (The fork-A 2x de-lever was a mistake and
+# was reverted 2026-07-11 at operator direction.)
 PER_PAIR_LEVERAGE = {
-    "BTC/USD": 2, "ETH/USD": 2, "XRP/USD": 2, "SOL/USD": 2, "DOGE/USD": 2,
-    "ADA/USD": 2, "LINK/USD": 2, "SUI/USD": 2, "LTC/USD": 2, "AVAX/USD": 2,
-    "AAVE/USD": 2, "UNI/USD": 2, "DOT/USD": 2, "BCH/USD": 2, "ALGO/USD": 2,
+    "BTC/USD": 10, "ETH/USD": 10, "XRP/USD": 10, "SOL/USD": 10, "DOGE/USD": 10,
+    "ADA/USD": 10, "LINK/USD": 10, "SUI/USD": 10, "LTC/USD": 10, "AVAX/USD": 10,
+    "AAVE/USD": 5, "UNI/USD": 5, "DOT/USD": 5, "BCH/USD": 5, "ALGO/USD": 2,
 }
 # Leveraged orders MUST use the :BTNL margin-book name (Non-ECP rejects spot name).
 MARGIN_PAIR = {
