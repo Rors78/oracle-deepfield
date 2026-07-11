@@ -189,6 +189,22 @@ MARGIN_CAP_PCT = 0.90               # a single position may post at most this fr
 ACCUMULATE_ONLY_IN_BEAR = True
 NO_ACCUMULATE_REGIMES = ("BULL",)   # regimes that pause new entries/rungs when the gate is on
 
+# FORK A harvest / gain-realization (pt2): rest a post-only SELL limit at
+# entry x (1 + HARVEST_TARGET_PCT) so a position can EXIT at a profit target — the
+# 'sell side' the strategy never had (today the only exit is the stop, a loss).
+# DEFAULT OFF. Kraken spot-margin AddOrder SILENTLY IGNORES reduce_only (probe
+# 2026-07-11: a garbage param validates identically), so every resting sell is a
+# genuine market-open sell that would open a SHORT if it outran the live position.
+# Safety therefore rests on: (a) sizing each harvest to the REAL position volume
+# (new fills use vol_exec; the retrofit is budgeted against live open volume),
+# (b) poll-cadence OCO (Executor.poll_harvest_oco cancels the stop the instant the
+# harvest fills, and the harvest the instant the stop fills — window ~one poll, not
+# ~one hour), and (c) reconcile orphan-cancellation. ENABLE ONLY after a validate-
+# probe and one tiny live harvest. Harvest+stop are ~ (target+stopdist) apart, so a
+# naked short would need that full reversal inside one poll — practically impossible.
+HARVEST_ENABLED = False
+HARVEST_TARGET_PCT = 0.20           # post-only sell at entry x (1 + this) — +20% take-profit
+
 # Risk rails (deterministic hard limits, from GoldenEye — NOT learners).
 # OPERATOR OVERRIDE: automatic circuit breakers OFF ("no circuit breakers, no
 # fear"). RAILS_ENABLED=False makes rails_ok skip the drawdown kill-switch, the

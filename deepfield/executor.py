@@ -375,6 +375,7 @@ class Executor:
             row["status"] = "open"
             oid = store.insert_order(self.conn, row)
             self._rest_stop(symbol, margin_pair, stop_px, vol, leverage, oid, paper=True)
+            self._rest_harvest(symbol, margin_pair, px, vol, leverage, oid, paper=True)
             return oid
 
         if self.mode == "validate":
@@ -463,6 +464,12 @@ class Executor:
                 log.info("FILL %s: %.6g filled — position open, resting stop", sym, vol_exec)
                 self._journal("fill", sym, f"{vol_exec:.6g} filled @ {lev}x — position open")
                 self._rest_stop(sym, mpair, stop, vol_exec, lev, oid, paper=False)
+                # FORK A harvest: also rest the profit-target sell (config.HARVEST_ENABLED)
+                # so the position can EXIT at a gain, not only via the stop. Sized to the
+                # REAL fill (vol_exec) so it is strictly reducing. Isolated — never unwinds
+                # the fill; the poll-cadence OCO (poll_harvest_oco) keeps it and the stop
+                # mutually exclusive.
+                self._rest_harvest(sym, mpair, entry, vol_exec, lev, oid)
                 # Continuous laddering: protection is secured above; now drop the next
                 # rung below the fill, sized at the SAME conviction the entry carried
                 # (score/required ride down the chain). Isolated — a rung failure
@@ -746,6 +753,14 @@ class Executor:
             # what made oldest-first budgeting cancel a live stop and re-place a stale
             # one against the wrong position. Handle this BEFORE the volume budget.
             if ostatus == "closed":
+                # stop executed -> position gone. NEUTRALIZE the orphan harvest FIRST (a
+                # resting target-sell with no position opens a short); close ONLY once it is
+                # provably gone, else leave open and converge next restart.
+                if not self._settle_orphan_harvest(oid, sym, entry_txid):
+                    log.warning("startup: %s order %d stop executed but harvest not neutralized "
+                                "— leaving open, retry next restart", sym, oid)
+                    recon[sym]["unknown"] += 1
+                    continue
                 pnl_json = self._stop_exit_pnl_json(sym, oid, entry_txid, o)
                 self.conn.execute("UPDATE orders SET status='closed', error=COALESCE(?, error) WHERE id=?",
                                   (pnl_json, oid))
@@ -775,7 +790,14 @@ class Executor:
                                 "leaving open, retry next restart", sym, oid)
                     recon[sym]["unknown"] += 1
                     continue
-                # orphan gone (canceled/expired) or no stop_txid: nothing live to strand.
+                # orphan gone (canceled/expired) or no stop_txid: stop side neutral. Now the
+                # HARVEST — record its P&L if it filled while down, else cancel it; close ONLY
+                # if it is provably neutralized (a stranded target-sell opens a short).
+                if not self._settle_orphan_harvest(oid, sym, entry_txid):
+                    log.warning("startup: %s order %d unbacked but harvest not neutralized — "
+                                "leaving open, retry next restart", sym, oid)
+                    recon[sym]["unknown"] += 1
+                    continue
                 self.conn.execute("UPDATE orders SET status='closed' WHERE id=?", (oid,))
                 self.conn.commit()
                 recon[sym]["closed"] += 1
@@ -918,3 +940,236 @@ class Executor:
         else:
             log.error("PROTECT %s: FAILED to rest stop — position is UNPROTECTED", symbol)
             self._journal("stop", symbol, "STOP FAILED — position UNPROTECTED")
+
+    # ── FORK A harvest / gain-realization (pt2) ──────────────────────────────────
+    # config.HARVEST_ENABLED, DEFAULT OFF. Kraken spot-margin AddOrder IGNORES
+    # reduce_only (probe 2026-07-11), so every resting sell is a genuine market-open
+    # sell — a harvest that outran its position would open a SHORT. Kept strictly
+    # reducing by: sizing to the real position (fills use vol_exec; retrofit is
+    # budgeted to live open volume), poll-cadence OCO (poll_harvest_oco cancels the
+    # sibling the instant one fills), and reconcile orphan-cancellation. Deliberately
+    # ISOLATED from _rest_stop / verify_open_stops so the proven stop safety is untouched.
+
+    def _rest_harvest(self, symbol, margin_pair, entry_price, volume, leverage, order_id, paper=False):
+        """Rest a post-only SELL limit at entry x (1 + HARVEST_TARGET_PCT) — the profit
+        target that lets a position exit at a GAIN instead of only via the stop. Mirrors
+        _rest_stop. Post-only: if the target is already below market (position already up
+        > target%) Kraken rejects it and no harvest rests (logged) — it can never cross
+        into a taker sell. Never raises into the caller (a fill/stop just secured is never
+        unwound)."""
+        try:
+            if not getattr(config, "HARVEST_ENABLED", False):
+                return
+            if not entry_price or entry_price <= 0 or not volume or volume <= 0:
+                return
+            tick = config.MARGIN_TICK_DECIMALS.get(symbol, 2)
+            target = _round_price(entry_price * (1 + config.HARVEST_TARGET_PCT), tick)
+            if paper:
+                self.conn.execute("UPDATE orders SET harvest_txid=? WHERE id=?",
+                                  (f"PAPER-HARVEST-{order_id}", order_id))
+                self.conn.commit()
+                return
+            params = {"pair": margin_pair, "type": "sell", "ordertype": "limit",
+                      "price": str(target), "volume": str(volume),
+                      "leverage": str(leverage), "oflags": "post"}   # post-only maker sell
+            res = broker.private("/0/private/AddOrder", params, idempotent=False)
+            if res and res.get("txid"):
+                self.conn.execute("UPDATE orders SET harvest_txid=? WHERE id=?",
+                                  (res["txid"][0], order_id))
+                self.conn.commit()
+                log.info("HARVEST %s: target sell resting @ %s (%.6g) for order %d",
+                         symbol, target, volume, order_id)
+                self._journal("order", symbol, f"harvest: {volume:g} target sell resting @ {target}")
+            else:
+                log.warning("HARVEST %s: target sell returned no txid (post-only reject if "
+                            "target below market, or transient) — order %d", symbol, order_id)
+        except Exception:
+            log.exception("HARVEST %s: rest target sell failed (order %d unaffected)", symbol, order_id)
+
+    def _harvest_exit_pnl_json(self, sym, oid, entry_txid, harvest_order):
+        """Realized P&L for a HARVEST (target-sell) close — proceeds (sell cost - fee)
+        minus cost basis (entry buy cost + fee), from Kraken execution records. Mirrors
+        _stop_exit_pnl_json; exit='harvest'. Best-effort — never raises into the close."""
+        try:
+            if not (harvest_order and harvest_order.get("status") == "closed"):
+                return None
+            h_cost = float(harvest_order.get("cost", 0) or 0)
+            h_fee = float(harvest_order.get("fee", 0) or 0)
+            if float(harvest_order.get("vol_exec", 0) or 0) <= 0 or h_cost <= 0:
+                return None
+            eo = broker.query_order(entry_txid) if entry_txid else None
+            if not eo:
+                return None
+            e_cost = float(eo.get("cost", 0) or 0)
+            e_fee = float(eo.get("fee", 0) or 0)
+            if e_cost <= 0:
+                return None
+            pnl = (h_cost - h_fee) - (e_cost + e_fee)
+            ct = harvest_order.get("closetm")
+            try:
+                closed_ts = (datetime.datetime.fromtimestamp(float(ct), datetime.timezone.utc).isoformat()
+                             if ct else datetime.datetime.now(datetime.timezone.utc).isoformat())
+            except (TypeError, ValueError):
+                closed_ts = datetime.datetime.now(datetime.timezone.utc).isoformat()
+            log.info("PNL %s: order %d realized $%.4f (harvest exit)", sym, oid, pnl)
+            return json.dumps({"pnl": round(pnl, 8), "exit": "harvest", "closed_ts": closed_ts})
+        except Exception:
+            log.exception("harvest PNL record failed for order %d (closing anyway)", oid)
+            return None
+
+    def poll_harvest_oco(self):
+        """Poll-cadence OCO for the stop/harvest pair (config.HARVEST_ENABLED). Each open
+        position rests a stop (below) AND a harvest (above) at once — 2x the position in
+        sell obligations. When EITHER fills the position is gone and the OTHER is a naked
+        sell that would open a short, so cancel it IMMEDIATELY — this runs every poll, so
+        the naked-short window is ~one poll, not the ~hourly reconcile. Order-status
+        driven (no OpenPositions call); also the fast path that records exit P&L (stop OR
+        harvest). Scoped to rows that HAVE a harvest, so with the feature off it is a
+        no-op and stop-only rows keep their existing reconcile handling. Never raises."""
+        if self.mode != "live" or not getattr(config, "HARVEST_ENABLED", False):
+            return
+        try:
+            rows = self.conn.execute(
+                "SELECT id, symbol, txid, stop_txid, harvest_txid FROM orders "
+                "WHERE status='open' AND harvest_txid IS NOT NULL").fetchall()
+            if not rows:
+                return
+            live = [t for r in rows for t in (r[3], r[4]) if t and not str(t).startswith("PAPER")]
+            info = broker.query_orders(live) if live else {}
+            for oid, sym, entry_txid, stop_txid, harvest_txid in rows:
+                h = info.get(harvest_txid) if harvest_txid else None
+                s = info.get(stop_txid) if stop_txid else None
+                if h and h.get("status") == "closed":                       # profit exit
+                    # CANCEL the orphan sibling FIRST; transition to 'closed' ONLY once it
+                    # is provably neutralized. On cancel failure leave the row OPEN and
+                    # converge next poll — a closed row is never revisited, so closing over
+                    # a still-resting sell would strand it -> naked short (mirrors the
+                    # verify_open_stops unbacked-branch discipline).
+                    if not self._cancel_sibling(stop_txid):
+                        log.warning("HARVEST %s: order %d filled but stop cancel FAILED — "
+                                    "leaving open, retry next poll", sym, oid)
+                        continue
+                    pnl_json = self._harvest_exit_pnl_json(sym, oid, entry_txid, h)
+                    self.conn.execute("UPDATE orders SET status='closed', error=COALESCE(?, error) "
+                                      "WHERE id=?", (pnl_json, oid))
+                    self.conn.commit()
+                    log.info("HARVEST %s: order %d hit target — stop canceled, profit booked", sym, oid)
+                    self._journal("fill", sym, "harvest hit — stop canceled, closed at target")
+                elif s and s.get("status") == "closed":                     # loss exit (fast path)
+                    if not self._cancel_sibling(harvest_txid):
+                        log.warning("STOP %s: order %d stopped out but harvest cancel FAILED — "
+                                    "leaving open, retry next poll", sym, oid)
+                        continue
+                    pnl_json = self._stop_exit_pnl_json(sym, oid, entry_txid, s)
+                    self.conn.execute("UPDATE orders SET status='closed', error=COALESCE(?, error) "
+                                      "WHERE id=?", (pnl_json, oid))
+                    self.conn.commit()
+                    log.info("STOP %s: order %d stopped out — harvest canceled", sym, oid)
+                    self._journal("stop", sym, "stop hit — harvest canceled, closed")
+        except Exception:
+            log.exception("poll_harvest_oco failed (poll loop unaffected)")
+
+    def _cancel_sibling(self, txid):
+        """Cancel an OCO sibling (the resting stop or harvest) and report whether it is
+        provably NOT resting anymore. True when there is nothing to strand (no txid /
+        PAPER) or Kraken ACCEPTED the cancel (non-None: canceled, or count 0 = already
+        terminal); False on a transient API failure (None) so the caller leaves the row
+        OPEN and retries next poll rather than closing over a still-resting sell — the
+        naked-short failure mode. Never raises."""
+        try:
+            if not txid or str(txid).startswith("PAPER"):
+                return True
+            return broker.cancel_order(txid) is not None
+        except Exception:
+            log.exception("cancel sibling %s failed", txid)
+            return False
+
+    def _settle_orphan_harvest(self, oid, sym, entry_txid):
+        """The reconcile is CLOSING this position row. Ensure the row's harvest is not left
+        a stranded resting sell (with no position it opens a short). Returns True when the
+        harvest is provably NOT resting — none/PAPER, already terminal, or the cancel was
+        ACCEPTED — and records the harvest-exit P&L if it had filled while we were down.
+        Returns False on a transient failure (query/cancel None) so the CALLER LEAVES THE
+        ROW OPEN and converges next pass rather than closing over a live sell. Never raises."""
+        try:
+            r = self.conn.execute("SELECT harvest_txid FROM orders WHERE id=?", (oid,)).fetchone()
+            htx = r[0] if r else None
+            if not htx or str(htx).startswith("PAPER"):
+                return True                                     # nothing to strand
+            o = broker.query_order(htx)
+            if o is None:
+                return False                                    # unknown -> don't close, retry
+            status = o.get("status")
+            if status == "closed":                              # filled while down -> book the gain
+                pnl_json = self._harvest_exit_pnl_json(sym, oid, entry_txid, o)
+                if pnl_json:
+                    self.conn.execute("UPDATE orders SET error=COALESCE(error, ?) WHERE id=?",
+                                      (pnl_json, oid))
+                    self.conn.commit()
+                return True
+            if status in ("canceled", "expired"):
+                return True                                     # already gone
+            if broker.cancel_order(htx) is None:                # still resting -> cancel; confirm accepted
+                return False
+            self._journal("order", sym, f"canceled orphan harvest {htx} (position closed)")
+            return True
+        except Exception:
+            log.exception("settle orphan harvest for row %d failed", oid)
+            return False                                        # conservative: don't close on error
+
+    def _reconcile_harvests(self):
+        """FORK A harvest placement + RETROFIT (config.HARVEST_ENABLED), run AFTER
+        verify_open_stops at startup (so unbacked rows are already retired). Ensure each
+        OPEN position has one resting target-sell, sized to the position and BUDGETED
+        against live open volume, oldest-first, so total harvest-sell volume per pair
+        never exceeds the pair's open long volume (no reduce_only -> an over-placed
+        harvest would open a short). Isolated from the stop path. Never raises."""
+        if self.mode != "live" or not getattr(config, "HARVEST_ENABLED", False):
+            return
+        try:
+            kr = broker.open_positions()
+            if kr is None:
+                log.warning("harvest reconcile: OpenPositions unavailable — skipping")
+                return
+            rest_by_ws = {p["ws"]: p["rest"] for p in config.PAIRS}
+            positions = list(kr.values()) if isinstance(kr, dict) else []
+
+            def _long_vol(pos):
+                if str(pos.get("type", "")).lower() == "sell":
+                    return 0.0
+                try:
+                    return max(0.0, float(pos.get("vol", 0) or 0) - float(pos.get("vol_closed", 0) or 0))
+                except (TypeError, ValueError):
+                    return 0.0
+
+            if kr and not any(_long_vol(p) > 0 for p in positions):
+                log.warning("harvest reconcile: OpenPositions unexpected shape — skipping")
+                return
+
+            def _pair_open_volume(sym):
+                key = rest_by_ws.get(sym, "")
+                return (sum(_long_vol(p) for p in positions
+                            if _norm_pair_key(p.get("pair", "")) == key) if key else 0.0)
+
+            rows = self.conn.execute(
+                "SELECT id, symbol, margin_pair, volume, leverage, entry, harvest_txid "
+                "FROM orders WHERE status='open' ORDER BY id").fetchall()
+            budget, placed = {}, 0
+            for oid, sym, mpair, vol, lev, entry, htx in rows:
+                try:
+                    volf = float(vol or 0)
+                except (TypeError, ValueError):
+                    volf = 0.0
+                if sym not in budget:
+                    budget[sym] = _pair_open_volume(sym)
+                if budget[sym] < volf - 1e-8:
+                    continue                              # not backed by live volume -> no harvest
+                budget[sym] -= volf                       # every resting sell (incl. existing harvests) consumes budget
+                if htx:
+                    continue                              # already has a target sell
+                self._rest_harvest(sym, mpair, entry, volf, lev, oid)
+                placed += 1
+            if placed:
+                log.info("harvest reconcile: placed %d target-sells (budgeted to live open volume)", placed)
+        except Exception:
+            log.exception("harvest reconcile failed (isolated — stops/positions unaffected)")
