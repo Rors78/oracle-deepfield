@@ -526,10 +526,10 @@ svg .axt2{ fill:var(--ink-faint); font-size:9.5px; font-family:var(--mono); }
       </div>
 
       <div class="specblock card">
-        <h3 style="color:var(--amber)">Flags — not in the data palette</h3>
-        <p class="note" style="margin-top:0">One element needs data the bot doesn't persist yet. Everything else is drawn from real fields.</p>
-        <div class="note"><span class="flag">△ trend</span> <b>Equity sparkline</b> — needs periodic equity snapshots persisted to a table (current + peak equity <i>are</i> available; the series is not). Designed as optional — nothing depends on it. Flagged per brief before committing the layout to it.</div>
-        <p class="note" style="margin-top:10px">Recovered <b>from</b> the palette but unused by the TUI, now surfaced: <b>peak equity</b>, <b>week realized P&amp;L</b>, per-signal <b>N/A reasons</b>, average-entry on the row, the full <b>52-week charts</b> (16,711 candles in the DB, zero drawn before).</p>
+        <h3 style="color:var(--teal)">Flags — all resolved</h3>
+        <p class="note" style="margin-top:0">Every element on the console is now drawn from real persisted fields — nothing illustrative remains.</p>
+        <div class="note"><span class="flag" style="color:var(--teal);border-color:rgba(79,191,163,.4)">✓ trend</span> <b>Equity sparkline</b> — was the one flagged gap (no persisted series). Resolved 2026-07-13: the bot samples equity to <b>equity_history</b> every 5 minutes (90-day retention, display-only path), and the header draws the last 24h next to the equity figure. The sparkline appears once ≥2 samples exist after a bot restart.</div>
+        <p class="note" style="margin-top:10px">Recovered <b>from</b> the palette but unused by the TUI, now surfaced: <b>peak equity</b>, <b>week realized P&amp;L</b>, per-signal <b>N/A reasons</b>, average-entry on the row, the full <b>52-week charts</b> — and since the pair-detail rebuild: daily <b>OHLCV candles</b>, per-rung <b>age / notional / margin</b> from the orders table, and the <b>notional-at-price</b> ladder profile.</p>
       </div>
 
     </div>
@@ -1169,6 +1169,29 @@ function tickClock(){
 setInterval(tickClock, 1000);
 
 /* ── health + regime renderers (from /api/state) ────────────────────────── */
+function equitySpark(series){
+  // equity sparkline from persisted 5-min samples; hidden until ≥2 points exist
+  if(!series || series.length<2) return "";
+  const W=104, H=30, P=2;
+  const vals=series.map(r=>r[1]);
+  let lo=Math.min(...vals), hi=Math.max(...vals);
+  if(hi-lo < 1e-9){ lo-=0.5; hi+=0.5; }
+  const t0=series[0][0], t1=series[series.length-1][0];
+  const X=t=> P + (t-t0)/((t1-t0)||1)*(W-2*P);
+  const Y=v=> P + (1-(v-lo)/(hi-lo))*(H-2*P);
+  const line=series.map((r,i)=>(i?"L":"M")+X(r[0]).toFixed(1)+" "+Y(r[1]).toFixed(1)).join(" ");
+  const up=vals[vals.length-1]>=vals[0], col=up?"var(--gain)":"var(--loss)";
+  const hrs=Math.max(1,Math.round((t1-t0)/3600));
+  return `<div class="stat" title="equity, last ${hrs}h · ${series.length} samples · $${lo.toFixed(2)} — $${hi.toFixed(2)}">
+    <span class="k">Trend · ${hrs}h</span>
+    <svg class="spark" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" role="img" aria-label="equity sparkline, last ${hrs} hours">
+      <path d="${line} L${X(t1).toFixed(1)} ${H-P} L${X(t0).toFixed(1)} ${H-P} Z" fill="rgba(79,191,163,.10)"/>
+      <path d="${line}" fill="none" stroke="var(--teal)" stroke-width="1.3"/>
+      <circle cx="${X(t1).toFixed(1)}" cy="${Y(vals[vals.length-1]).toFixed(1)}" r="2.2" fill="${col}"/>
+    </svg>
+    <span class="sub"><span class="${up?'gain':'loss'}">${fmtUsd(vals[vals.length-1]-vals[0])}</span> over span</span>
+  </div>`;
+}
 function renderHealth(h){
   const el=document.getElementById("healthstrip"); if(!el) return;
   const links=h.links;
@@ -1201,6 +1224,7 @@ function renderHealth(h){
     <div>
       <div class="equityrow">
         <div class="stat"><span class="k">${eqLive?'Equity':'Peak equity'}</span><span class="val big">$${(eqMain||0).toFixed(2)}</span><span class="flagnote">${eqSub}</span></div>
+        ${equitySpark(h.equity_series)}
         <div class="stat"><span class="k">Open P&L</span><span class="val mid ${opnl>=0?'gain':'loss'}">${fmtUsd(opnl)} <span class="arrow">${opnl>=0?'▲':'▼'}</span></span><span class="sub">unrealized · mark-to-mkt</span></div>
         <div class="stat"><span class="k">Today</span><span class="val mid ${(h.swing_day||0)>=0?'gain':'loss'}">${h.swing_day==null?'—':fmtUsd(h.swing_day)+' '+((h.swing_day||0)>=0?'▲':'▼')}</span><span class="sub">book swing · since 00:00 UTC</span></div>
         <div class="stat"><span class="k">Realized</span><span class="val" style="font-size:14px"><span class="dim">day</span> ${fmtUsd(h.realized_day)} · <span class="dim">wk</span> <span class="${(h.realized_week||0)>=0?'gain':'loss'}">${fmtUsd(h.realized_week)}</span></span><span class="sub">closed P&L</span></div>

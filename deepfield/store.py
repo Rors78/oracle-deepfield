@@ -40,6 +40,10 @@ CREATE TABLE IF NOT EXISTS orders(
     score INTEGER, required INTEGER,             -- entry conviction (rides down the ladder chain)
     txid TEXT, stop_txid TEXT, status TEXT, error TEXT
 );
+CREATE TABLE IF NOT EXISTS equity_history(
+    ts INTEGER PRIMARY KEY,                      -- unix, sampled ~5min by the bot loop
+    equity REAL                                  -- display-only (web sparkline)
+);
 """
 
 
@@ -220,6 +224,20 @@ def realized_pnl_since(conn, since_iso):
         (since_iso,),
     ).fetchone()
     return row[0] if row else 0.0
+
+
+def equity_snapshot(conn, equity, min_gap_s=300, keep_days=90):
+    """Append a display-only equity sample (web sparkline series), at most one
+    per min_gap_s; prunes samples older than keep_days. Never raises past the
+    caller's display-only guard — no trading effect."""
+    now = int(time.time())
+    row = conn.execute("SELECT MAX(ts) FROM equity_history").fetchone()
+    if row and row[0] and now - row[0] < min_gap_s:
+        return
+    conn.execute("INSERT OR REPLACE INTO equity_history(ts,equity) VALUES(?,?)",
+                 (now, float(equity)))
+    conn.execute("DELETE FROM equity_history WHERE ts < ?", (now - keep_days * 86400,))
+    conn.commit()
 
 
 def meta_get(conn, key, default=None):

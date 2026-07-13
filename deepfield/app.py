@@ -300,6 +300,8 @@ def _persist_web_live(conn, appstate, equity, margin_used, free_margin, balance)
         "mode": config.EXEC_MODE, "started": appstate.started_ts, "updated": _t.time(),
     }
     store.meta_set(conn, "web_live", _json.dumps(blob))
+    if equity is not None:
+        store.equity_snapshot(conn, equity)          # sparkline series, 5-min sampled
 
 
 async def _hourly_reconciler(ing):

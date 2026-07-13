@@ -292,6 +292,7 @@ def _assemble(conn):
         "free_margin": live.get("free_margin") if live.get("_fresh") else None,
         "margin_level": live.get("margin_level") if live.get("_fresh") else None,
         "capacity": live.get("capacity") if live.get("_fresh") else None,
+        "equity_series": _equity_series(conn),
         "recon_ok": recon.get("ok"), "recon_time": recon.get("time"),
         "now_mt": now_local.strftime("%H:%M:%S"), "now_utc": now_utc.strftime("%H:%M"),
         "day": now_local.strftime("%a %b %d").lower(),
@@ -335,6 +336,22 @@ def _journal(conn, n=60):
             hms, day = (ts or "")[11:19], ""
         out.append([hms, kind or "", (sym or ""), text or "", day])
     return out
+
+
+def _equity_series(conn, hours=24, max_pts=180):
+    """Last `hours` of persisted equity samples, downsampled for the sparkline.
+    Table appears with the first post-upgrade bot start — absent is fine."""
+    try:
+        since = int(time.time()) - hours * 3600
+        rows = conn.execute(
+            "SELECT ts,equity FROM equity_history WHERE ts>=? ORDER BY ts",
+            (since,)).fetchall()
+    except sqlite3.OperationalError:
+        return []
+    if len(rows) > max_pts:
+        step = len(rows) / max_pts
+        rows = [rows[int(i * step)] for i in range(max_pts)] + [rows[-1]]
+    return [[r[0], round(r[1], 4)] for r in rows]
 
 
 def _recon(raw):
