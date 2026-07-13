@@ -150,22 +150,62 @@ button{ font-family:inherit; color:inherit; }
 .pnl{ font-family:var(--mono); font-size:12.5px; text-align:right; }
 .arrow{ font-size:10px; }
 
-/* 7-signal grid — shows WHICH fired, not just the count (cross-pair columns) */
+/* 7-signal grid — shows WHICH fired, not just the count (cross-pair columns).
+   Three unmistakable states (TUI legend: fired / quiet / n-a):
+   fired = lit brass with a glow · quiet = recessed dark socket · n/a = amber hatch */
 .sig{ display:grid; grid-template-columns:repeat(7,1fr); gap:3px; width:112px; }
-.sigcell{ height:13px; border-radius:2px; background:var(--sky-4); border:1px solid var(--line-2); position:relative; }
-.sigcell.on{ background:var(--brass); border-color:var(--brass); box-shadow:0 0 6px var(--glow-brass); }
-.sigcell.na{ background:repeating-linear-gradient(45deg,var(--sky-3),var(--sky-3) 2px,transparent 2px,transparent 4px); }
-.sigcell.na::after{ content:""; position:absolute; inset:4px; border-left:1px solid var(--ink-faint); transform:rotate(30deg); }
+.sigcell{ height:16px; border-radius:3px; position:relative;
+  background:linear-gradient(180deg,#090d13,#0d1219); border:1px solid #1e2530;
+  box-shadow:inset 0 1px 2px rgba(0,0,0,.55); }
+.sigcell.on{ background:linear-gradient(180deg,#e2c078,#ba954b); border-color:#d9b96b;
+  box-shadow:0 0 8px var(--glow-brass), inset 0 1px 0 rgba(255,255,255,.28); }
+.sigcell.na{ background:repeating-linear-gradient(-45deg, rgba(224,155,76,.20) 0 3px, rgba(224,155,76,.03) 3px 6px);
+  border-color:rgba(224,155,76,.35); box-shadow:none; }
 
 /* status pill in row */
 .st{ font-family:var(--mono); font-size:11px; font-weight:600; letter-spacing:.03em; text-align:left; white-space:nowrap; }
 .st.buy{ color:var(--brass); } .st.buywait{ color:var(--amber); } .st.hold{ color:var(--teal); }
 .st.stale{ color:var(--amber); } .st.near{ color:var(--alarm); } .st.wch{ color:var(--time); } .st.idle{ color:var(--ink-faint); }
 
-/* mini 52-week band (row sparkband) */
-.miniband{ position:relative; height:26px; }
-.miniband svg{ display:block; width:100%; height:100%; overflow:visible; }
-.mbmeta{ position:absolute; right:0; top:-1px; font-family:var(--mono); font-size:10px; color:var(--ink-dim); }
+/* range bar (row band) — the TUI year-band, upscaled.
+   Active pairs zoom to their TRADE ZONE (like the TUI); watch/idle keep the 52w
+   year scale. A thick slab track, price-fill tinted by price-vs-avg, red hatch
+   below the stop, brass rung ticks, hollow amber bid ticks, a bold price cursor. */
+.miniband{ position:relative; height:36px; }
+.mbmeta{ position:absolute; right:0; top:-4px; font-family:var(--mono); font-size:10px; color:var(--ink-dim); }
+.rangebar{ position:absolute; left:0; right:0; top:9px; height:14px; }
+.rb-track{ position:absolute; inset:0; border-radius:7px;
+  background:linear-gradient(180deg,#151b25,#0c1017); border:1px solid var(--line-2);
+  box-shadow:inset 0 1px 3px rgba(0,0,0,.55); }
+.rb-seg{ position:absolute; top:1px; bottom:1px; border-radius:6px 0 0 6px; }
+.rb-yearfill.flat{ background:linear-gradient(90deg, rgba(231,236,240,.03), rgba(111,179,210,.22)); }
+.rb-yearfill.up{   background:linear-gradient(90deg, rgba(87,185,138,.05),  rgba(87,185,138,.30)); }
+.rb-yearfill.down{ background:linear-gradient(90deg, rgba(212,93,93,.05),   rgba(212,93,93,.28)); }
+.rb-dead{ left:1px; border-radius:6px 0 0 6px;
+  background:repeating-linear-gradient(-45deg, rgba(224,72,62,.20) 0 4px, rgba(224,72,62,.04) 4px 8px); }
+.rb-prox{ border-radius:0; background:linear-gradient(90deg, rgba(224,72,62,.60), rgba(224,72,62,.22));
+  box-shadow:0 0 10px var(--glow-alarm); }
+.rb-tick{ position:absolute; transform:translateX(-50%); }
+.rb-fill{ top:2px; bottom:2px; width:3px; border-radius:1.5px; background:var(--brass);
+  box-shadow:0 0 5px var(--glow-brass); }
+.rb-bid{ top:2px; bottom:2px; width:6px; border-radius:2px; border:1.5px solid var(--amber);
+  background:rgba(224,155,76,.10); }
+.rb-avg{ top:-3px; bottom:-3px; width:0; border-left:2px dotted var(--ink-2); }
+.rb-stop{ top:-4px; bottom:-4px; width:3px; border-radius:1.5px; background:var(--alarm);
+  box-shadow:0 0 8px var(--glow-alarm); }
+.rb-offstop{ position:absolute; left:-3px; top:-1px; color:var(--alarm); font-size:11px;
+  line-height:16px; text-shadow:0 0 6px var(--glow-alarm); }
+.rb-cur{ position:absolute; top:-6px; bottom:-3px; width:3px; border-radius:1.5px;
+  transform:translateX(-50%); }
+.rb-cur::before{ content:""; position:absolute; top:-6px; left:50%; transform:translateX(-50%);
+  border:5px solid transparent; border-top-width:6px; border-bottom:0; }
+.rb-cur.flat{ background:var(--ink); }  .rb-cur.flat::before{ border-top-color:var(--ink); }
+.rb-cur.up{ background:var(--gain); box-shadow:0 0 7px rgba(87,185,138,.45); }
+.rb-cur.up::before{ border-top-color:var(--gain); }
+.rb-cur.down{ background:var(--loss); box-shadow:0 0 7px rgba(212,93,93,.45); }
+.rb-cur.down::before{ border-top-color:var(--loss); }
+.rb-lab{ position:absolute; top:16px; font-family:var(--mono); font-size:9px; color:var(--ink-faint); }
+.rb-lab.lo{ left:1px; } .rb-lab.hi{ right:1px; }
 
 /* JOURNAL rail */
 .journal{ position:sticky; top:12px; max-height:calc(100vh - 26px); display:flex; flex-direction:column; }
@@ -413,12 +453,14 @@ button{ font-family:inherit; color:inherit; }
       <div class="specblock card">
         <h3>52-week band — the one spatial language</h3>
         <p class="note" style="margin-top:0">The signature mark. Price plotted on its 52-week range so "near the yearly low" is <b>geometric</b>. On the field it's a 1-row spark; on the detail page it grows into a real chart + a zoomed trade-zone (both scales visible — the TUI showed only one at a time).</p>
-        <div style="margin-top:10px"><svg id="specband" width="100%" height="30"></svg></div>
+        <div style="margin-top:12px" class="miniband" id="specband"></div>
         <div class="legend" style="margin-top:8px">
-          <span><span class="lgdot" style="background:var(--brass)"></span> fills</span>
+          <span><span class="lg" style="border-color:var(--brass);border-top-width:3px"></span> filled rung tick</span>
           <span><span class="lgring"></span> resting bid</span>
-          <span><span class="lg" style="border-color:var(--alarm)"></span> stop</span>
-          <span style="color:var(--gain)">▲ price (green ≥ avg / red below)</span>
+          <span><span class="lg" style="border-color:var(--alarm);border-top-width:3px"></span> stop tick <span class="alarm">◄ off-scale</span></span>
+          <span><span class="lg" style="border-color:var(--ink-2);border-top-style:dotted"></span> avg entry</span>
+          <span style="color:var(--gain)">▼ price (green ≥ avg / red below)</span>
+          <span><span class="lg" style="border-color:rgba(224,72,62,.5);border-top-style:dashed"></span> hatch = below stop</span>
         </div>
       </div>
 
@@ -484,28 +526,53 @@ const pnlClass = v => v>=0 ? "gain":"loss";
 const fmtChg = v => v==null?"—":(v>=0?"+":"")+v.toFixed(1)+"%";
 
 /* ── field rendering ───────────────────────────────────────────────────── */
-function bandSVG(p, w, h){
-  // returns inner SVG markup for a mini 52-week band
-  const lo=p.lo, hi=p.hi, pad=3, ww=w-pad*2;
-  const X = v => pad + ((Math.max(lo,Math.min(hi,v))-lo)/(hi-lo))*ww;
-  const midY = h/2;
-  let s = `<line x1="${pad}" y1="${midY}" x2="${w-pad}" y2="${midY}" stroke="var(--ink-faint)" stroke-width="1"/>`;
-  // proximity segment (price within 3% above stop) → red
-  if(p.stop){
-    const prox = p.price>0 && (p.price-p.stop)/p.stop < 0.03;
-    if(prox){ s += `<line x1="${X(p.stop)}" y1="${midY}" x2="${X(p.price)}" y2="${midY}" stroke="var(--alarm)" stroke-width="2"/>`; }
+function zoneBounds(p){
+  // Mirrors the TUI's _band_bounds: an ACTIVE pair (fills+stop) zooms to its
+  // TRADE ZONE — anchored to fills / resting bids / cursor, NOT the stop — so
+  // the ladder breathes across the full width. The stop normally sits BELOW the
+  // zone (drawn off-scale ◄); proximity (<3% above stop) pulls it on-scale,
+  // exactly when it matters. Watch/idle keep the 52-week YEAR scale.
+  if(p.rungs && p.stop!=null){
+    const refs=[...p.rungs];
+    (p.bids||[]).forEach(b=>{ if(b.price!=null) refs.push(b.price); });
+    if(!p.bids && p.bid!=null) refs.push(p.bid);
+    if(p.price!=null) refs.push(p.price);
+    let lo=Math.min(...refs)*0.99, hi=Math.max(...refs)*1.01;
+    const prox = p.price && (p.price-p.stop)/p.stop < 0.03;
+    if(prox) lo=Math.min(lo, p.stop*0.995);
+    if(hi<=lo) hi=lo*1.02;
+    return {lo, hi, zone:true, prox};
   }
-  // fills
-  if(p.rungs){ p.rungs.forEach(r=>{ s += `<circle cx="${X(r)}" cy="${midY}" r="2" fill="var(--brass)"/>`; }); }
-  // resting bid (hollow)
-  if(p.bid!=null){ s += `<circle cx="${X(p.bid)}" cy="${midY}" r="2.6" fill="none" stroke="var(--amber)" stroke-width="1.3"/>`; }
-  // stop tick
-  if(p.stop!=null){ s += `<line x1="${X(p.stop)}" y1="${midY-6}" x2="${X(p.stop)}" y2="${midY+6}" stroke="var(--alarm)" stroke-width="1.6"/>`; }
-  // price cursor
-  const col = p.avg==null ? "var(--ink)" : (p.price>=p.avg ? "var(--gain)":"var(--loss)");
-  const cx = X(p.price);
-  s += `<path d="M${cx-4} ${midY-8} L${cx+4} ${midY-8} L${cx} ${midY-1} Z" fill="${col}"/>`;
-  s += `<circle cx="${cx}" cy="${midY}" r="1.6" fill="${col}"/>`;
+  return {lo:p.lo, hi:p.hi, zone:false, prox:false};
+}
+
+function rangeBar(p){
+  // HTML range bar (replaces the old hairline SVG): layered like the TUI band —
+  // track → year/zone fill (tinted by price-vs-avg) → red hatch below the stop →
+  // proximity alarm segment → bid ○ / rung • ticks → avg ┊ → stop ▌ → cursor ▼.
+  const {lo,hi,zone,prox}=zoneBounds(p);
+  if(lo==null || hi==null || !(hi>lo))
+    return `<div class="rangebar"><div class="rb-track"></div></div>`;
+  const X=v=> Math.max(0, Math.min(100, (v-lo)/(hi-lo)*100));
+  const curCls = p.avg==null ? "flat" : (p.price>=p.avg ? "up" : "down");
+  const title = zone
+    ? `trade zone ${fmtPx(lo)} — ${fmtPx(hi)} · 52w ${fmtPx(p.lo)} — ${fmtPx(p.hi)}`
+    : `52w range ${fmtPx(lo)} — ${fmtPx(hi)}`;
+  let s=`<div class="rangebar" title="${title}"><div class="rb-track"></div>`;
+  if(p.price!=null) s+=`<div class="rb-seg rb-yearfill ${curCls}" style="width:${X(p.price).toFixed(2)}%"></div>`;
+  const stopOn = p.stop!=null && p.stop>=lo && p.stop<=hi;
+  if(stopOn) s+=`<div class="rb-seg rb-dead" style="width:${X(p.stop).toFixed(2)}%"></div>`;
+  if(prox && stopOn && p.price!=null)
+    s+=`<div class="rb-seg rb-prox" style="left:${X(p.stop).toFixed(2)}%;width:${Math.max(0,X(p.price)-X(p.stop)).toFixed(2)}%"></div>`;
+  const bidList = p.bids && p.bids.length ? p.bids.map(b=>b.price) : (p.bid!=null ? [p.bid] : []);
+  bidList.forEach(b=>{ if(b!=null) s+=`<div class="rb-tick rb-bid" style="left:${X(b).toFixed(2)}%" title="resting bid @ ${fmtPx(b)}"></div>`; });
+  if(p.rungs) p.rungs.forEach((r,i)=>{ s+=`<div class="rb-tick rb-fill" style="left:${X(r).toFixed(2)}%" title="rung ${i+1} filled @ ${fmtPx(r)}"></div>`; });
+  if(p.rungs && p.avg!=null) s+=`<div class="rb-tick rb-avg" style="left:${X(p.avg).toFixed(2)}%" title="avg entry ${fmtPx(p.avg)}"></div>`;
+  if(stopOn) s+=`<div class="rb-tick rb-stop" style="left:${X(p.stop).toFixed(2)}%" title="protective stop ${fmtPx(p.stop)}"></div>`;
+  else if(p.stop!=null && p.stop<lo)
+    s+=`<div class="rb-offstop" title="stop ${fmtPx(p.stop)} — below the zoomed zone">◄</div>`;
+  if(p.price!=null) s+=`<div class="rb-cur ${curCls}" style="left:${X(p.price).toFixed(2)}%" title="price ${fmtPx(p.price)}"></div>`;
+  s+=`<span class="rb-lab lo">${fmtPx(lo)}</span><span class="rb-lab hi">${fmtPx(hi)}</span></div>`;
   return s;
 }
 
@@ -536,7 +603,7 @@ function fieldRow(p){
     ${posCell}
     ${pnlCell}
     <div class="st ${p.stStyle}">${p.status}</div>
-    <div class="miniband"><svg viewBox="0 0 300 26" preserveAspectRatio="none">${bandSVG(p,300,26)}</svg>${stopMeta}</div>
+    <div class="miniband">${rangeBar(p)}${stopMeta}</div>
   </div>`;
 }
 
@@ -833,7 +900,7 @@ function renderSpec(){
     Faults promote to the top of the field with a red rail: <b>near-stop</b> (price within 3% of the stop) and <b>stale-with-a-position</b> (old data while money rides on it). Stale <i>without</i> a position stays where its score puts it — old data only matters when it's load-bearing. Also carried: <b>▣ coherent / ▢ MISMATCH</b> per pair, the off-scale stop <b>◄</b> marker, and per-rung stop coverage.</div>`;
 
   // spec band example (LTC)
-  document.getElementById("specband").innerHTML = bandSVG(PMAP.LTC, 700, 30);
+  document.getElementById("specband").innerHTML = rangeBar(PMAP.LTC);
 
   // NEAR-STOP fault demo — an illustrative pair one wick from its stop
   const demo={ sym:"XMPL", tier:"active", status:"NEAR-STOP", stStyle:"near",
