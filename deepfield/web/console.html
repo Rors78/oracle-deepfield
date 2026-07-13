@@ -231,26 +231,56 @@ button{ font-family:inherit; color:inherit; }
 .jday{ font-size:9.5px; letter-spacing:.14em; text-transform:uppercase; color:var(--ink-faint); padding:9px 5px 4px; border-top:1px solid var(--line); margin-top:4px; }
 .jday:first-child{ border-top:0; margin-top:0; }
 
-/* ── DETAIL view ───────────────────────────────────────────────────────── */
+/* ── DETAIL view · campaign console ───────────────────────────────────── */
 .view{ display:none; }
 .view.active{ display:block; }
 .backbtn{ background:transparent; border:1px solid var(--line-2); border-radius:6px; padding:6px 12px; color:var(--ink-dim); cursor:pointer; font-size:11px; letter-spacing:.05em; }
 .backbtn:hover{ color:var(--ink); background:var(--sky-2); }
-.dhero{ display:flex; align-items:center; gap:20px; flex-wrap:wrap; padding:14px 4px 16px; }
-.dhero .dsym{ font-family:var(--mono); font-weight:700; font-size:30px; letter-spacing:.02em; color:var(--brass); text-shadow:0 0 18px var(--glow-brass); }
-.dhero .dpx{ font-family:var(--mono); font-size:34px; letter-spacing:-1px; }
-.dstat{ display:flex; flex-direction:column; gap:1px; padding:0 4px; }
+.dtop{ display:flex; align-items:center; gap:14px; padding:2px 2px 8px; }
+.sub2{ font-weight:400; text-transform:none; letter-spacing:0; font-size:10.5px; }
+
+/* masthead — identity + position digest on one hairline row */
+.dmast{ display:flex; align-items:flex-end; gap:8px 28px; flex-wrap:wrap; padding:4px 2px 14px; border-bottom:1px solid var(--line); margin-bottom:12px; }
+.dmast .dsym{ font-family:var(--mono); font-weight:700; font-size:30px; line-height:1; letter-spacing:.02em; color:var(--brass); text-shadow:0 0 18px var(--glow-brass); }
+.dmast .dpx{ font-family:var(--mono); font-size:32px; line-height:1; letter-spacing:-1px; }
+.dstat{ display:flex; flex-direction:column; gap:2px; }
 .dstat .k{ font-size:9.5px; letter-spacing:.14em; text-transform:uppercase; color:var(--ink-dim); }
-.dstat .val{ font-family:var(--mono); font-size:16px; }
-.dgrid{ display:grid; grid-template-columns:1fr 416px; gap:12px; align-items:start; }
-@media (max-width:1120px){ .dgrid{ grid-template-columns:1fr; } }
-.dcol{ display:flex; flex-direction:column; gap:12px; }
-.dgrid2{ display:grid; grid-template-columns:300px 1fr; gap:12px; align-items:start; margin-top:12px; }
-@media (max-width:1120px){ .dgrid2{ grid-template-columns:1fr; } }
+.dstat .val{ font-family:var(--mono); font-variant-numeric:tabular-nums; font-size:16px; line-height:1.15; }
+.dstat .val small{ font-size:11px; color:var(--ink-dim); font-weight:400; }
+
+/* main grid — chart column + right rail; bottom row ledger + feed */
+.dmain{ display:grid; grid-template-columns:minmax(0,1fr) 332px; gap:12px; align-items:start; }
+@media (max-width:1120px){ .dmain{ grid-template-columns:1fr; } }
+.dleft{ display:flex; flex-direction:column; gap:12px; min-width:0; }
+.dright{ display:flex; flex-direction:column; gap:12px; }
+.dbottom{ display:grid; grid-template-columns:minmax(0,3fr) minmax(0,2fr); gap:12px; margin-top:12px; align-items:start; }
+@media (max-width:1120px){ .dbottom{ grid-template-columns:1fr; } }
+.dfeed{ max-height:340px; overflow-y:auto; scrollbar-width:thin; }
+
+/* window selector */
+.winsel{ display:inline-flex; border:1px solid var(--line-2); border-radius:6px; overflow:hidden; }
+.winsel button{ background:transparent; border:0; padding:3px 10px; font-size:10.5px; letter-spacing:.05em; color:var(--ink-dim); cursor:pointer; font-family:var(--mono); }
+.winsel button.on{ background:var(--sky-3); color:var(--ink); }
+.winsel button + button{ border-left:1px solid var(--line-2); }
+
+/* risk card rows */
+.rk{ display:grid; grid-template-columns:96px 1fr; gap:4px 12px; align-items:baseline; padding:6px 2px; border-bottom:1px solid var(--line); font-size:12px; }
+.rk:last-child{ border-bottom:0; }
+.rk .k{ font-size:9.5px; letter-spacing:.13em; text-transform:uppercase; color:var(--ink-dim); }
+.rk .v{ font-family:var(--mono); font-variant-numeric:tabular-nums; color:var(--ink-2); }
+.rk .v b{ color:var(--ink); font-weight:600; }
+
+/* inline P&L bar in the ledger */
+.pnlbar{ display:inline-block; vertical-align:middle; height:8px; border-radius:2px; margin-left:6px; }
+.pnlbar.gain{ background:rgba(87,185,138,.55); }
+.pnlbar.loss{ background:rgba(212,93,93,.55); }
 .card{ background:var(--sky-1); border:1px solid var(--line); border-radius:var(--r); padding:14px; }
 .card h3{ margin:0 0 10px; font-size:11px; letter-spacing:.16em; text-transform:uppercase; color:var(--ink-2); font-weight:600; display:flex; justify-content:space-between; align-items:baseline; }
 .chartwrap{ position:relative; }
 .chartwrap svg{ display:block; width:100%; height:auto; overflow:visible; }
+.dchartcard{ position:relative; }
+svg .axt{ fill:var(--ink-dim); font-size:10px; font-family:var(--mono); }
+svg .axt2{ fill:var(--ink-faint); font-size:9.5px; font-family:var(--mono); }
 .chart-tip{ position:absolute; pointer-events:none; background:var(--sky-4); border:1px solid var(--line-2); border-radius:5px; padding:5px 8px; font-family:var(--mono); font-size:11px; color:var(--ink); opacity:0; transition:opacity .08s; white-space:nowrap; box-shadow:0 6px 18px rgba(0,0,0,.5); z-index:5; }
 .legend{ display:flex; flex-wrap:wrap; gap:6px 16px; margin-top:16px; font-size:10.5px; color:var(--ink-dim); font-family:var(--mono); }
 .legend span{ display:inline-flex; align-items:center; gap:6px; }
@@ -278,7 +308,6 @@ button{ font-family:inherit; color:inherit; }
 .ledger .st-live{ color:var(--teal); }
 .ledger tr.rest td{ color:var(--amber); }
 .ledger tfoot td{ border-top:1px solid var(--line-2); border-bottom:0; padding-top:8px; color:var(--ink); font-weight:600; }
-.tradezone svg{ overflow:visible; }
 
 /* ── SPEC view ─────────────────────────────────────────────────────────── */
 .speccols{ columns:2; column-gap:16px; }
@@ -364,53 +393,62 @@ button{ font-family:inherit; color:inherit; }
     </div>
   </section>
 
-  <!-- ═══════════════ PAIR DETAIL ═══════════════ -->
+  <!-- ═══════════════ PAIR DETAIL · campaign console ═══════════════ -->
   <section class="view" id="view-detail">
-    <div style="display:flex;align-items:center;gap:14px;padding:2px 2px 4px">
+    <div class="dtop">
       <button class="backbtn" id="backbtn">← Field</button>
       <span class="hint dim" id="detailcrumb" style="font-size:11px"></span>
     </div>
-    <div class="dhero" id="dhero"></div>
 
-    <div class="dgrid">
-      <div class="card chartwrap">
-        <h3><span>52-week range <span class="dim" style="font-weight:400;text-transform:none;letter-spacing:0">· daily close · price plotted on its yearly range</span></span><span class="dim" id="chartrange"></span></h3>
-        <div class="chartwrap" id="bigchart"></div>
-        <div class="chart-tip" id="bigtip"></div>
-        <div class="legend">
-          <span><span class="lg" style="border-color:var(--cyan)"></span> price</span>
-          <span><span class="lgdot" style="background:var(--brass)"></span> filled rung</span>
-          <span><span class="lgring"></span> resting bid</span>
-          <span><span class="lg" style="border-color:var(--ink-2);border-top-style:dashed"></span> avg entry</span>
-          <span><span class="lg" style="border-color:var(--alarm)"></span> protective stop</span>
-          <span><span class="lg" style="border-color:var(--ink-faint);border-top-style:dotted"></span> 52w hi/lo</span>
+    <!-- masthead: identity + position digest, one hairline row -->
+    <header class="dmast" id="dmast"></header>
+
+    <div class="dmain">
+      <div class="dleft">
+        <div class="card dchartcard">
+          <h3>
+            <span>Trade window <span class="dim sub2" id="dwinlab"></span></span>
+            <span class="winsel" id="winsel">
+              <button data-w="30">30d</button>
+              <button data-w="90" class="on">90d</button>
+              <button data-w="180">180d</button>
+              <button data-w="365">52w</button>
+            </span>
+          </h3>
+          <div class="chartwrap" id="dplot"></div>
+          <div class="chart-tip" id="dtip"></div>
+          <div class="legend" id="dlegend"></div>
+        </div>
+        <div class="card dctxcard">
+          <h3><span>52-week context <span class="dim sub2">· where the window sits in the year</span></span><span class="dim mono" id="ctxrange"></span></h3>
+          <div class="chartwrap" id="dctxplot"></div>
         </div>
       </div>
 
-      <div class="dcol">
+      <aside class="dright">
+        <div class="card" id="driskcard">
+          <h3><span>Risk</span><span class="dim mono" id="risktag"></span></h3>
+          <div id="driskbody"></div>
+        </div>
         <div class="card thesis" id="thesiscard">
           <h3><span>Thesis</span><span class="dim mono" id="thesisscore"></span></h3>
           <ul id="thesislist"></ul>
           <div class="note" id="thesisfoot" style="margin-top:11px"></div>
         </div>
-        <div class="card tradezone" id="tradezonecard">
-          <h3><span>Trade zone</span><span class="dim" style="font-weight:400;text-transform:none;letter-spacing:0">zoomed</span></h3>
-          <div class="chartwrap" id="zonechart"></div>
-          <div class="note" id="zonenote" style="margin-top:8px">The ladder, zoomed off the 52-week scale — every rung, the average, the resting bid and the stop, spaced so nothing collides. <b>Both scales visible at once</b> — the fix for the terminal's silent re-anchor.</div>
+      </aside>
+    </div>
+
+    <div class="dbottom">
+      <div class="card">
+        <h3><span>Ladder ledger</span><span class="dim mono" id="ledgersig"></span></h3>
+        <div style="overflow-x:auto">
+          <table class="ledger" id="ledgertbl"></table>
         </div>
       </div>
-    </div>
-
-    <div class="card" style="margin-top:12px">
-      <h3><span>Ladder ledger</span><span class="dim mono" id="ledgersig"></span></h3>
-      <div style="overflow-x:auto">
-        <table class="ledger" id="ledgertbl"></table>
+      <div class="card">
+        <h3><span>Pair feed</span><span class="dim sub2" id="feedsym"></span></h3>
+        <div id="pairfeed" class="dfeed"></div>
       </div>
-    </div>
-
-    <div class="card" style="margin-top:12px">
-      <h3><span>Pair feed</span><span class="dim" style="font-weight:400;text-transform:none;letter-spacing:0" id="feedsym"></span></h3>
-      <div id="pairfeed"></div>
     </div>
   </section>
 
@@ -663,120 +701,248 @@ function renderJournal(){
   feed.innerHTML = html;
 }
 
-/* ── detail: big 52-week chart ─────────────────────────────────────────── */
-const CW=760, CH=300, PADL=52, PADR=16, PADT=14, PADB=26;
+/* ── detail: campaign console ──────────────────────────────────────────── */
+let TW=90;                                   // trade-window span, days
+const PDATA={}, PFETCHED={};                 // /api/pair payloads (days/fills/pendings)
 function niceTicks(min,max,n){
   const span=max-min, step0=span/n, mag=Math.pow(10,Math.floor(Math.log10(step0)));
   const norm=step0/mag, step=(norm>=5?5:norm>=2?2:1)*mag;
   const out=[]; for(let v=Math.ceil(min/step)*step; v<=max+1e-9; v+=step) out.push(v); return out;
 }
-function bigChart(p){
-  const series = CLOSES[p.sym];
-  const hasSeries = !!(series && series.length);
-  const startTs = START_TS[p.sym] || 0;
-  const el = document.getElementById("bigchart");
-  const tip = document.getElementById("bigtip");
-  if(!hasSeries){
-    el.innerHTML = `<div style="height:${CH}px;display:flex;align-items:center;justify-content:center;color:var(--ink-dim);font-size:12px">loading ${p.sym} series…</div>`;
+const fmtDate = ts => new Date(ts*1000).toLocaleString('en-US',{month:'short',day:'numeric'}).toLowerCase();
+function fmtAge(iso){
+  if(!iso) return "—";
+  const ms=Date.now()-new Date(iso).getTime(); if(!(ms>0)) return "now";
+  const h=ms/3.6e6; return h<1 ? Math.max(1,ms/6e4|0)+"m" : h<48 ? (h|0)+"h" : (h/24|0)+"d";
+}
+/* The signature mark: daily candles for the chosen window with the live ladder
+   drawn as price LEVELS, and — fused to the right edge, sharing the same y-axis —
+   a notional-at-price profile: every rung binned into a horizontal bar, green
+   in-profit / red underwater, hollow amber for resting bids. 27 rungs stop being
+   spaghetti and become a shape. */
+function tradeChart(p){
+  const el=document.getElementById("dplot"), tip=document.getElementById("dtip");
+  const d=PDATA[p.sym];
+  // pre-restart server sends closes only — degrade to a close-line, still correct
+  let dd = d && d.days;
+  if((!dd || !dd.length) && d && d.closes && d.closes.length)
+    dd = d.closes.map((c,i)=>[(d.start_ts||0)+i*86400, c, c, c, c, 0]);
+  if(!dd || !dd.length){
+    el.innerHTML=`<div style="height:300px;display:flex;align-items:center;justify-content:center;color:var(--ink-dim);font-size:12px"><span class="mono time">⟳</span>&nbsp;loading ${p.sym} series…</div>`;
     return;
   }
-  const n=series.length;
-  const dmin=Math.min(...series, p.stop??Infinity), dmax=Math.max(...series);
-  const yMin=dmin*0.985, yMax=dmax*1.02;
-  const X=i=> PADL + i/(n-1)*(CW-PADL-PADR);
-  const Y=v=> PADT + (1-(v-yMin)/(yMax-yMin))*(CH-PADT-PADB);
-  const line = series.map((v,i)=>(i?"L":"M")+X(i).toFixed(1)+" "+Y(v).toFixed(1)).join(" ");
-  const area = line+` L${X(n-1).toFixed(1)} ${(CH-PADB)} L${PADL} ${(CH-PADB)} Z`;
-  let g="";
-  niceTicks(yMin,yMax,4).forEach(v=>{
-    g+=`<line x1="${PADL}" y1="${Y(v).toFixed(1)}" x2="${CW-PADR}" y2="${Y(v).toFixed(1)}" stroke="var(--line)" stroke-width="1"/>
-        <text x="${PADL-8}" y="${Y(v)+3}" text-anchor="end" fill="var(--ink-dim)" font-size="10" font-family="var(--mono)">${fmtPx(v)}</text>`;
-  });
-  // month ticks along x
-  let xlab="";
-  for(let m=0;m<=11;m+=2){ const i=Math.round(m/12*(n-1)); const d=new Date((startTs+i*86400)*1000);
-    xlab+=`<text x="${X(i)}" y="${CH-8}" text-anchor="middle" fill="var(--ink-faint)" font-size="9.5" font-family="var(--mono)">${d.toLocaleString('en-US',{month:'short'}).toLowerCase()}</text>`; }
-  // 52w hi/lo reference
-  const refs = `<line x1="${PADL}" y1="${Y(p.hi)}" x2="${CW-PADR}" y2="${Y(p.hi)}" stroke="var(--ink-faint)" stroke-width="1" stroke-dasharray="2 3"/>
-    <text x="${CW-PADR}" y="${Y(p.hi)-4}" text-anchor="end" fill="var(--ink-faint)" font-size="9" font-family="var(--mono)">52w high ${fmtPx(p.hi)}</text>
-    <line x1="${PADL}" y1="${Y(p.lo)}" x2="${CW-PADR}" y2="${Y(p.lo)}" stroke="var(--ink-faint)" stroke-width="1" stroke-dasharray="2 3"/>`;
-  // position zone (min→max rung) shaded + avg + stop
-  let overlay="";
-  if(p.rungs){
-    const rmin=Math.min(...p.rungs), rmax=Math.max(...p.rungs);
-    overlay += `<rect x="${PADL}" y="${Y(rmax).toFixed(1)}" width="${CW-PADL-PADR}" height="${(Y(rmin)-Y(rmax)).toFixed(1)}" fill="rgba(201,168,92,.08)"/>`;
-    overlay += `<line x1="${PADL}" y1="${Y(p.avg)}" x2="${CW-PADR}" y2="${Y(p.avg)}" stroke="var(--ink-2)" stroke-width="1.4" stroke-dasharray="5 3"/>
-      <text x="${PADL+4}" y="${Y(p.avg)-4}" fill="var(--ink-2)" font-size="9.5" font-family="var(--mono)">ø ${fmtPx(p.avg)}</text>`;
-    overlay += `<line x1="${PADL}" y1="${Y(p.stop)}" x2="${CW-PADR}" y2="${Y(p.stop)}" stroke="var(--alarm)" stroke-width="1.6"/>
-      <text x="${PADL+4}" y="${Y(p.stop)+12}" fill="var(--alarm)" font-size="9.5" font-family="var(--mono)">stop ${fmtPx(p.stop)}</text>`;
-    // rungs as dots near the right edge (they're all recent)
-    p.rungs.forEach(r=> overlay+=`<circle cx="${X(n-1)-6}" cy="${Y(r).toFixed(1)}" r="2.4" fill="var(--brass)"/>`);
-    if(p.bid!=null) overlay+=`<circle cx="${X(n-1)-6}" cy="${Y(p.bid).toFixed(1)}" r="3" fill="none" stroke="var(--amber)" stroke-width="1.4"/>`;
-  }
-  // emphasized endpoint (current price)
-  const endCol = p.avg&&p.price>=p.avg?"var(--gain)":(p.avg?"var(--loss)":"var(--cyan)");
-  overlay+=`<circle cx="${X(n-1)}" cy="${Y(p.price)}" r="4" fill="${endCol}"/><circle cx="${X(n-1)}" cy="${Y(p.price)}" r="8" fill="none" stroke="${endCol}" stroke-opacity=".4" stroke-width="1"/>`;
+  const days=dd.slice(-TW), n=days.length;
+  const hasOHLC=days.some(r=>r[2]!==r[3]);
+  const lineMode = TW>220 || !hasOHLC;
+  let fills=d.fills||[], pends=(d.pendings||[]).filter(f=>f.entry!=null);
+  if(!fills.length && p.rungs) fills=p.rungs.map((r,i)=>({entry:r, vol:(p.vols?p.vols[i]:p.size/p.fills)||0}));
+  if(!pends.length && p.bids) pends=p.bids.filter(b=>b.price!=null).map(b=>({entry:b.price, vol:b.vol||0}));
 
-  el.innerHTML = `<svg viewBox="0 0 ${CW} ${CH}" role="img" aria-label="${p.sym} 52-week price">
-    <defs><linearGradient id="ag" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="var(--cyan)" stop-opacity=".22"/><stop offset="1" stop-color="var(--cyan)" stop-opacity="0"/>
-    </linearGradient></defs>
-    ${g}${xlab}${refs}
-    <path d="${area}" fill="url(#ag)"/>
-    <path d="${line}" fill="none" stroke="var(--cyan)" stroke-width="1.6"/>
-    ${overlay}
-    <line id="cross" x1="0" y1="${PADT}" x2="0" y2="${CH-PADB}" stroke="var(--ink-2)" stroke-width="1" opacity="0"/>
-    <rect id="hit" x="${PADL}" y="0" width="${CW-PADL-PADR}" height="${CH}" fill="transparent"/>
-  </svg>`;
-  // hover crosshair + tooltip
-  const svg=el.querySelector("svg"), cross=el.querySelector("#cross"), hit=el.querySelector("#hit");
-  hit.addEventListener("mousemove", e=>{
-    const r=svg.getBoundingClientRect(); const px=(e.clientX-r.left)/r.width*CW;
-    let i=Math.round((px-PADL)/(CW-PADL-PADR)*(n-1)); i=Math.max(0,Math.min(n-1,i));
-    cross.setAttribute("x1",X(i)); cross.setAttribute("x2",X(i)); cross.setAttribute("opacity",".6");
-    const d=new Date((startTs+i*86400)*1000);
-    tip.style.opacity=1;
-    tip.innerHTML=`<span class="dim">${d.toLocaleString('en-US',{month:'short',day:'numeric'})}</span> ${fmtPx(series[i])}`;
-    const localX=X(i)/CW*r.width; tip.style.left=Math.min(r.width-90,localX+10)+"px"; tip.style.top="10px";
+  // geometry: plot | profile gutter | price axis (trading convention: axis right)
+  const W=980, H=430, PT=12, XLB=24, VH=48, PB=XLB+VH+6;
+  const AXW=60, GW=104;
+  const plotL=8, plotR=W-AXW-GW-8, gutL=plotR+8, gutR=W-AXW-8, yBot=H-PB;
+
+  // y-domain = window price action + EVERY ladder level (the stop is part of the picture)
+  let lo=Math.min(...days.map(r=>r[3])), hi=Math.max(...days.map(r=>r[2]));
+  const lv=[...fills.map(f=>f.entry), ...pends.map(f=>f.entry), p.avg, p.stop, p.price].filter(v=>v!=null);
+  if(lv.length){ lo=Math.min(lo,...lv); hi=Math.max(hi,...lv); }
+  const pad=(hi-lo)*0.05 || lo*0.01; lo-=pad; hi+=pad;
+  const X=i=> plotL + (n<2 ? .5 : i/(n-1))*(plotR-plotL);
+  const Y=v=> PT + (1-(v-lo)/(hi-lo))*(yBot-PT);
+  const VY=v=> lo + (1-(v-PT)/(yBot-PT))*(hi-lo);      // pixel→price (cursor readout)
+  let s="";
+
+  // grid + right axis
+  niceTicks(lo,hi,5).forEach(v=>{
+    s+=`<line x1="${plotL}" y1="${Y(v).toFixed(1)}" x2="${gutR}" y2="${Y(v).toFixed(1)}" stroke="var(--line)"/>
+        <text x="${W-6}" y="${(Y(v)+3).toFixed(1)}" text-anchor="end" class="axt">${fmtPx(v)}</text>`;
   });
-  hit.addEventListener("mouseleave", ()=>{ cross.setAttribute("opacity","0"); tip.style.opacity=0; });
+  const xstep=Math.max(1,Math.round(n/6));
+  for(let i=0;i<n;i+=xstep)
+    s+=`<text x="${X(i).toFixed(1)}" y="${H-8}" text-anchor="middle" class="axt2">${fmtDate(days[i][0])}</text>`;
+
+  // danger tint below the stop + rung-span band
+  if(p.stop!=null && Y(p.stop)<yBot)
+    s+=`<rect x="${plotL}" y="${Y(p.stop).toFixed(1)}" width="${gutR-plotL}" height="${Math.max(0,yBot-Y(p.stop)).toFixed(1)}" fill="rgba(224,72,62,.05)"/>`;
+  if(fills.length){
+    const rmin=Math.min(...fills.map(f=>f.entry)), rmax=Math.max(...fills.map(f=>f.entry));
+    s+=`<rect x="${plotL}" y="${Y(rmax).toFixed(1)}" width="${plotR-plotL}" height="${Math.max(1,Y(rmin)-Y(rmax)).toFixed(1)}" fill="rgba(201,168,92,.06)"/>`;
+  }
+
+  // volume pane (bottom, recessive)
+  const vmax=Math.max(...days.map(r=>r[5]||0), 1e-9);
+  const bw=Math.max(1,(plotR-plotL)/n*0.62);
+  days.forEach((r,i)=>{
+    const vh=(r[5]||0)/vmax*VH;
+    if(vh>.5) s+=`<rect x="${(X(i)-bw/2).toFixed(1)}" y="${(H-XLB-vh).toFixed(1)}" width="${bw.toFixed(1)}" height="${vh.toFixed(1)}" fill="var(--ink-faint)" opacity=".45"/>`;
+  });
+
+  // price: candles (or a close-line at year scale)
+  if(lineMode){
+    const line=days.map((r,i)=>(i?"L":"M")+X(i).toFixed(1)+" "+Y(r[4]).toFixed(1)).join(" ");
+    s+=`<path d="${line} L${X(n-1).toFixed(1)} ${yBot} L${plotL} ${yBot} Z" fill="url(#dag)"/>
+        <path d="${line}" fill="none" stroke="var(--cyan)" stroke-width="1.5"/>`;
+  }else{
+    days.forEach((r,i)=>{
+      const [,o,h2,l2,c]=r, up=c>=o, col=up?"var(--gain)":"var(--loss)";
+      const yT=Y(Math.max(o,c)), yB=Y(Math.min(o,c));
+      s+=`<line x1="${X(i).toFixed(1)}" y1="${Y(h2).toFixed(1)}" x2="${X(i).toFixed(1)}" y2="${Y(l2).toFixed(1)}" stroke="${col}" stroke-width="1"/>
+          <rect x="${(X(i)-bw/2).toFixed(1)}" y="${yT.toFixed(1)}" width="${bw.toFixed(1)}" height="${Math.max(1,yB-yT).toFixed(1)}" fill="${col}" fill-opacity="${up?'.9':'.8'}"/>`;
+    });
+  }
+
+  // notional-at-price profile (the ladder as a shape, same y-axis)
+  const BIN=11;
+  const bins={}, pbins={};
+  fills.forEach(f=>{
+    const b=Math.round(Y(f.entry)/BIN), o=(bins[b]=bins[b]||{n:0,not:0,vol:0,e:f.entry});
+    o.n++; o.not+=(f.notional ?? f.entry*(f.vol||0)); o.vol+=f.vol||0; o.e=Math.max(o.e,f.entry);
+  });
+  pends.forEach(f=>{
+    const b=Math.round(Y(f.entry)/BIN), o=(pbins[b]=pbins[b]||{n:0,not:0,e:f.entry});
+    o.n++; o.not+=f.entry*(f.vol||0);
+  });
+  const maxNot=Math.max(...Object.values(bins).map(b=>b.not), ...Object.values(pbins).map(b=>b.not), 1e-9);
+  s+=`<line x1="${gutL}" y1="${PT}" x2="${gutL}" y2="${yBot}" stroke="var(--line-2)"/>`;
+  Object.values(bins).forEach(v=>{
+    const y=Y(v.e), w=Math.max(2, v.not/maxNot*(gutR-gutL-6));
+    const und=v.e>p.price, col=und?"var(--loss)":"var(--gain)", rgba=und?"rgba(212,93,93,.45)":"rgba(87,185,138,.45)";
+    s+=`<rect x="${gutL+1}" y="${(y-BIN/2+1.5).toFixed(1)}" width="${w.toFixed(1)}" height="${BIN-3}" rx="1.5" fill="${rgba}" stroke="${col}" stroke-opacity=".85" stroke-width="1"><title>${v.n} rung${v.n>1?'s':''} · ${fmtVol(v.vol)} vol · $${v.not.toFixed(2)} notional @ ~${fmtPx(v.e)} — ${und?'underwater':'in profit'}</title></rect>`;
+  });
+  Object.values(pbins).forEach(v=>{
+    const y=Y(v.e), w=Math.max(2, v.not/maxNot*(gutR-gutL-6));
+    s+=`<rect x="${gutL+1}" y="${(y-BIN/2+1.5).toFixed(1)}" width="${w.toFixed(1)}" height="${BIN-3}" rx="1.5" fill="rgba(224,155,76,.10)" stroke="var(--amber)" stroke-width="1" stroke-dasharray="3 2"><title>${v.n} resting bid${v.n>1?'s':''} · $${v.not.toFixed(2)} @ ${fmtPx(v.e)}</title></rect>`;
+  });
+
+  // ladder levels + right-axis badges (collision-resolved)
+  const badges=[];
+  const level=(v,col,dash,w,label)=>{
+    if(v==null) return;
+    s+=`<line x1="${plotL}" y1="${Y(v).toFixed(1)}" x2="${gutR}" y2="${Y(v).toFixed(1)}" stroke="${col}" stroke-width="${w}"${dash?` stroke-dasharray="${dash}"`:""}/>`;
+    if(label) badges.push({y:Y(v), col, label});
+  };
+  const nearBid = pends.length ? Math.max(...pends.map(f=>f.entry)) : null;
+  pends.forEach(f=> level(f.entry, "var(--amber)", "2 3", 1, f.entry===nearBid?fmtPx(f.entry):null));
+  if(!pends.length && p.bid!=null) level(p.bid, "var(--amber)", "2 3", 1, fmtPx(p.bid));
+  if(p.avg!=null && fills.length) level(p.avg, "var(--ink-2)", "5 3", 1.2, "ø "+fmtPx(p.avg));
+  if(p.stop!=null) level(p.stop, "var(--alarm)", null, 1.5, fmtPx(p.stop));
+  const pxCol = p.avg==null ? "var(--cyan)" : (p.price>=p.avg ? "var(--gain)" : "var(--loss)");
+  if(p.price!=null) level(p.price, pxCol, "1 0", 1.4, fmtPx(p.price));
+  badges.sort((a,b)=>a.y-b.y);
+  for(let i=1;i<badges.length;i++) if(badges[i].y-badges[i-1].y<16) badges[i].y=badges[i-1].y+16;
+  badges.forEach(b=>{
+    s+=`<rect x="${W-AXW-2}" y="${(b.y-8).toFixed(1)}" width="${AXW}" height="16" rx="3" fill="var(--sky-4)" stroke="${b.col}" stroke-opacity=".6"/>
+        <text x="${W-8}" y="${(b.y+3.5).toFixed(1)}" text-anchor="end" font-size="10" font-family="var(--mono)" fill="${b.col}">${b.label}</text>`;
+  });
+
+  el.innerHTML=`<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="${p.sym} trade window with ladder">
+    <defs><linearGradient id="dag" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="var(--cyan)" stop-opacity=".20"/><stop offset="1" stop-color="var(--cyan)" stop-opacity="0"/>
+    </linearGradient></defs>
+    ${s}
+    <line id="dcx" y1="${PT}" y2="${yBot}" stroke="var(--ink-2)" stroke-width="1" opacity="0"/>
+    <line id="dcy" x1="${plotL}" x2="${gutR}" stroke="var(--ink-2)" stroke-width="1" stroke-dasharray="3 3" opacity="0"/>
+    <g id="dychip" opacity="0"><rect x="${W-AXW-2}" width="${AXW}" height="15" rx="3" fill="var(--sky-4)" stroke="var(--line-2)"/><text x="${W-8}" text-anchor="end" font-size="10" font-family="var(--mono)" fill="var(--ink)"></text></g>
+    <rect id="dhit" x="${plotL}" y="${PT}" width="${gutR-plotL}" height="${yBot-PT}" fill="transparent"/>
+  </svg>`;
+
+  // crosshair: candle tooltip + live price readout at the cursor row
+  const svg=el.querySelector("svg"), cx=svg.querySelector("#dcx"), cy=svg.querySelector("#dcy"),
+        chip=svg.querySelector("#dychip"), chipT=chip.querySelector("text"), hit=svg.querySelector("#dhit");
+  hit.addEventListener("mousemove", e=>{
+    const r=svg.getBoundingClientRect();
+    const px=(e.clientX-r.left)/r.width*W, py=(e.clientY-r.top)/r.height*H;
+    let i=Math.round((px-plotL)/(plotR-plotL)*(n-1)); i=Math.max(0,Math.min(n-1,i));
+    cx.setAttribute("x1",X(i)); cx.setAttribute("x2",X(i)); cx.setAttribute("opacity",".55");
+    cy.setAttribute("y1",py); cy.setAttribute("y2",py); cy.setAttribute("opacity",".35");
+    chip.setAttribute("opacity","1"); chip.querySelector("rect").setAttribute("y",py-7.5);
+    chipT.setAttribute("y",py+3.5); chipT.textContent=fmtPx(VY(py));
+    const dd=days[i], up=dd[4]>=dd[1];
+    tip.style.opacity=1;
+    tip.innerHTML = lineMode
+      ? `<span class="dim">${fmtDate(dd[0])}</span> ${fmtPx(dd[4])}`
+      : `<span class="dim">${fmtDate(dd[0])}</span> <span class="${up?'gain':'loss'}">${up?'▲':'▼'}</span> o ${fmtPx(dd[1])} · h ${fmtPx(dd[2])} · l ${fmtPx(dd[3])} · c ${fmtPx(dd[4])} <span class="dim">· vol ${Math.round(dd[5]||0).toLocaleString()}</span>`;
+    const card=el.closest(".dchartcard"), cr=card.getBoundingClientRect();
+    tip.style.left=Math.min(cr.width-260, Math.max(4, e.clientX-cr.left+14))+"px";
+    tip.style.top=(e.clientY-cr.top-34)+"px";
+  });
+  hit.addEventListener("mouseleave", ()=>{
+    cx.setAttribute("opacity","0"); cy.setAttribute("opacity","0");
+    chip.setAttribute("opacity","0"); tip.style.opacity=0;
+  });
+
+  document.getElementById("dlegend").innerHTML =
+    (lineMode ? `<span><span class="lg" style="border-color:var(--cyan)"></span> daily close</span>`
+              : `<span><span class="lgdot" style="background:var(--gain)"></span> up day</span>
+                 <span><span class="lgdot" style="background:var(--loss)"></span> down day</span>`) +
+    (fills.length ? `<span><span class="lgdot" style="background:rgba(87,185,138,.6);border-radius:2px;width:14px"></span> rungs in profit</span>
+       <span><span class="lgdot" style="background:rgba(212,93,93,.6);border-radius:2px;width:14px"></span> rungs underwater</span>
+       <span><span class="lg" style="border-color:var(--ink-2);border-top-style:dashed"></span> avg entry</span>` : "") +
+    `<span><span class="lgring" style="border-radius:2px"></span> resting bid</span>
+     <span><span class="lg" style="border-color:var(--alarm)"></span> protective stop</span>
+     <span><span class="lg" style="border-color:var(--ink-faint);border-top-width:4px"></span> volume</span>`;
 }
 
-/* ── trade-zone (vertical ladder rail) ─────────────────────────────────── */
-function zoneChart(p){
-  const el=document.getElementById("zonechart");
-  if(!p.rungs){ el.innerHTML=`<div class="note" style="padding:24px 0;text-align:center">No open ladder — this pair is on watch.</div>`; return; }
-  const W=270,H=300,pl=8,pr=64,pt=8,pb=8;
-  const vals=[...p.rungs,p.avg,p.bid,p.price,p.stop];
-  const yMin=Math.min(...vals)*0.997, yMax=Math.max(...vals)*1.003;
-  const Y=v=> pt+(1-(v-yMin)/(yMax-yMin))*(H-pt-pb);
-  const xa=pl+26, xb=W-pr;
-  let s=`<line x1="${xa}" y1="${pt}" x2="${xa}" y2="${H-pb}" stroke="var(--line-2)" stroke-width="1"/>`;
-  // stop zone shading (below stop)
-  s+=`<rect x="${xa}" y="${Y(p.stop)}" width="${xb-xa}" height="${H-pb-Y(p.stop)}" fill="rgba(224,72,62,.07)"/>`;
-  // rungs
-  p.rungs.forEach(r=>{
-    const under=r>p.price;
-    s+=`<line x1="${xa}" y1="${Y(r).toFixed(1)}" x2="${xb}" y2="${Y(r).toFixed(1)}" stroke="var(--brass)" stroke-opacity=".55" stroke-width="1.4"/>
-        <circle cx="${xa}" cy="${Y(r).toFixed(1)}" r="2.4" fill="var(--brass)"/>`;
-  });
-  // avg
-  s+=`<line x1="${xa}" y1="${Y(p.avg)}" x2="${xb}" y2="${Y(p.avg)}" stroke="var(--ink-2)" stroke-width="1.4" stroke-dasharray="5 3"/>
-      <text x="${xb+4}" y="${Y(p.avg)+3}" fill="var(--ink-2)" font-size="10" font-family="var(--mono)">ø ${fmtPx(p.avg)}</text>`;
-  // bid (hollow)
-  s+=`<circle cx="${xa}" cy="${Y(p.bid)}" r="3.4" fill="none" stroke="var(--amber)" stroke-width="1.5"/>
-      <line x1="${xa}" y1="${Y(p.bid)}" x2="${xb}" y2="${Y(p.bid)}" stroke="var(--amber)" stroke-opacity=".5" stroke-width="1" stroke-dasharray="2 3"/>
-      <text x="${xb+4}" y="${Y(p.bid)+3}" fill="var(--amber)" font-size="10" font-family="var(--mono)">bid ${fmtPx(p.bid)}</text>`;
-  // price cursor
-  const col=p.price>=p.avg?"var(--gain)":"var(--loss)";
-  s+=`<line x1="${xa}" y1="${Y(p.price)}" x2="${xb}" y2="${Y(p.price)}" stroke="${col}" stroke-width="1.6"/>
-      <path d="M${xa-8} ${Y(p.price)-4} L${xa-8} ${Y(p.price)+4} L${xa-2} ${Y(p.price)} Z" fill="${col}"/>
-      <text x="${xb+4}" y="${Y(p.price)+3}" fill="${col}" font-size="10" font-family="var(--mono)">${fmtPx(p.price)}</text>`;
-  // stop
-  s+=`<line x1="${xa}" y1="${Y(p.stop)}" x2="${xb}" y2="${Y(p.stop)}" stroke="var(--alarm)" stroke-width="1.8"/>
-      <text x="${xb+4}" y="${Y(p.stop)+3}" fill="var(--alarm)" font-size="10" font-family="var(--mono)">stop</text>
-      <text x="${xb+4}" y="${Y(p.stop)+15}" fill="var(--alarm)" font-size="9" font-family="var(--mono)" opacity=".8">${((p.stop/p.avg-1)*100).toFixed(1)}%</text>`;
-  el.innerHTML=`<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="${p.sym} trade zone ladder">${s}</svg>`;
+/* 52-week context strip — the year, with a lit viewport marking the trade window */
+function ctxChart(p){
+  const el=document.getElementById("dctxplot"), d=PDATA[p.sym];
+  if(!d || !d.closes || !d.closes.length){ el.innerHTML=""; return; }
+  const cl=d.closes, n=cl.length;
+  const W=980, H=92, PT=8, PB=6, PL=8, PR=60;
+  let lo=Math.min(...cl, p.stop??Infinity), hi=Math.max(...cl);
+  const span=hi-lo || hi*.01; lo-=span*.04; hi+=span*.04;
+  const X=i=> PL + (n<2?.5:i/(n-1))*(W-PL-PR);
+  const Y=v=> PT + (1-(v-lo)/(hi-lo))*(H-PT-PB);
+  const line=cl.map((v,i)=>(i?"L":"M")+X(i).toFixed(1)+" "+Y(v).toFixed(1)).join(" ");
+  let s=`<path d="${line} L${X(n-1).toFixed(1)} ${H-PB} L${PL} ${H-PB} Z" fill="rgba(143,209,198,.05)"/>
+         <path d="${line}" fill="none" stroke="var(--cyan)" stroke-width="1.1" stroke-opacity=".85"/>`;
+  if(p.stop!=null)
+    s+=`<line x1="${PL}" y1="${Y(p.stop).toFixed(1)}" x2="${W-PR}" y2="${Y(p.stop).toFixed(1)}" stroke="var(--alarm)" stroke-width="1" stroke-dasharray="4 3" opacity=".65"/>`;
+  const i0=Math.max(0, n-Math.min(TW,n));
+  s+=`<rect x="${X(i0).toFixed(1)}" y="1" width="${Math.max(4,X(n-1)-X(i0)).toFixed(1)}" height="${H-PB-2}" rx="2"
+        fill="rgba(231,236,240,.05)" stroke="var(--ink-2)" stroke-opacity=".6"/>
+      <text x="${X(i0)+4}" y="11" class="axt2">window</text>`;
+  const chi=Math.max(...cl), cloV=Math.min(...cl);
+  s+=`<text x="${W-6}" y="${(Y(chi)+9).toFixed(1)}" text-anchor="end" class="axt">${fmtPx(chi)}</text>
+      <text x="${W-6}" y="${(Y(cloV)-1).toFixed(1)}" text-anchor="end" class="axt">${fmtPx(cloV)}</text>`;
+  document.getElementById("ctxrange").textContent=`52w ${fmtPx(p.lo)} — ${fmtPx(p.hi)}`;
+  el.innerHTML=`<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="${p.sym} 52-week context">${s}</svg>`;
+}
+
+/* risk card — what's actually at stake, computed from real order rows */
+function riskCard(p){
+  const body=document.getElementById("driskbody"), tag=document.getElementById("risktag");
+  const d=PDATA[p.sym]||{}, fills=d.fills||[], pends=(d.pendings||[]).filter(f=>f.entry!=null);
+  if(!p.rungs){
+    tag.textContent="";
+    const bidNote = pends.length
+      ? `<div class="rk"><span class="k">Resting</span><span class="v amber">${pends.length} bid${pends.length>1?'s':''} · nearest @ ${fmtPx(Math.max(...pends.map(f=>f.entry)))}</span></div>` : "";
+    body.innerHTML = `<div class="note" style="padding:4px 0 8px">${p.cardStatus==="BUY"
+      ? "Confirmed BUY — no fills yet. Risk begins at the first fill."
+      : "No open ladder — on watch. Nothing at risk."}</div>`+bidNote;
+    return;
+  }
+  const notional = fills.length ? fills.reduce((a,f)=>a+(f.notional ?? f.entry*(f.vol||0)),0) : p.size*(p.avg||0);
+  const margin   = fills.reduce((a,f)=>a+(f.margin||0),0);
+  const swept    = p.stop!=null ? (fills.length
+                     ? fills.reduce((a,f)=>a+(p.stop-f.entry)*(f.vol||0),0)
+                     : (p.stop-p.avg)*p.size) : null;
+  const fromHere = (p.stop!=null && p.price!=null) ? (p.stop-p.price)*p.size : null;
+  const dist     = (p.stop&&p.price) ? (p.stop/p.price-1)*100 : null;
+  const rmin=Math.min(...p.rungs), rmax=Math.max(...p.rungs);
+  const distCls = dist==null?"dim" : dist>-3?"alarm" : dist>-6?"amber":"ink";
+  tag.textContent = `${p.lev}× · live`;
+  const ages = fills.map(f=>f.ts).filter(Boolean).sort();
+  const delta=Math.max(0,(p.score||0)-(p.req||0)), mult=[1,2,3][Math.min(delta,2)];
+  const bid0 = pends.length ? pends.reduce((a,f)=>f.entry>a.entry?f:a) : null;
+  body.innerHTML =
+    `<div class="rk"><span class="k">Stop</span><span class="v"><b class="alarm">${fmtPx(p.stop)}</b> · <span class="${distCls}">${dist!=null?dist.toFixed(1)+"%":"—"}</span> <span class="dim">below price</span></span></div>
+     <div class="rk"><span class="k">If swept</span><span class="v"><b class="${pnlClass(swept||0)}">${fmtUsd(swept)}</b> <span class="dim">book result</span>${fromHere!=null?` · ${fmtUsd(fromHere)} <span class="dim">from here</span>`:""}</span></div>
+     <div class="rk"><span class="k">Exposure</span><span class="v"><b class="violet">$${notional.toFixed(2)}</b> <span class="dim">notional</span>${margin?` · $${margin.toFixed(2)} <span class="dim">margin</span>`:""} <span class="dim">@ ${p.lev}×</span></span></div>
+     <div class="rk"><span class="k">Ladder</span><span class="v"><b>${p.fills}</b> <span class="dim">rungs</span> ${fmtPx(rmin)} — ${fmtPx(rmax)} · <span class="dim">ø</span> ${fmtPx(p.avg)}</span></div>
+     ${ages.length?`<div class="rk"><span class="k">Campaign</span><span class="v"><span class="time">${fmtAge(ages[0])}</span> <span class="dim">oldest fill</span> · <span class="time">${fmtAge(ages[ages.length-1])}</span> <span class="dim">newest</span></span></div>`:""}
+     ${bid0?`<div class="rk"><span class="k">Next rung</span><span class="v amber">${fmtVol(bid0.vol??0)} @ ${fmtPx(bid0.entry)} <span class="dim">resting · conviction ${mult}×</span></span></div>`:""}`;
 }
 
 /* ── thesis + ledger + feed ────────────────────────────────────────────── */
@@ -807,23 +973,37 @@ function renderThesis(p){
 }
 function renderLedger(p){
   const t=document.getElementById("ledgertbl");
+  const d=PDATA[p.sym]||{}, fills=d.fills||[], pends=(d.pendings||[]).filter(f=>f.entry!=null);
   document.getElementById("ledgersig").textContent = p.rungs ? `${p.fills}f · ${p.size} · ø ${fmtPx(p.avg)}` : "";
-  if(!p.rungs){ const msg=p.cardStatus==="BUY"?"Confirmed BUY — no fills yet (awaiting entry).":"No filled rungs — on watch."; t.innerHTML=`<tbody><tr><td class="l dim" colspan="7" style="padding:20px 0;text-align:center">${msg}</td></tr></tbody>`; return; }
-  const rows = p.rungs.map((r,i)=>{
-    const vi = p.vols ? p.vols[i] : p.size/p.fills;   // real conviction-sized vol, not the average
-    const up=(p.price-r)*vi;
-    return `<tr><td class="l dim">${i+1}</td><td class="violet">${fmtVol(vi)}</td><td class="mono" style="color:var(--ink)">${fmtPx(r)}</td>
-      <td class="dim">${fmtPx(p.price)}</td><td class="${pnlClass(up)}">${fmtUsd(up)}</td>
-      <td class="alarm">${fmtPx(p.stop)}</td><td class="l st-live">live</td></tr>`;
+  if(!p.rungs && !pends.length){
+    const msg=p.cardStatus==="BUY"?"Confirmed BUY — no fills yet (awaiting entry).":"No filled rungs — on watch.";
+    t.innerHTML=`<tbody><tr><td class="l dim" colspan="8" style="padding:20px 0;text-align:center">${msg}</td></tr></tbody>`; return;
+  }
+  // real order rows when the API provides them; otherwise the state summary
+  const rows = fills.length
+    ? fills.map((f,i)=>({i, ts:f.ts, vol:f.vol, entry:f.entry, not:(f.notional ?? f.entry*(f.vol||0))}))
+    : (p.rungs||[]).map((r,i)=>({i, ts:null, vol:(p.vols?p.vols[i]:p.size/p.fills), entry:r, not:null}));
+  const maxAbs=Math.max(...rows.map(r=>Math.abs((p.price-r.entry)*(r.vol||0))), 1e-9);
+  const tr=rows.map(r=>{
+    const up=(p.price-r.entry)*(r.vol||0), dpc=(p.price/r.entry-1)*100;
+    const bar=`<span class="pnlbar ${up>=0?'gain':'loss'}" style="width:${Math.max(2,Math.abs(up)/maxAbs*36).toFixed(0)}px"></span>`;
+    return `<tr><td class="l dim">${r.i+1}</td><td class="time">${fmtAge(r.ts)}</td><td class="violet">${fmtVol(r.vol||0)}</td>
+      <td style="color:var(--ink)">${fmtPx(r.entry)}</td><td class="dim">${r.not!=null?"$"+r.not.toFixed(2):"—"}</td>
+      <td class="${pnlClass(up)}">${fmtUsd(up)}${bar}</td>
+      <td class="${dpc>=0?'gain':'loss'}">${(dpc>=0?"+":"")+dpc.toFixed(1)}%</td><td class="l st-live">live</td></tr>`;
   }).join("");
-  const bidList = p.bids && p.bids.length ? p.bids : (p.bid!=null ? [{price:p.bid, vol:null}] : []);
+  const bidList = pends.length ? pends.map(b=>({price:b.entry, vol:b.vol, ts:b.ts}))
+    : (p.bids&&p.bids.length ? p.bids.map(b=>({price:b.price, vol:b.vol, ts:null}))
+       : (p.bid!=null?[{price:p.bid, vol:null, ts:null}]:[]));
   const restRows = bidList.map(b=>
-    `<tr class="rest"><td class="l">○</td><td>${b.vol!=null?fmtVol(b.vol):"—"}</td><td>@ ${fmtPx(b.price)}</td><td colspan="3" class="l">resting post-only</td><td></td></tr>`
+    `<tr class="rest"><td class="l">○</td><td>${fmtAge(b.ts)}</td><td>${b.vol!=null?fmtVol(b.vol):"—"}</td><td>@ ${fmtPx(b.price)}</td><td colspan="3" class="l">resting post-only</td><td></td></tr>`
   ).join("");
-  t.innerHTML = `<thead><tr><th class="l">#</th><th>vol</th><th>entry</th><th>now</th><th>uP&L</th><th>stop</th><th class="l">state</th></tr></thead>
-    <tbody>${rows}${restRows}</tbody>
-    <tfoot><tr><td class="l">Σ</td><td class="violet">${p.size}</td><td>ø ${fmtPx(p.avg)}</td><td class="dim">now ${fmtPx(p.price)}</td>
-      <td class="${pnlClass(p.pnl)}">${fmtUsd(p.pnl)}</td><td class="alarm">${((p.stop/p.avg-1)*100).toFixed(1)}%</td><td></td></tr></tfoot>`;
+  const totNot=rows.reduce((a,r)=>a+(r.not||0),0);
+  t.innerHTML = `<thead><tr><th class="l">#</th><th>age</th><th>vol</th><th>entry</th><th>notional</th><th>uP&L</th><th>Δ now</th><th class="l">state</th></tr></thead>
+    <tbody>${tr}${restRows}</tbody>
+    ${p.rungs?`<tfoot><tr><td class="l">Σ</td><td></td><td class="violet">${p.size}</td><td>ø ${fmtPx(p.avg)}</td>
+      <td>${totNot?"$"+totNot.toFixed(2):"—"}</td><td class="${pnlClass(p.pnl)}">${fmtUsd(p.pnl)}</td>
+      <td class="alarm">stop ${p.stop&&p.price?((p.stop/p.price-1)*100).toFixed(1)+"%":"—"}</td><td></td></tr></tfoot>`:""}`;
 }
 function renderPairFeed(p){
   const rows = JOURNAL.filter(j=>j[2]===p.sym+"/USD");
@@ -843,11 +1023,11 @@ async function openDetail(sym){
   await fetchPair(sym);
   renderDetail(PMAP[sym]);
 }
-function renderDetail(p){
-  if(!p) return;
+function renderMast(p){
   const chgCls=(p.chg||0)>=0?"gain":"loss";
   const buyish=p.rungs||p.cardStatus==="BUY";
-  document.getElementById("dhero").innerHTML = `
+  const pnlPct = (p.pnl!=null && p.avg && p.size) ? ` <small>${((p.pnl/(p.avg*p.size))*100).toFixed(1)}%</small>` : "";
+  document.getElementById("dmast").innerHTML = `
     <div class="dsym">${p.sym}<span style="font-size:15px;color:var(--ink-dim)">/USD</span></div>
     <div class="dpx ${p.avg&&p.price>=p.avg?'gain':(p.avg?'loss':'')}">${fmtPx(p.price)}</div>
     <div class="dstat"><span class="k">24h</span><span class="val ${chgCls}">${fmtChg(p.chg)}</span></div>
@@ -855,14 +1035,29 @@ function renderDetail(p){
     ${p.rungs?`
       <div class="dstat"><span class="k">Position</span><span class="val violet">${p.fills}f · ${p.size}</span></div>
       <div class="dstat"><span class="k">Avg entry</span><span class="val">${fmtPx(p.avg)}</span></div>
-      <div class="dstat"><span class="k">uP&amp;L</span><span class="val ${pnlClass(p.pnl||0)}">${fmtUsd(p.pnl)}</span></div>
-      <div class="dstat"><span class="k">Stop</span><span class="val alarm">${fmtPx(p.stop)} <span style="font-size:12px">${p.avg?((p.stop/p.avg-1)*100).toFixed(1):'—'}%</span></span></div>`
+      <div class="dstat"><span class="k">uP&amp;L</span><span class="val ${pnlClass(p.pnl||0)}">${fmtUsd(p.pnl)}${pnlPct}</span></div>
+      <div class="dstat"><span class="k">Stop</span><span class="val alarm">${fmtPx(p.stop)} <small>${p.price?((p.stop/p.price-1)*100).toFixed(1)+"%":"—"}</small></span></div>`
     :`<div class="dstat"><span class="k">52w high</span><span class="val dim">${fmtPx(p.hi)}</span></div>`}
     <div class="dstat"><span class="k">Above 52w low</span><span class="val gain">${p.pctLow!=null?'+'+p.pctLow+'%':'—'}</span></div>`;
-  document.getElementById("chartrange").textContent = `${fmtPx(p.lo)} — ${fmtPx(p.hi)}`;
-  document.getElementById("tradezonecard").style.display = p.rungs ? "" : "none";
-  bigChart(p); zoneChart(p); renderThesis(p); renderLedger(p); renderPairFeed(p);
 }
+function renderDetail(p){
+  if(!p) return;
+  renderMast(p);
+  // don't rebuild the chart under the cursor — it would kill the crosshair mid-read
+  const plotEl=document.getElementById("dplot");
+  if(!plotEl.matches(":hover")){ tradeChart(p); ctxChart(p); }
+  document.getElementById("dwinlab").textContent = `· last ${TW>=365?"52 weeks":TW+" days"} · daily ${TW>220?"closes":"candles"} + volume`;
+  riskCard(p); renderThesis(p); renderLedger(p); renderPairFeed(p);
+}
+document.querySelectorAll("#winsel button").forEach(b=>{
+  b.addEventListener("click", ()=>{
+    document.querySelectorAll("#winsel button").forEach(x=>x.classList.toggle("on",x===b));
+    TW=+b.dataset.w;
+    const p=PMAP[curSym];
+    if(p){ tradeChart(p); ctxChart(p);
+      document.getElementById("dwinlab").textContent = `· last ${TW>=365?"52 weeks":TW+" days"} · daily ${TW>220?"closes":"candles"} + volume`; }
+  });
+});
 
 /* ── spec view renderers ───────────────────────────────────────────────── */
 function renderSpec(){
@@ -1027,9 +1222,12 @@ function renderRegime(r){
 
 /* ── data layer: poll /api/state, fetch /api/pair on demand ──────────────── */
 async function fetchPair(sym){
-  if(CLOSES[sym]) return;
+  // full payload (candles + real order rows), refreshed at most every 15s
+  if(PFETCHED[sym] && Date.now()-PFETCHED[sym]<15000) return;
   try{ const r=await fetch("/api/pair/"+encodeURIComponent(sym),{cache:"no-store"});
-    if(!r.ok) return; const d=await r.json(); CLOSES[sym]=d.closes||[]; START_TS[sym]=d.start_ts||0;
+    if(!r.ok) return; const d=await r.json();
+    PDATA[sym]=d; CLOSES[sym]=d.closes||[]; START_TS[sym]=d.start_ts||0;
+    PFETCHED[sym]=Date.now();
   }catch(e){}
 }
 async function fetchState(){
@@ -1042,9 +1240,13 @@ async function fetchState(){
     const onBook=document.querySelector('#fieldmode button.on')?.dataset.fm==='book';
     onBook ? renderBook() : renderField();
     renderJournal();
-    if(document.getElementById("view-detail").classList.contains("active")) renderDetail(PMAP[curSym]);
+    if(document.getElementById("view-detail").classList.contains("active"))
+      fetchPair(curSym).then(()=>{ if(document.getElementById("view-detail").classList.contains("active")) renderDetail(PMAP[curSym]); });
     if(!SPEC_DONE){ renderSpec(); SPEC_DONE=true; }
     if(!HASH_DONE && location.hash){ const m=location.hash.match(/pair=([A-Za-z]+)/);
+      const w=location.hash.match(/win=(\d+)/);
+      if(w && [30,90,180,365].includes(+w[1])){ TW=+w[1];
+        document.querySelectorAll("#winsel button").forEach(x=>x.classList.toggle("on",+x.dataset.w===TW)); }
       if(m && PMAP[m[1].toUpperCase()]){ HASH_DONE=true; openDetail(m[1].toUpperCase()); } }
     const le=document.getElementById("liveerr"); if(le) le.style.display="none";
   }catch(e){ const le=document.getElementById("liveerr"); if(le) le.style.display=""; }

@@ -367,12 +367,28 @@ def build_pair(sym_display):
         return None
     conn = _ro_conn()
     try:
-        tss, closes = _daily_closes(conn, ws, 365)
+        # full daily OHLCV (candles + volume), newest-last; includes the forming bar
+        rows = conn.execute(
+            "SELECT ts,o,h,l,c,v FROM candles WHERE pair=? AND interval=1440 "
+            "ORDER BY ts DESC LIMIT 366", (ws,)).fetchall()[::-1]
+        days = [[r[0], round(r[1], 6), round(r[2], 6), round(r[3], 6),
+                 round(r[4], 6), round(r[5], 4)] for r in rows]
+        fills, pendings = [], []
+        for (oid, ts, entry, stop, vol, lev, notional, margin,
+             score, req, status) in conn.execute(
+                "SELECT id,ts,entry,stop,volume,leverage,notional,margin,"
+                "score,required,status FROM orders WHERE symbol=? "
+                "AND status IN ('open','pending') ORDER BY id", (ws,)):
+            row = {"id": oid, "ts": ts, "entry": entry, "stop": stop,
+                   "vol": vol, "lev": lev, "notional": notional,
+                   "margin": margin, "score": score, "req": req}
+            (fills if status == "open" else pendings).append(row)
     finally:
         conn.close()
-    if not closes:
+    if not days:
         return {"closes": [], "start_ts": None}
-    return {"closes": [round(c, 6) for c in closes], "start_ts": tss[0]}
+    return {"closes": [d[4] for d in days], "start_ts": days[0][0],
+            "days": days, "fills": fills, "pendings": pendings}
 
 
 # ── HTTP handler ─────────────────────────────────────────────────────────────
