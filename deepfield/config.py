@@ -44,14 +44,13 @@ PAIRS = [
     # from Kraken AssetPairs; each margin-enabled @ 5x, validated via --exec-probe.
     # NOT in SEED_PAIRS (5x pairs eat 2x the margin/notional — trade on confirmed BUYs
     # only, no auto-seeded chains). PAXG is a gold-backed token (tracks spot gold, not
-    # a crypto cycle) — kept per "all" but flagged.
+    # a crypto cycle) — added then PULLED by operator 2026-07-13 (gold, not a cycle).
     # DROPPED — no :BTNL margin book on this account (EQuery:Unknown asset pair on the
     # validate probe, despite AssetPairs listing leverage_buy): BNB, FARTCOIN, TAO,
     # XAUT, XMR. Also HYPE: validates, but only ~25 weekly candles (2024 listing) — too
     # young for the weekly thesis, sits permanently NA, and tripped the parity gate.
     {"rest": "CRVUSD",   "wsname": "CRV/USD",  "ws": "CRV/USD",  "display": "CRV",  "ordermin": 20,      "costmin": 0.5},
     {"rest": "HBARUSD",  "wsname": "HBAR/USD", "ws": "HBAR/USD", "display": "HBAR", "ordermin": 55,      "costmin": 0.5},
-    {"rest": "PAXGUSD",  "wsname": "PAXG/USD", "ws": "PAXG/USD", "display": "PAXG", "ordermin": 0.001,   "costmin": 0.5},
     {"rest": "PEPEUSD",  "wsname": "PEPE/USD", "ws": "PEPE/USD", "display": "PEPE", "ordermin": 1500000, "costmin": 0.5},
     {"rest": "SHIBUSD",  "wsname": "SHIB/USD", "ws": "SHIB/USD", "display": "SHIB", "ordermin": 770000,  "costmin": 0.5},
     {"rest": "TRXUSD",   "wsname": "TRX/USD",  "ws": "TRX/USD",  "display": "TRX",  "ordermin": 16,      "costmin": 0.5},
@@ -266,8 +265,8 @@ PER_PAIR_LEVERAGE = {
     "ADA/USD": 10, "LINK/USD": 10, "SUI/USD": 10, "LTC/USD": 10, "AVAX/USD": 10,
     "AAVE/USD": 5, "UNI/USD": 5, "DOT/USD": 5, "BCH/USD": 5, "ALGO/USD": 2,
     # 5x expansion (each is Kraken's per-pair max — the hard ceiling, never lower)
-    "CRV/USD": 5, "HBAR/USD": 5, "PAXG/USD": 5,
-    "PEPE/USD": 5, "SHIB/USD": 5, "TRX/USD": 5, "ZEC/USD": 5,
+    "CRV/USD": 5, "HBAR/USD": 5, "PEPE/USD": 5,
+    "SHIB/USD": 5, "TRX/USD": 5, "ZEC/USD": 5,
 }
 # Leveraged orders MUST use the :BTNL margin-book name (Non-ECP rejects spot name).
 MARGIN_PAIR = {
@@ -277,8 +276,8 @@ MARGIN_PAIR = {
     "AVAX/USD": "AVAXUSD:BTNL", "AAVE/USD": "AAVEUSD:BTNL", "UNI/USD": "UNIUSD:BTNL",
     "DOT/USD": "DOTUSD:BTNL", "BCH/USD": "BCHUSD:BTNL", "ALGO/USD": "ALGOUSD:BTNL",
     # 5x expansion — altname:BTNL, all validated by --exec-probe (real Kraken order-check)
-    "CRV/USD": "CRVUSD:BTNL", "HBAR/USD": "HBARUSD:BTNL", "PAXG/USD": "PAXGUSD:BTNL",
-    "PEPE/USD": "PEPEUSD:BTNL", "SHIB/USD": "SHIBUSD:BTNL",
+    "CRV/USD": "CRVUSD:BTNL", "HBAR/USD": "HBARUSD:BTNL", "PEPE/USD": "PEPEUSD:BTNL",
+    "SHIB/USD": "SHIBUSD:BTNL",
     "TRX/USD": "TRXUSD:BTNL", "ZEC/USD": "ZECUSD:BTNL",
 }
 # :BTNL margin-book PRICE precision (differs from spot — too many decimals rejects).
@@ -289,6 +288,6 @@ MARGIN_TICK_DECIMALS = {
     # 5x expansion — :BTNL margin-book precision, confirmed by --exec-probe. CRV (4)
     # and SHIB (8) are LESS than their spot pair_decimals (5 and 9) — the margin book
     # is coarser, exactly the "differs from spot" case; probe rejected the spot value.
-    "CRV/USD": 4, "HBAR/USD": 5, "PAXG/USD": 2,
-    "PEPE/USD": 9, "SHIB/USD": 8, "TRX/USD": 6, "ZEC/USD": 2,
+    "CRV/USD": 4, "HBAR/USD": 5, "PEPE/USD": 9,
+    "SHIB/USD": 8, "TRX/USD": 6, "ZEC/USD": 2,
 }
