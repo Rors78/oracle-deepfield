@@ -24,6 +24,7 @@ genuinely warrant scrutiny (sizing/rounding, the pending->open->stopped machine)
 import os
 import json
 import math
+import time
 import types
 import logging
 import datetime
@@ -32,6 +33,7 @@ from . import store
 from . import broker
 from . import config
 from . import engine
+from . import rest_client
 
 log = logging.getLogger("deepfield.exec")
 
@@ -73,6 +75,17 @@ def _age_secs(ts_iso):
 
 def _entry_ttl_expired(ts_iso):
     return config.ENTRY_TTL_SECS > 0 and _age_secs(ts_iso) > config.ENTRY_TTL_SECS
+
+
+# symbol -> public REST pair id, for the live-price clamp on ladder rungs.
+_REST_PAIR = {p["ws"]: p["rest"] for p in config.PAIRS}
+
+# Re-ladder backoff (module-level: an Executor is constructed per poll cycle, so
+# per-instance state would reset every ~15s). A symbol whose re-place attempt did
+# not produce a resting bid (ladder floor, own-level, regime gate, reject) is not
+# retried for this long — keeps a chain holding at its floor from spamming.
+_RELADDER_RETRY_SECS = 600
+_reladder_next = {}     # symbol -> time.monotonic() of next allowed attempt
 
 
 class Executor:
@@ -473,8 +486,10 @@ class Executor:
                                   (f"entry {status}, unfilled", oid))
                 self.conn.commit()
                 log.info("ENTRY %s: %s unfilled — no position", sym, status)
-        # Runtime safety net: re-protect any 'open' position whose stop-rest failed.
+        # Runtime safety nets: re-protect any 'open' position whose stop-rest failed,
+        # then re-place the next ladder rung for any chain whose resting bid died.
         self._reprotect_naked_open()
+        self._ensure_ladder_rungs()
 
     def _reprotect_naked_open(self):
         """Runtime safety net (gap B): a fill whose protective stop-rest FAILED
@@ -510,6 +525,63 @@ class Executor:
                 self._rest_stop(sym, mpair, stop, vol, lev, oid, paper=False)
         except Exception:
             log.exception("reprotect pass failed (poll_fills unaffected)")
+
+    def _live_last(self, symbol):
+        """Last trade price from the public REST ticker, or None. Used only to keep
+        a post-only rung below the live market — never for sizing or stops."""
+        rp = _REST_PAIR.get(symbol)
+        if not rp:
+            return None
+        try:
+            res = rest_client.fetch_ticker([rp])
+            if not res:
+                return None
+            t = next(iter(res.values()), None)
+            return float(t["c"][0]) if t else None
+        except Exception:
+            log.exception("LADDER %s: live ticker fetch failed (rung falls back to "
+                          "fill-anchored price)", symbol)
+            return None
+
+    def _ensure_ladder_rungs(self):
+        """Runtime safety net (2026-07-12 offline-gap incident): the fill→rung
+        accumulation chain dies SILENTLY when a resting rung goes terminal unfilled —
+        a post-only kill on a gap-down (Kraken cancels the crossing maker, reason
+        'Post only order') or the entry-TTL sweep — because nothing re-placed it; the
+        pair then sat with open positions and ZERO resting bid until its next daily
+        close (a 12h offline gap left every confirmed-BUY pair bidless in a falling
+        market). Each poll cycle: any LIVE symbol with open rows but no pending entry
+        gets its next rung re-placed, anchored one step below the LOWEST open fill
+        (the chain's natural continuation; the live clamp in _place_ladder_rung keeps
+        the maker resting after a further gap-down). Every rung guard still applies
+        (HALT, regime gate, stop floor, own-level-once, rails). A symbol whose attempt
+        doesn't rest a bid backs off _RELADDER_RETRY_SECS so a chain holding at its
+        ladder floor stays quiet. No API call when every chain has a resting bid.
+        Isolated — never raises into poll_fills."""
+        if self.mode != "live" or not config.LADDER_CONTINUOUS:
+            return
+        try:
+            rows = self.conn.execute(
+                "SELECT symbol, margin_pair, entry, stop, leverage, score, required "
+                "FROM orders WHERE status='open' AND mode='live' AND entry IS NOT NULL "
+                "ORDER BY symbol, entry ASC").fetchall()
+            lowest = {}
+            for sym, mpair, entry, stop, lev, score, required in rows:
+                lowest.setdefault(sym, (mpair, entry, stop, lev, score, required))
+            now = time.monotonic()
+            for sym, (mpair, entry, stop, lev, score, required) in lowest.items():
+                if store.has_pending_entry(self.conn, sym):
+                    continue
+                if now < _reladder_next.get(sym, 0.0):
+                    continue
+                _reladder_next[sym] = now + _RELADDER_RETRY_SECS
+                log.info("RELADDER %s: open chain with no resting bid — re-placing "
+                         "next rung below lowest open fill %s", sym, entry)
+                self._journal("order", sym, f"reladder: chain had no resting bid — "
+                                            f"re-placing rung below lowest fill {entry:g}")
+                self._place_ladder_rung(sym, mpair, lev, stop, entry, score, required)
+        except Exception:
+            log.exception("reladder pass failed (poll_fills unaffected)")
 
     def _place_ladder_rung(self, symbol, margin_pair, leverage, stop, filled_price,
                            score=None, required=None):
@@ -548,6 +620,21 @@ class Executor:
                 return                                  # skip if a bid already rests (best-effort; see docstring)
             tick = config.MARGIN_TICK_DECIMALS.get(symbol, 2)
             target = _round_price(filled_price * (1 - config.LADDER_STEP_PCT), tick)
+            # Post-only survivability (2026-07-12 offline-gap incident): target is
+            # anchored to the FILL, which can be hours stale (offline gap, slow poll).
+            # If price has since fallen to/below it, the maker bid crosses the book and
+            # Kraken cancels it (reason 'Post only order') — silently killing the
+            # accumulation chain. Clamp the rung below the LIVE last (same slip idiom
+            # as _place_entry) so it always rests. Ticker unavailable -> keep the
+            # fill-anchored target (old behavior); _ensure_ladder_rungs retries later.
+            live = self._live_last(symbol)
+            if live and live > 0:
+                lid = _round_price(live * (1 - config.POST_ONLY_SLIP_PCT), tick)
+                if target > lid:
+                    log.info("LADDER %s: fill-anchored rung %s at/above live %s — "
+                             "clamped to %s so the post-only maker rests",
+                             symbol, target, live, lid)
+                    target = lid
             if stop and target <= stop * (1 + config.LADDER_STOP_BUFFER):
                 log.info("LADDER %s: next rung @ %s would hit stop %s — ladder floor reached, holding",
                          symbol, target, stop)
@@ -589,7 +676,8 @@ class Executor:
             res = broker.private("/0/private/AddOrder", params, idempotent=False)
             if not (res and res.get("txid")):
                 log.warning("LADDER %s: next rung AddOrder returned no txid (post-only reject on a "
-                            "gap-down, or transient) — ladder pauses, resumes on next fill/close", symbol)
+                            "gap-down, or transient) — reladder safety net retries in %ds",
+                            symbol, _RELADDER_RETRY_SECS)
                 return
             row = {
                 "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),

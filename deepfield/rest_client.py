@@ -64,6 +64,13 @@ def fetch_assetpairs(rest_pairs):
     return fetch_json(f"{API}/AssetPairs?pair={arg}")
 
 
+def fetch_ticker(rest_pairs):
+    """One comma-joined Ticker call. Returns Kraken's result dict (keyed by
+    canonical pair id) or None. Each entry's c[0] is the last trade price."""
+    arg = urllib.parse.quote(",".join(rest_pairs))
+    return fetch_json(f"{API}/Ticker?pair={arg}")
+
+
 def fetch_ohlc(rest_pair, interval, since=None):
     """Fetch OHLC candles for one pair/interval. Returns list of rows
     [time, open, high, low, close, vwap, volume, count] or None.
