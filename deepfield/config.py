@@ -180,6 +180,39 @@ LADDER_STEP_PCT = 0.01              # next rung this far below the fill (1% ~= 8
 LADDER_STOP_BUFFER = 0.0            # extra margin ABOVE the stop below which no rung is placed
 MARGIN_CAP_PCT = 0.90               # a single position may post at most this frac of free margin
 
+# Rung/entry size multiplier (operator 2026-07-13 "bigger rungs, stack as much as
+# possible"): every min-mode order — confirmed-BUY entries, ladder rungs, seeds —
+# is sized at SIZE_MULT x the min fill; conviction (2x/3x) stacks ON TOP, so a 3x-
+# conviction rung at SIZE_MULT=3 is 9x min (~$30-45 notional — still under the
+# conviction-scaled EXEC_MAX_ORDER_NOTIONAL ceiling). Fail-safe: an unparseable
+# env override runs at 1x (min), never at a surprise size.
+try:
+    SIZE_MULT = max(1.0, float(os.environ.get("DEEPFIELD_SIZE_MULT", "3")))
+except ValueError:
+    _log.error("DEEPFIELD_SIZE_MULT=%r is not a number — running at 1x (min size)",
+               os.environ.get("DEEPFIELD_SIZE_MULT"))
+    SIZE_MULT = 1.0
+
+# Seeded chains (operator 2026-07-13 "open the ten 10:1 pairs"): every pair below
+# keeps a ladder chain WORKING at all times — a pair with no open rows and no
+# resting bid gets a post-only starter bid just below live, NOT gated on a
+# confirmed BUY (the backtest showed the signal is beta; the ladder is the
+# strategy). The 5x/2x pairs (AAVE/UNI/DOT/BCH/ALGO) are deliberately excluded —
+# they eat 2-5x the margin per dollar of notional. Regime gate + HALT + all rung
+# guards still apply. Empty tuple disables seeding.
+SEED_PAIRS = ("BTC/USD", "ETH/USD", "XRP/USD", "SOL/USD", "SUI/USD",
+              "DOGE/USD", "LTC/USD", "LINK/USD", "ADA/USD", "AVAX/USD")
+
+# Equity take-profit (operator 2026-07-13 "t/p out at +20%, then go again"): when
+# live equity >= tp_baseline * (1 + TP_PCT), flatten the WHOLE book — cancel every
+# resting bid and protective stop, market-close each pair's live open volume —
+# then reset the baseline to post-flatten equity and let the seeder restack: a
+# compounding stack->harvest->restack cycle. The closes are EVENT-TRIGGERED
+# market orders sized to Kraken's OpenPositions volume at that instant — never a
+# resting sell, so the no-resting-sell / net-short rule below stands intact.
+TP_ENABLED = True
+TP_PCT = 0.20
+
 # FORK A regime gate: accumulate in weakness, not strength. When True, new confirmed
 # entries AND ladder rungs are placed ONLY when the BTC regime is not confirmed BULL
 # ("stop adding once BULL" — buy the fall/turn, not the strength). FAILS OPEN: an
@@ -188,9 +221,10 @@ MARGIN_CAP_PCT = 0.90               # a single position may post at most this fr
 # stance). Only the unambiguous BULL state pauses accumulation. Set False to disable.
 ACCUMULATE_ONLY_IN_BEAR = True
 NO_ACCUMULATE_REGIMES = ("BULL",)   # regimes that pause new entries/rungs when the gate is on
-# NOTE: the strategy is LONG ONLY. There is intentionally NO automated sell-side / take-
-# profit ("harvest") — a resting sell can net short (Kraken spot-margin has no reduce_only).
-# The only sells are protective STOPS (sized to close a long). Do not add resting sells.
+# NOTE: the strategy is LONG ONLY — a resting sell can net short (Kraken spot-margin has
+# no reduce_only). The only sells are protective STOPS (sized to close a long) and the
+# TP_ENABLED equity flatten above (event-triggered market closes sized to live open
+# volume at that instant, operator-ordered 2026-07-13). Do NOT add resting sells.
 
 # Risk rails (deterministic hard limits, from GoldenEye — NOT learners).
 # OPERATOR OVERRIDE: automatic circuit breakers OFF ("no circuit breakers, no

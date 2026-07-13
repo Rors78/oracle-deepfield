@@ -1073,3 +1073,190 @@ def test_reprotect_naked_open_rests_missing_stop(tmp_path, monkeypatch):
     assert stop_txid == "ONEWSTOP"                             # a stop was rested via AddOrder
     assert any(kind == "private" for kind, _ in sent)
     conn.close()
+
+
+# ── 2026-07-13 operator stack: SIZE_MULT · seeded chains · equity take-profit ─
+
+def test_size_mult_scales_min_and_conviction(tmp_path, monkeypatch):
+    """SIZE_MULT multiplies the min fill; conviction stacks ON TOP of it, and the
+    two multipliers are reported separately (the notional ceiling scales only by
+    conviction, so SIZE_MULT never widens the corrupt-row guard)."""
+    monkeypatch.setattr(config, "SIZE_MULT", 3.0)
+    conn = _conn(tmp_path, ordermin=0.1, costmin=0.5, lot_dec=8)
+    e = _exec(conn)
+    flat = e.size(SYM, entry=100.0, stop=90.0, leverage=10, equity=1000.0)
+    assert flat["volume"] == pytest.approx(0.3)                # 3x the 0.1 min
+    assert flat["size_mult"] == 3.0 and flat["conviction_mult"] == 1.0
+    strong = Card(); strong.score, strong.required = 7, 5      # 3x conviction
+    s = e.size(SYM, entry=100.0, stop=90.0, leverage=10, equity=1000.0, card=strong)
+    assert s["volume"] == pytest.approx(0.9)                   # 3x conviction x 3x size
+    assert s["conviction_mult"] == 3.0
+    conn.close()
+
+
+def _wire_seed(monkeypatch, e, sent, live=100.0):
+    monkeypatch.setattr(e, "_live_last", lambda sym: live)
+    monkeypatch.setattr(ex_mod.broker, "trade_balance", lambda: 1000.0)
+    monkeypatch.setattr(ex_mod.broker, "private",
+                        lambda ep, p=None, **kw: (sent.append(p) or {"txid": ["OSEED-1"]}))
+
+
+def test_seed_chains_starts_missing_chain_once(tmp_path, monkeypatch):
+    """A SEED_PAIRS symbol with no open rows and no resting bid gets ONE post-only
+    starter bid just below live; while that bid rests, no second seed fires."""
+    monkeypatch.setattr(config, "SEED_PAIRS", (SYM,))
+    ex_mod._seed_next.clear()
+    conn = _conn(tmp_path)
+    e = _exec(conn, mode="live")
+    sent = []
+    _wire_seed(monkeypatch, e, sent)
+    e._seed_chains()
+    rows = conn.execute("SELECT status, side FROM orders WHERE symbol=?", (SYM,)).fetchall()
+    assert rows == [("pending", "buy")]
+    assert len(sent) == 1 and sent[0]["type"] == "buy" and sent[0]["oflags"] == "post"
+    ex_mod._seed_next.clear()          # defeat the backoff; the bid must gate it alone
+    e._seed_chains()
+    assert len(sent) == 1
+    conn.close()
+
+
+def test_seed_chains_skips_working_chain(tmp_path, monkeypatch):
+    """A pair with an open position already has a chain (reladder keeps it bidding)
+    — the seeder must not stack a second chain on it."""
+    monkeypatch.setattr(config, "SEED_PAIRS", (SYM,))
+    ex_mod._seed_next.clear()
+    conn = _conn(tmp_path)
+    _seed_open(conn, "OSTOP-A", vol=0.1)
+    e = _exec(conn, mode="live")
+    sent = []
+    _wire_seed(monkeypatch, e, sent)
+    e._seed_chains()
+    assert sent == []
+    conn.close()
+
+
+def _wire_tp(monkeypatch, *, equity, positions, open_orders, terminal, sent,
+             addorder_ok=True, cancel_ok=True):
+    """Endpoint-routed broker mock for the T/P flatten path."""
+    monkeypatch.setattr(config, "TP_ENABLED", True)
+    monkeypatch.setattr(ex_mod.broker, "trade_balance", lambda: equity)
+    monkeypatch.setattr(ex_mod.broker, "open_positions", lambda: positions)
+    monkeypatch.setattr(ex_mod.broker, "open_orders", lambda: open_orders)
+    monkeypatch.setattr(ex_mod.broker, "query_orders",
+                        lambda txids: {t: terminal[t] for t in txids if t in terminal})
+    monkeypatch.setattr(ex_mod.broker, "cancel_order",
+                        lambda t: (sent.append(("cancel", t)) or ({} if cancel_ok else None)))
+
+    def fp(ep, p=None, **kw):
+        sent.append((ep, p))
+        if ep.endswith("CancelAll"):
+            return {"count": 1}
+        return {"txid": ["OCLOSE-1"]} if addorder_ok else None
+    monkeypatch.setattr(ex_mod.broker, "private", fp)
+
+
+def test_tp_arms_baseline_on_first_sight(tmp_path, monkeypatch):
+    conn = _conn(tmp_path)
+    sent = []
+    _wire_tp(monkeypatch, equity=100.0, positions={}, open_orders={}, terminal={}, sent=sent)
+    e = _exec(conn, mode="live")
+    assert e._check_take_profit() is False
+    assert float(store.meta_get(conn, "tp_baseline", 0)) == 100.0
+    assert not any(ep.endswith("CancelAll") for ep, _ in sent if isinstance(ep, str))
+    conn.close()
+
+
+def test_tp_below_target_does_nothing(tmp_path, monkeypatch):
+    conn = _conn(tmp_path)
+    store.meta_set(conn, "tp_baseline", 100.0)
+    sent = []
+    _wire_tp(monkeypatch, equity=119.99, positions={}, open_orders={}, terminal={}, sent=sent)
+    e = _exec(conn, mode="live")
+    assert e._check_take_profit() is False
+    assert sent == []
+    assert float(store.meta_get(conn, "tp_baseline", 0)) == 100.0
+    conn.close()
+
+
+def test_tp_trigger_flattens_book_and_resets_baseline(tmp_path, monkeypatch):
+    """+20% hit: bids canceled, stops cleared, ONE market sell sized to Kraken's
+    live volume (never the ledger's), rows closed, baseline re-armed at the new
+    equity — the compounding cycle."""
+    conn = _conn(tmp_path)
+    store.meta_set(conn, "tp_baseline", 100.0)
+    a = _seed_open(conn, "OSTOP-A", vol=0.4)                   # ledger says 0.4
+    b = _seed_pending(conn, "OENTRY-9")
+    sent = []
+    _wire_tp(monkeypatch, equity=120.0,
+             positions={"P": _pos(0.5)},                       # exchange says 0.5 — truth
+             open_orders={},                                   # CancelAll swept everything
+             terminal={"OENTRY-9": {"status": "canceled", "vol_exec": "0"}},
+             sent=sent)
+    e = _exec(conn, mode="live")
+    assert e._check_take_profit() is True
+    assert conn.execute("SELECT status FROM orders WHERE id=?", (b,)).fetchone()[0] == "canceled"
+    assert conn.execute("SELECT status, stop_txid FROM orders WHERE id=?", (a,)).fetchone() \
+        == ("closed", None)
+    closes = [p for ep, p in sent if isinstance(ep, str) and ep.endswith("AddOrder")]
+    assert len(closes) == 1
+    assert closes[0]["type"] == "sell" and closes[0]["ordertype"] == "market"
+    assert closes[0]["volume"] == "0.50000000"                 # LIVE volume, lot-gridded
+    assert closes[0]["pair"] == "XBTUSD:BTNL" and closes[0]["leverage"] == "10"
+    assert float(store.meta_get(conn, "tp_baseline", 0)) == 120.0
+    conn.close()
+
+
+def test_tp_partial_filled_bid_joins_the_close(tmp_path, monkeypatch):
+    """A bid that PARTIALLY filled before the sweep is a real long: promoted, then
+    retired by its pair's close — never stranded as a canceled row with live volume."""
+    conn = _conn(tmp_path)
+    store.meta_set(conn, "tp_baseline", 100.0)
+    b = _seed_pending(conn, "OENTRY-9")
+    sent = []
+    _wire_tp(monkeypatch, equity=125.0,
+             positions={"P": _pos(0.2)},
+             open_orders={},
+             terminal={"OENTRY-9": {"status": "canceled", "vol_exec": "0.2"}},
+             sent=sent)
+    e = _exec(conn, mode="live")
+    assert e._check_take_profit() is True
+    assert conn.execute("SELECT status, volume FROM orders WHERE id=?", (b,)).fetchone() \
+        == ("closed", 0.2)
+    closes = [p for ep, p in sent if isinstance(ep, str) and ep.endswith("AddOrder")]
+    assert len(closes) == 1 and closes[0]["volume"] == "0.20000000"
+    conn.close()
+
+
+def test_tp_exchange_dark_aborts_untouched(tmp_path, monkeypatch):
+    """OpenOrders unavailable after the sweep: record NOTHING, keep the baseline,
+    re-trigger next poll — never reconcile blind."""
+    conn = _conn(tmp_path)
+    store.meta_set(conn, "tp_baseline", 100.0)
+    a = _seed_open(conn, "OSTOP-A", vol=0.4)
+    sent = []
+    _wire_tp(monkeypatch, equity=120.0, positions={"P": _pos(0.4)},
+             open_orders=None, terminal={}, sent=sent)
+    e = _exec(conn, mode="live")
+    assert e._check_take_profit() is False
+    assert conn.execute("SELECT status, stop_txid FROM orders WHERE id=?", (a,)).fetchone() \
+        == ("open", "OSTOP-A")
+    assert float(store.meta_get(conn, "tp_baseline", 0)) == 100.0
+    conn.close()
+
+
+def test_tp_failed_close_keeps_baseline_and_reprotectable_rows(tmp_path, monkeypatch):
+    """A failed market close leaves its rows OPEN with stop_txid NULL (reprotect
+    re-arms them) and the baseline UNRESET — the trigger re-fires and retries;
+    resetting it would strand the pair until +20% over the NEW base."""
+    conn = _conn(tmp_path)
+    store.meta_set(conn, "tp_baseline", 100.0)
+    a = _seed_open(conn, "OSTOP-A", vol=0.4)
+    sent = []
+    _wire_tp(monkeypatch, equity=120.0, positions={"P": _pos(0.4)},
+             open_orders={}, terminal={}, sent=sent, addorder_ok=False)
+    e = _exec(conn, mode="live")
+    assert e._check_take_profit() is True                      # a pass ran (skip cycle)
+    assert conn.execute("SELECT status, stop_txid FROM orders WHERE id=?", (a,)).fetchone() \
+        == ("open", None)
+    assert float(store.meta_get(conn, "tp_baseline", 0)) == 100.0
+    conn.close()

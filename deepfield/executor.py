@@ -86,6 +86,7 @@ _REST_PAIR = {p["ws"]: p["rest"] for p in config.PAIRS}
 # retried for this long — keeps a chain holding at its floor from spamming.
 _RELADDER_RETRY_SECS = 600
 _reladder_next = {}     # symbol -> time.monotonic() of next allowed attempt
+_seed_next = {}         # symbol -> time.monotonic() of next allowed seed attempt
 
 
 class Executor:
@@ -227,6 +228,16 @@ class Executor:
                         volume, mult = cvol, cmult
                 except Exception:
                     log.warning("size %s: conviction tranche failed — flat min", symbol)
+            # Operator size multiplier (2026-07-13): scale the (conviction-weighted)
+            # min fill by SIZE_MULT, rounded DOWN to the lot grid but never below the
+            # min-fill floor. Kept OUT of conviction_mult so the conviction-scaled
+            # notional ceiling in the placement paths keeps its own meaning.
+            smult = max(1.0, float(getattr(config, "SIZE_MULT", 1.0) or 1.0))
+            if smult > 1.0 and volume > 0:
+                scaled = volume * smult
+                if lot_dec is not None:
+                    scaled = _round_down(scaled, lot_dec)
+                volume = max(volume, scaled)
             if volume <= 0:
                 return None
             notional = volume * entry
@@ -234,7 +245,7 @@ class Executor:
                 "volume": volume, "notional": notional, "margin": notional / leverage,
                 "risk_usd": 0.0, "actual_risk": volume * max(0.0, stop_dist),
                 "capped": False, "floored_to_min": mult == 1.0, "size_mode": "min",
-                "conviction_mult": mult,
+                "conviction_mult": mult, "size_mult": smult,
             }
 
         # "risk" mode
@@ -423,6 +434,8 @@ class Executor:
         LIVE only; paper simulates instant fill at placement."""
         if self.mode != "live":
             return
+        if self._check_take_profit():
+            return          # book was just flattened — nothing to promote or ladder this cycle
         rows = self.conn.execute(
             "SELECT id, symbol, margin_pair, volume, leverage, stop, txid, ts, entry, score, required "
             "FROM orders WHERE status='pending'").fetchall()
@@ -487,9 +500,11 @@ class Executor:
                 self.conn.commit()
                 log.info("ENTRY %s: %s unfilled — no position", sym, status)
         # Runtime safety nets: re-protect any 'open' position whose stop-rest failed,
-        # then re-place the next ladder rung for any chain whose resting bid died.
+        # re-place the next ladder rung for any chain whose resting bid died, then
+        # seed a starter chain on any SEED_PAIRS symbol with nothing working.
         self._reprotect_naked_open()
         self._ensure_ladder_rungs()
+        self._seed_chains()
 
     def _reprotect_naked_open(self):
         """Runtime safety net (gap B): a fill whose protective stop-rest FAILED
@@ -582,6 +597,247 @@ class Executor:
                 self._place_ladder_rung(sym, mpair, lev, stop, entry, score, required)
         except Exception:
             log.exception("reladder pass failed (poll_fills unaffected)")
+
+    def _seed_chains(self):
+        """Operator all-pairs directive (2026-07-13): every config.SEED_PAIRS symbol
+        keeps a ladder chain WORKING at all times. A pair with NO open rows and NO
+        resting bid gets a starter chain: a post-only bid just below live, through
+        the exact _place_entry path a confirmed BUY uses (regime gate, HALT via
+        rails_ok, min x SIZE_MULT sizing, pct-clamped stop — card=None so no
+        conviction). This is also what RESTACKS the book after a T/P flatten.
+        Backs off _RELADDER_RETRY_SECS per symbol so a rejecting pair stays quiet.
+        Isolated — never raises into poll_fills."""
+        if self.mode != "live" or not getattr(config, "SEED_PAIRS", ()):
+            return
+        try:
+            now = time.monotonic()
+            for sym in config.SEED_PAIRS:
+                if now < _seed_next.get(sym, 0.0):
+                    continue
+                if store.has_pending_entry(self.conn, sym):
+                    continue
+                if self.conn.execute("SELECT 1 FROM orders WHERE symbol=? AND status='open' LIMIT 1",
+                                     (sym,)).fetchone():
+                    continue
+                _seed_next[sym] = now + _RELADDER_RETRY_SECS
+                live = self._live_last(sym)
+                if not live or live <= 0:
+                    continue
+                log.info("SEED %s: no chain working — starting ladder with a post-only "
+                         "bid below live %s", sym, live)
+                self._journal("order", sym, f"seed: starting chain below live {live:g}")
+                self.place_entry(sym, live, card=None)
+        except Exception:
+            log.exception("seed pass failed (poll_fills unaffected)")
+
+    # ── equity take-profit (operator 2026-07-13) ─────────────────────────────
+
+    def _check_take_profit(self):
+        """Stack, then flatten EVERYTHING at +TP_PCT over the armed baseline, then
+        restack from the new base. The trigger rides the existing poll cycle; the
+        closes are immediate market orders sized to Kraken's LIVE open volume at
+        that instant — never a resting sell, so the no-net-short rule stands.
+        Baseline lives in meta['tp_baseline']: armed at first sight of live equity,
+        reset to post-flatten equity after each cycle (compounding). Returns True
+        when a flatten ran (caller skips the rest of its cycle). Failure shape: an
+        unavailable exchange read aborts BEFORE anything is touched and the trigger
+        simply re-fires next poll; a partial flatten leaves unclosed rows protected
+        (stops intact) or reprotectable (stop_txid NULL -> _reprotect_naked_open).
+        Isolated — never raises into poll_fills."""
+        if self.mode != "live" or not getattr(config, "TP_ENABLED", False):
+            return False
+        try:
+            eq = self.portfolio_value()
+            if eq is None:
+                return False
+            try:
+                baseline = float(store.meta_get(self.conn, "tp_baseline", 0) or 0)
+            except (TypeError, ValueError):
+                baseline = 0.0
+            if baseline <= 0:
+                store.meta_set(self.conn, "tp_baseline", eq)
+                log.warning("T/P ARMED: baseline $%.2f — flatten-everything target $%.2f (+%.0f%%)",
+                            eq, eq * (1 + config.TP_PCT), config.TP_PCT * 100)
+                self._journal("tp", "*", f"T/P armed: baseline ${eq:.2f}, "
+                                         f"target ${eq * (1 + config.TP_PCT):.2f}")
+                return False
+            target = baseline * (1 + config.TP_PCT)
+            if eq < target:
+                return False
+            log.warning("T/P HIT: equity $%.2f >= target $%.2f (baseline $%.2f) — "
+                        "FLATTENING THE BOOK", eq, target, baseline)
+            self._journal("tp", "*", f"T/P HIT: ${eq:.2f} >= ${target:.2f} — flattening")
+            ran, complete = self._flatten_all()
+            if not ran:
+                return False        # exchange state unavailable — re-trigger next poll
+            if not complete:
+                # Baseline NOT reset: while equity holds over target the trigger
+                # re-fires every poll and the flatten retries just what's left.
+                # (Resetting here would strand the unclosed pairs until +TP_PCT
+                # over the NEW baseline — they'd never flatten.)
+                log.warning("T/P: flatten INCOMPLETE — baseline kept, retrying next poll")
+                self._journal("tp", "*", "flatten incomplete — retrying next poll")
+                return True
+            new_eq = self.portfolio_value() or eq
+            store.meta_set(self.conn, "tp_baseline", new_eq)
+            log.warning("T/P CYCLE COMPLETE: banked vs baseline $%.2f -> new baseline $%.2f — "
+                        "seeder restacks next cycle", baseline, new_eq)
+            self._journal("tp", "*", f"cycle complete: new baseline ${new_eq:.2f} — restacking")
+            return True
+        except Exception:
+            log.exception("take-profit check failed (poll_fills continues)")
+            return False
+
+    def _flatten_all(self):
+        """Close the whole book NOW. Safety rule (verify_open_stops' rule): act only
+        on DEFINITE exchange state, and never let a sell exceed live long volume.
+        Sequence:
+          1. OpenOrders (None -> abort untouched): cancel every resting entry bid,
+             then every resting protective stop. A stop-cancel FAILURE marks its
+             pair blocked (still protected, skipped this pass); a stop already off
+             the book just gets its ledger reference cleared. Cleared/canceled
+             stop_txids are NULLed + committed immediately, so a crash mid-flatten
+             leaves rows that _reprotect_naked_open re-arms — protected, never naked.
+          2. OpenPositions FRESH (after stop-cancels — with no sells resting, per-
+             pair long volume can no longer shrink): market-close each unblocked
+             pair's volume, rounded DOWN to the lot grid (an error leaves dust-LONG,
+             never short). Sized from the EXCHANGE's volume, not the ledger's.
+          3. Rows of a successfully-closed pair -> status='closed'.
+        Returns (ran, complete): ran=False means exchange state was unavailable and
+        nothing was recorded (retry next poll; a CancelAll may already have landed,
+        in which case the stops-gone window lasts until a pass completes —
+        tolerable seconds-to-minutes at +20% equity, and every later pass
+        re-converges from definite state). complete=False means at least one pair
+        is still open (blocked or a failed close) — the CALLER MUST KEEP THE
+        BASELINE so the trigger re-fires and this retries what's left."""
+        # 1) ONE CancelAll sweeps every resting order — bids and stops — instead of
+        # ~2N serial CancelOrder calls grinding the private-API rate limiter. Best-
+        # effort: the reconcile below works from DEFINITE post-sweep state either way.
+        broker.private("/0/private/CancelAll", {}, idempotent=False)
+        oo = broker.open_orders()
+        if oo is None:
+            log.warning("T/P: OpenOrders unavailable after CancelAll — cannot reconcile; "
+                        "retry next poll")
+            return False, False
+        by_sym = {}
+        rows = self.conn.execute(
+            "SELECT id, symbol, margin_pair, leverage, stop_txid FROM orders "
+            "WHERE status='open' ORDER BY symbol, id").fetchall()
+        for oid, sym, mpair, lev, stop_txid in rows:
+            d = by_sym.setdefault(sym, {"mpair": mpair, "lev": lev, "rows": [],
+                                        "stops": set(), "blocked": False})
+            d["rows"].append(oid)
+            if stop_txid:
+                d["stops"].add(stop_txid)
+        # 1a) entry bids: resolve each to its TERMINAL state (batch query). A bid
+        # that PARTIALLY filled before the sweep is a real long — promote it so its
+        # pair's close (sized from live volume) retires it with the rest; leave
+        # anything uncertain 'pending' and block its pair (poll_fills resolves it,
+        # the trigger re-fires).
+        pend = self.conn.execute(
+            "SELECT id, symbol, margin_pair, leverage, txid FROM orders "
+            "WHERE status='pending'").fetchall()
+        terminal = broker.query_orders([t for (_, _, _, _, t) in pend if t])
+        for oid, sym, mpair, lev, txid in pend:
+            o = terminal.get(txid)
+            status = (o or {}).get("status")
+            if o is None or status not in ("closed", "canceled", "expired"):
+                log.warning("T/P %s: bid %s not confirmed terminal — leaving pending, "
+                            "blocking its pair this pass", sym, txid)
+                by_sym.setdefault(sym, {"mpair": mpair, "lev": lev, "rows": [],
+                                        "stops": set(), "blocked": False})["blocked"] = True
+                continue
+            try:
+                vol_exec = float(o.get("vol_exec", 0) or 0)
+            except (TypeError, ValueError):
+                vol_exec = 0.0
+            if vol_exec > 0:
+                self.conn.execute("UPDATE orders SET status='open', volume=? WHERE id=?",
+                                  (vol_exec, oid))
+                by_sym.setdefault(sym, {"mpair": mpair, "lev": lev, "rows": [],
+                                        "stops": set(), "blocked": False})["rows"].append(oid)
+                log.info("T/P %s: bid partially filled %.6g before sweep — closing with the book",
+                         sym, vol_exec)
+            else:
+                self.conn.execute("UPDATE orders SET status='canceled', error='tp-flatten' "
+                                  "WHERE id=?", (oid,))
+        self.conn.commit()
+        # 1b) protective stops: CancelAll should have taken them all; anything still
+        # resting gets an individual cancel (fail -> pair stays protected + blocked).
+        # Cleared refs are NULLed + committed so a crash/failed close leaves rows
+        # that _reprotect_naked_open re-arms.
+        for sym, d in by_sym.items():
+            for st in d["stops"]:
+                if st in oo and broker.cancel_order(st) is None:
+                    log.warning("T/P %s: stop %s survived the sweep and cancel FAILED — "
+                                "pair stays protected, skipping its close this pass", sym, st)
+                    d["blocked"] = True
+                    continue
+                self.conn.execute("UPDATE orders SET stop_txid=NULL WHERE stop_txid=?", (st,))
+            self.conn.commit()
+        # 2) fresh definite long volume per pair — no sells rest anymore, so this
+        # can only be >= what the closes will find
+        kr = broker.open_positions()
+        if kr is None:
+            log.warning("T/P: OpenPositions unavailable after stop-cancel — rows are "
+                        "reprotectable; re-trigger next poll")
+            return False, False
+        positions = list(kr.values()) if isinstance(kr, dict) else []
+        rest_by_ws = {p["ws"]: p["rest"] for p in config.PAIRS}
+
+        def _long_vol(pos):
+            if str(pos.get("type", "")).lower() == "sell":
+                return 0.0
+            try:
+                return max(0.0, float(pos.get("vol", 0) or 0) - float(pos.get("vol_closed", 0) or 0))
+            except (TypeError, ValueError):
+                return 0.0
+
+        # Shape sanity (verify_open_stops' rule): entries that parse to NO long
+        # volume mean an unexpected response shape — retiring rows off it would
+        # empty the ledger while real positions float. Bail; rows are already
+        # reprotectable and the trigger re-fires.
+        if kr and not any(_long_vol(p) > 0 for p in positions):
+            log.warning("T/P: OpenPositions returned %d entries but no parseable long "
+                        "volume — unexpected shape, aborting closes", len(kr))
+            return False, False
+
+        complete = True
+        for sym, d in by_sym.items():
+            if d["blocked"]:
+                complete = False
+                continue
+            key = rest_by_ws.get(sym, "")
+            vol = sum(_long_vol(p) for p in positions
+                      if _norm_pair_key(p.get("pair", "")) == key)
+            info = store.get_pair_info(self.conn, sym) or {}
+            lot_dec = info.get("lot_decimals")
+            if lot_dec is not None:
+                vol = _round_down(vol, lot_dec)
+            if vol <= 0:
+                # exchange already flat for this pair (stops swept earlier) — retire rows
+                for oid in d["rows"]:
+                    self.conn.execute("UPDATE orders SET status='closed', "
+                                      "error='tp-flatten (no live volume)' WHERE id=?", (oid,))
+                self.conn.commit()
+                log.info("T/P %s: no live volume — rows retired without a close", sym)
+                continue
+            volstr = f"{vol:.{lot_dec}f}" if lot_dec is not None else f"{vol:.8f}"
+            params = {"pair": d["mpair"], "type": "sell", "ordertype": "market",
+                      "volume": volstr, "leverage": str(d["lev"])}
+            res = broker.private("/0/private/AddOrder", params, idempotent=False)
+            if res and res.get("txid"):
+                for oid in d["rows"]:
+                    self.conn.execute("UPDATE orders SET status='closed', error='tp-flatten' "
+                                      "WHERE id=?", (oid,))
+                self.conn.commit()
+                log.warning("T/P %s: market-closed %s (%s)", sym, volstr, res["txid"][0])
+                self._journal("tp", sym, f"flatten: market-closed {volstr}")
+            else:
+                complete = False
+                log.error("T/P %s: market close FAILED — rows stay open with stops cleared; "
+                          "reprotect re-arms them next cycle, T/P re-fires while over target", sym)
+        return True, complete
 
     def _place_ladder_rung(self, symbol, margin_pair, leverage, stop, filled_price,
                            score=None, required=None):
