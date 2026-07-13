@@ -15,7 +15,7 @@ from deepfield import parity
 @pytest.mark.skipif(not os.path.exists(config.DB_PATH), reason="no DB (run M1 backfill)")
 def test_M3_triangulation_gate():
     t = parity.triangulate()
-    # Leg A: COMPAT reproduces v4.4 at every slot.
-    assert t["legA_match"] == t["legA_total"] == 105, t["legA_diffs"]
+    # Leg A: COMPAT reproduces v4.4 at every slot (N pairs x 7 signals).
+    assert t["legA_match"] == t["legA_total"] == len(config.PAIRS) * 7, t["legA_diffs"]
     # Leg B: every FULL-vs-COMPAT diff is attributable to an F-item.
     assert t["unattributed"] == [], t["unattributed"]

@@ -364,7 +364,7 @@ svg .axt2{ fill:var(--ink-faint); font-size:9.5px; font-family:var(--mono); }
         <div class="sectionhead">
           <div class="lead">
             <h2>The Field</h2>
-            <span class="hint">15 pairs · sorted by attention — faults, BUYs, positions, watch, idle · click a pair to drill in</span>
+            <span class="hint"><span id="paircount">15</span> pairs · sorted by attention — faults, BUYs, positions, watch, idle · click a pair to drill in</span>
           </div>
           <div class="toggle" id="fieldmode">
             <button data-fm="field" class="on">Field</button>
@@ -648,6 +648,7 @@ function fieldRow(p){
 function renderField(){
   const RANK={active:0,buy:1,watch:2,idle:3};
   const ordered=[...PAIRS].sort((a,b)=>(RANK[a.tier]-RANK[b.tier])||(b.score-a.score)||a.sym.localeCompare(b.sym));
+  const pc=document.getElementById("paircount"); if(pc) pc.textContent=PAIRS.length;
   document.getElementById("fieldbody").innerHTML = ordered.map(fieldRow).join("");
   document.querySelectorAll(".frow").forEach(r=>{
     r.addEventListener("click", ()=>openDetail(r.dataset.sym));

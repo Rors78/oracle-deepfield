@@ -14,7 +14,7 @@ from deepfield import parity
 @pytest.mark.skipif(not os.path.exists(config.DB_PATH), reason="no DB (run M1 backfill)")
 def test_series_equality_all_pairs():
     report = parity.run_series_equality()
-    assert len(report) == 30                      # 15 pairs x 2 intervals
+    assert len(report) == len(config.PAIRS) * 2   # N pairs x 2 intervals (daily+weekly)
     for row in report:
         assert row["ok"], row
         assert row["v44_len"] == row["db_closed"]
