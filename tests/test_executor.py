@@ -163,9 +163,9 @@ def test_rails_max_positions_blocks(tmp_path, monkeypatch):
     monkeypatch.setattr(config, 'RAILS_ENABLED', True)
     conn = _conn(tmp_path)
     monkeypatch.setattr(config, "MAX_OPEN_POSITIONS", 1)
-    conn.execute("INSERT INTO orders(symbol,status) VALUES('X/USD','open')")
+    conn.execute("INSERT INTO orders(symbol,status,mode) VALUES('X/USD','open','live')")
     conn.commit()
-    ok, reason = _exec(conn).rails_ok(1000.0)
+    ok, reason = _exec(conn, mode="live").rails_ok(1000.0)
     assert not ok and "max open positions" in reason
     conn.close()
 
@@ -206,8 +206,8 @@ def test_place_entry_never_raises(tmp_path):
 
 def _seed_pending(conn, txid="OENTRY", stop=90.0):
     cur = conn.execute(
-        "INSERT INTO orders(symbol,margin_pair,volume,leverage,stop,txid,status) "
-        "VALUES(?,?,?,?,?,?, 'pending')", (SYM, "XBTUSD:BTNL", 0.1, 10, stop, txid))
+        "INSERT INTO orders(symbol,margin_pair,volume,leverage,stop,txid,status,mode) "
+        "VALUES(?,?,?,?,?,?, 'pending','live')", (SYM, "XBTUSD:BTNL", 0.1, 10, stop, txid))
     conn.commit()
     return cur.lastrowid
 
@@ -610,8 +610,8 @@ def test_poll_fills_partial_not_terminal_after_cancel_stays_pending(tmp_path, mo
 
 def _seed_pending_ts(conn, txid, ts_iso, vol=0.1):
     cur = conn.execute(
-        "INSERT INTO orders(symbol,margin_pair,volume,leverage,stop,txid,status,ts) "
-        "VALUES(?,?,?,?,?,?, 'pending', ?)", (SYM, "XBTUSD:BTNL", vol, 10, 90.0, txid, ts_iso))
+        "INSERT INTO orders(symbol,margin_pair,volume,leverage,stop,txid,status,ts,mode) "
+        "VALUES(?,?,?,?,?,?, 'pending', ?,'live')", (SYM, "XBTUSD:BTNL", vol, 10, 90.0, txid, ts_iso))
     conn.commit()
     return cur.lastrowid
 
@@ -675,8 +675,8 @@ def test_verify_records_realized_pnl_on_stop_exit_bucketed_by_close(tmp_path, mo
     conn = _conn(tmp_path)
     three_days_ago = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=3)).isoformat()
     cur = conn.execute(
-        "INSERT INTO orders(symbol,margin_pair,volume,leverage,stop,txid,stop_txid,status,ts,entry) "
-        "VALUES(?,?,?,?,?,?,?, 'open', ?, ?)",
+        "INSERT INTO orders(symbol,margin_pair,volume,leverage,stop,txid,stop_txid,status,ts,entry,mode) "
+        "VALUES(?,?,?,?,?,?,?, 'open', ?, ?,'live')",
         (SYM, "XBTUSD:BTNL", 0.1, 10, 90.0, "OENTRY", "OSTOP", three_days_ago, 100.0))
     conn.commit()
     oid = cur.lastrowid
@@ -776,9 +776,9 @@ def test_cap_counts_pending_limits(tmp_path, monkeypatch):
     """A resting 'pending' entry limit counts toward MAX_OPEN_POSITIONS (it will fill)."""
     conn = _conn(tmp_path)
     monkeypatch.setattr(config, "MAX_OPEN_POSITIONS", 1)
-    conn.execute("INSERT INTO orders(symbol,status) VALUES('X/USD','pending')")
+    conn.execute("INSERT INTO orders(symbol,status,mode) VALUES('X/USD','pending','live')")
     conn.commit()
-    ok, reason = _exec(conn).rails_ok(1000.0)
+    ok, reason = _exec(conn, mode="live").rails_ok(1000.0)
     assert not ok and "max open positions" in reason
     conn.close()
 
@@ -822,8 +822,8 @@ def test_verify_open_stops_skips_when_positions_unavailable(tmp_path, monkeypatc
 def _seed_open(conn, stop_txid, vol=0.1, stop=90.0):
     """Seed one OPEN stacked long on the shared pair with its own protective stop."""
     cur = conn.execute(
-        "INSERT INTO orders(symbol,margin_pair,volume,leverage,stop,stop_txid,status) "
-        "VALUES(?,?,?,?,?,?, 'open')", (SYM, "XBTUSD:BTNL", vol, 10, stop, stop_txid))
+        "INSERT INTO orders(symbol,margin_pair,volume,leverage,stop,stop_txid,status,mode) "
+        "VALUES(?,?,?,?,?,?, 'open','live')", (SYM, "XBTUSD:BTNL", vol, 10, stop, stop_txid))
     conn.commit()
     return cur.lastrowid
 
