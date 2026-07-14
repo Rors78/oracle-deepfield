@@ -3,13 +3,97 @@
 Exactly one task/connection owns writes; everyone else uses the read helpers.
 SQLite-WAL is ground truth; RAM-only state is a bug.
 
+SINGLE WRITER is now ENFORCED, not just documented. The bot runs several writer
+connections in one process — the ingest thread (candles), the off-loop poll_fills
+thread (orders/stops), and the gap-heal threads (backfilled candles) — and WAL
+lets only ONE connection hold an open write transaction at a time; the rest used
+to collide as `database is locked` (chronic; a flood during the 2026-07-13 storm).
+`_WriterConn` funnels every write through one process-global RLock: it grabs the
+lock on a connection's first write statement and releases it on commit/rollback/
+close, so the lock spans the whole transaction and no two connections ever write
+at once. Readers (WAL-concurrent) never take the lock. busy_timeout stays as a
+backstop for out-of-process writers (e.g. a --reconcile CLI run alongside live).
+
 `candles.pair` holds the **v2 ws_symbol** (e.g. "BTC/USD"), so REST backfill (M1)
 and WS live updates (M4) write the same rows. `ts` = bar OPEN (unix).
 Close predicate (M1 sharpening): a bar is closed iff now >= ts + interval*60.
 """
 import sqlite3
+import threading
 import time
 import datetime
+
+# Process-global write serializer. RLock (not Lock) so a thread that somehow
+# re-enters a write path can't self-deadlock; the per-connection _holds_write
+# guard keeps acquire/release balanced (one net acquire per open transaction).
+_WRITE_LOCK = threading.RLock()
+_WRITE_VERBS = frozenset(("INSERT", "UPDATE", "DELETE", "REPLACE",
+                          "CREATE", "ALTER", "DROP"))
+
+
+def _is_write(sql):
+    """True if the statement opens/extends a write transaction (leading verb).
+    SELECT/PRAGMA/WITH-read stay lock-free so readers never serialize."""
+    s = sql.lstrip()
+    if not s:
+        return False
+    return s.split(None, 1)[0].upper() in _WRITE_VERBS
+
+
+class _WriterConn(sqlite3.Connection):
+    """A connection that holds _WRITE_LOCK for the duration of any write
+    transaction. All writes in this codebase go through conn.execute(...) (no
+    cursors, no `with conn:`, no explicit BEGIN — verified), so intercepting
+    execute/commit here covers every write with no call-site changes."""
+
+    def __init__(self, *a, **k):
+        super().__init__(*a, **k)
+        self._holds_write = False
+
+    def _acquire(self):
+        if not self._holds_write:
+            _WRITE_LOCK.acquire()
+            self._holds_write = True
+
+    def _release(self):
+        if self._holds_write:
+            self._holds_write = False
+            _WRITE_LOCK.release()
+
+    def execute(self, sql, *a, **k):
+        if _is_write(sql):
+            self._acquire()
+        return super().execute(sql, *a, **k)
+
+    def executemany(self, sql, *a, **k):
+        if _is_write(sql):
+            self._acquire()
+        return super().executemany(sql, *a, **k)
+
+    def executescript(self, script):
+        # A script may contain writes (schema/migrations); hold the lock across it.
+        self._acquire()
+        return super().executescript(script)
+
+    def commit(self):
+        try:
+            super().commit()
+        finally:
+            self._release()
+
+    def rollback(self):
+        try:
+            super().rollback()
+        finally:
+            self._release()
+
+    def close(self):
+        # Backstop: releases the lock if a write path errored before commit,
+        # so an abandoned open transaction can never wedge every other writer.
+        try:
+            super().close()
+        finally:
+            self._release()
 
 # §9 schema + Q2 ruling: pairs gains lot_decimals (AssetPairs). ts = bar OPEN.
 SCHEMA = """
@@ -75,19 +159,23 @@ def connect(db_path):
     contends, so it never actually blocks that long. A lock still held past 30s
     is a real bug worth surfacing, not masking further.
     """
-    conn = sqlite3.connect(db_path)
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA synchronous=NORMAL")
-    conn.execute("PRAGMA busy_timeout=30000")
-    conn.executescript(SCHEMA)
-    # Additive migration for DBs created before the orders conviction columns
-    # (existing rows -> NULL score/required -> ladder falls back to flat min).
-    # userref (audit 2026-07-13): our client id sent on every live AddOrder so an
-    # order whose transport failed AMBIGUOUSLY (may or may not have landed) can be
-    # re-identified on Kraken instead of becoming an untracked naked position.
-    _ensure_columns(conn, "orders", [("score", "INTEGER"), ("required", "INTEGER"),
-                                     ("userref", "INTEGER")])
-    conn.commit()
+    conn = sqlite3.connect(db_path, factory=_WriterConn)
+    try:
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
+        conn.execute("PRAGMA busy_timeout=30000")
+        conn.executescript(SCHEMA)
+        # Additive migration for DBs created before the orders conviction columns
+        # (existing rows -> NULL score/required -> ladder falls back to flat min).
+        # userref (audit 2026-07-13): our client id sent on every live AddOrder so an
+        # order whose transport failed AMBIGUOUSLY (may or may not have landed) can be
+        # re-identified on Kraken instead of becoming an untracked naked position.
+        _ensure_columns(conn, "orders", [("score", "INTEGER"), ("required", "INTEGER"),
+                                         ("userref", "INTEGER")])
+        conn.commit()
+    except Exception:
+        conn.close()   # _WriterConn.close() frees the write lock the schema writes took
+        raise
     return conn
 
 
