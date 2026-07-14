@@ -108,15 +108,25 @@ def sign(path, postdata, nonce, secret_b64):
     return base64.b64encode(hmac.new(secret, path.encode() + sha256, hashlib.sha512).digest()).decode()
 
 
-def private(endpoint, params=None, idempotent=True):
+def private(endpoint, params=None, idempotent=True, meta=None):
     """Signed POST to a Kraken private endpoint. Returns 'result' dict or None.
     Retries nonce/rate ERRORS (from a received response — the request did NOT
     execute) with a fresh higher nonce. idempotent=False (AddOrder/CancelOrder):
     a NETWORK exception is NOT retried, because the order may already have landed
-    and a blind resend would DUPLICATE it (a duplicate stop can open a short)."""
+    and a blind resend would DUPLICATE it (a duplicate stop can open a short).
+
+    meta (audit 2026-07-13): pass a dict to learn HOW a None happened —
+    meta['definite']=True means Kraken RESPONDED (an error reject: the order did
+    not execute); False means the network failed and the request MAY have landed.
+    Callers that record 'rejected' must only do so on definite=True; an ambiguous
+    None needs the userref recovery path, not a terminal status."""
     key, secret, _ = load_keys()
+    if meta is not None:
+        meta["definite"] = False
     if not key or not secret:
         log.error("no Kraken API keys (looked in %s) — cannot send %s", KEYFILES, endpoint)
+        if meta is not None:
+            meta["definite"] = True      # nothing was sent — definitely not on the book
         return None
     base = dict(params or {})
     url = BASE_URL + endpoint
@@ -148,8 +158,12 @@ def private(endpoint, params=None, idempotent=True):
                         wait = 5.0
                     else:
                         log.error("private API error %s: %s", endpoint, es)
+                        if meta is not None:
+                            meta["definite"] = True   # Kraken responded: a real reject
                         return None
                 else:
+                    if meta is not None:
+                        meta["definite"] = True
                     return data.get("result")
             except Exception as e:
                 log.warning("private API attempt %d failed: %s", attempt + 1, e)
@@ -210,6 +224,87 @@ def cancel_order(txid):
     if not txid:
         return None
     return private("/0/private/CancelOrder", {"txid": txid}, idempotent=False)
+
+
+def cancel_order_batch(txids):
+    """Cancel MANY orders by txid via CancelOrderBatch (50/call), replacing the
+    account-wide CancelAll the T/P flatten used to fire (audit 2026-07-13 M4:
+    CancelAll also swept manually-placed / other-system orders, and stripped the
+    stop off any Kraken position the ledger had no row for — permanently naked).
+    Targeted: only OUR txids are touched. Best-effort like CancelAll was — the
+    flatten reconciles from definite post-sweep OpenOrders state either way.
+    Returns the count Kraken reports canceled, or None if every chunk failed."""
+    ids = [t for t in (txids or []) if t]
+    if not ids:
+        return 0
+    total, any_ok = 0, False
+    for i in range(0, len(ids), 50):
+        # Kraken's form-encoded API wants the `orders` array as indexed keys
+        # (orders[0]=A&orders[1]=B). A JSON-string blob OR repeated `orders=` keys
+        # are both rejected 'EGeneral:Invalid arguments:orders' (the json.dumps form
+        # never worked live — the T/P flatten could never sweep, looping forever).
+        chunk = ids[i:i + 50]
+        params = {f"orders[{j}]": t for j, t in enumerate(chunk)}
+        r = private("/0/private/CancelOrderBatch", params, idempotent=False)
+        if r is not None:
+            any_ok = True
+            try:
+                total += int(r.get("count", 0) or 0)
+            except (TypeError, ValueError):
+                pass
+    return total if any_ok else None
+
+
+def find_order_by_userref(userref):
+    """Locate an order by our client userref — the recovery path for an AddOrder
+    whose transport failed AMBIGUOUSLY (audit 2026-07-13 C3: without this, an
+    order that actually landed becomes an untracked position with no stop).
+    Checks resting orders first, then recently-closed ones. Returns
+    (txid, order_dict) or (None, None) when definitely absent, or (None, 'unknown')
+    when the API could not answer (caller must retry, not conclude)."""
+    if not userref:
+        return None, None
+    oo = private("/0/private/OpenOrders", {"userref": str(userref)})
+    if oo is None:
+        return None, "unknown"
+    for txid, od in (oo.get("open") or {}).items():
+        return txid, od
+    co = private("/0/private/ClosedOrders", {"userref": str(userref)})
+    if co is None:
+        return None, "unknown"
+    for txid, od in (co.get("closed") or {}).items():
+        return txid, od
+    return None, None
+
+
+def rollover_fees_since(start_ts):
+    """Sum of margin rollover fees paid since `start_ts` (unix), from the Ledgers
+    API (entry type 'rollover'; the charge is in the 'fee' field, asset ZUSD).
+    Paginates via ofs (50/page, capped at 20 pages — a month of 4h rollovers on
+    ~20 pairs). Returns (total_fee_usd, entry_count, newest_entry_ts) or None on
+    API failure. Display/accounting only — never gates an order."""
+    total, count, newest = 0.0, 0, float(start_ts or 0)
+    ofs = 0
+    for _ in range(20):
+        r = private("/0/private/Ledgers",
+                    {"type": "rollover", "start": str(start_ts or 0), "ofs": str(ofs)})
+        if r is None:
+            return None
+        entries = r.get("ledger") or {}
+        if not entries:
+            break
+        for e in entries.values():
+            try:
+                total += abs(float(e.get("fee", 0) or 0))
+                newest = max(newest, float(e.get("time", 0) or 0))
+                count += 1
+            except (TypeError, ValueError):
+                continue
+        got = len(entries)
+        ofs += got
+        if got < 50:
+            break
+    return total, count, newest
 
 
 def trade_balance_full():
