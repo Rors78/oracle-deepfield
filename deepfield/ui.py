@@ -164,12 +164,14 @@ def _band_col(price, lo, hi, band_w):
 
 
 def _proximity(now_price, stop):
-    """True when price sits within 3% ABOVE the stop — the pair is one wick from
-    being swept. Promotes to the fault tier and paints the band segment red."""
+    """True when price sits within 3% above the stop — OR anywhere BELOW it.
+    No lower bound: price under the stop means the stop should have FIRED and
+    didn't (the true emergency); it must never demote back to a calm state.
+    Promotes to the fault tier and paints the band segment red."""
     if not (now_price and stop and stop > 0):
         return False
     r = (now_price - stop) / stop
-    return -0.01 <= r < 0.03
+    return r < 0.03
 
 
 def _render_band(lo, hi, band_w, *, fills=(), pendings=(), stop=None,
@@ -351,7 +353,8 @@ def render_exec_line(appstate):
         t.append("?", style=INK)
     elif rec.get("all_ok"):
         t.append("ok ", style=HEALTH)
-        t.append(_local_hm(rec.get("ts")), style=TIME)
+        # date + time — after multi-day uptime a bare "03:14" reads as today's
+        t.append(_local_short(rec.get("ts")), style=TIME)
     else:
         t.append("▢ MISMATCH", style=f"bold {RISK}")
     mode = ex.get("mode", "off")
@@ -470,6 +473,10 @@ def _open_pnl(appstate):
 def _strip_state(v, now):
     ps, card = v["ps"], v["card"]
     if v["prox"]:
+        stop, price = v["stop"], v["price"]
+        if stop and price is not None and price < stop:
+            # price UNDER the stop = the stop should have fired — loudest state
+            return "▼BELOW STOP", f"bold {RISK}"
         return "NEAR-STOP", RISK
     if v["stale"]:
         return "STALE", ATTN
@@ -485,7 +492,7 @@ def _strip_state(v, now):
 
 
 _STRIP_COLS = ((7, "left"), (9, "left"), (10, "right"), (8, "right"),
-               (11, "right"), (10, "right"), (10, "left"))
+               (11, "right"), (10, "right"), (12, "left"))
 
 
 def _band_bounds(v):
@@ -849,7 +856,7 @@ def render_book(appstate, w, height):
             # stamp it with the recon time so it can't be misread as current
             # protection (live per-fill coverage is the 'live'/no-stop tag below)
             if rec and rec.get("ts"):
-                ph.append(f" @recon {_local_hm(rec.get('ts'))}", style=TIME)
+                ph.append(f" @recon {_local_short(rec.get('ts'))}", style=TIME)
         lines.append(ph)
         price = v["price"]
         for idx, f in enumerate(reversed(v["fills"]), start=1):

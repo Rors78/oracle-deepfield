@@ -96,7 +96,8 @@ def _ladder(conn):
             "SELECT id,symbol,volume,leverage,entry,stop,stop_txid FROM orders "
             "WHERE status='open' ORDER BY symbol,id"):
         d = by.setdefault(sym, {"fills": [], "pendings": [], "stopped": 0})
-        d["fills"].append({"vol": vol, "lev": lev, "entry": entry, "stop": stop})
+        d["fills"].append({"vol": vol, "lev": lev, "entry": entry, "stop": stop,
+                           "stop_txid": txid or ""})
         if txid:
             d["stopped"] += 1
     for sym, entry, vol in conn.execute(
@@ -155,8 +156,18 @@ def build_state():
 
 def _assemble(conn):
     live = _web_live(conn)
-    prices = live.get("prices", {})
-    changes = live.get("chg", {})
+    now = time.time()
+    updated = live.get("updated")
+    data_age = (now - updated) if updated else None
+    fresh = bool(live.get("_fresh"))
+    # W1: prices/chg get the SAME freshness gate equity/margin already have.
+    # A stale blob (asyncio loop wedged, 12h-incident class) must not serve
+    # frozen prices as current — fall back to the last daily close instead.
+    prices = live.get("prices", {}) if fresh else {}
+    changes = live.get("chg", {}) if fresh else {}
+    # W7: per-pair tick ages (new blob key — absent in old blobs, degrade silently).
+    # Ages were captured at blob-write time; add the blob's own age on top.
+    tick_ages = live.get("tick_ages") or {}
     ladder = _ladder(conn)
 
     pairs = []
@@ -180,7 +191,7 @@ def _assemble(conn):
 
         lad = ladder.get(sym)
         pnl = None
-        rungs = vols = bids = None
+        rungs = vols = bids = fstops = prot = None
         avg = stop = bid = None
         fills = 0
         size = 0.0
@@ -191,6 +202,8 @@ def _assemble(conn):
         if lad and lad["fills"]:
             rungs = [f["entry"] for f in lad["fills"]]
             vols = [f["vol"] for f in lad["fills"]]      # real per-fill vols (unequal under conviction sizing)
+            fstops = [f["stop"] for f in lad["fills"]]   # W4: per-fill stops (they DIVERGE across chains)
+            prot = [bool(f["stop_txid"]) for f in lad["fills"]]  # W3: per-fill protection truth
             fills = len(lad["fills"])
             size = round(lad["vol_sum"], 8)
             avg = lad["avg"]; stop = lad["stop"]
@@ -198,12 +211,36 @@ def _assemble(conn):
                 pnl = sum((price - (f["entry"] or 0)) * (f["vol"] or 0) for f in lad["fills"])
                 open_pnl += pnl
 
-        # tier + status: positioned → BUY-signal → watch → idle
+        # W7: per-pair tick staleness (only when the blob carries tick_ages)
+        t_age = tick_ages.get(sym)
+        if t_age is not None and updated:
+            t_age = t_age + max(0.0, now - updated)
+        pair_stale = t_age is not None and t_age > config.STALE_SECS
+
+        # tier + status (TUI semantics, ui._strip_state): positioned pairs read
+        # BELOW-STOP → NEAR-STOP → STALE (fault) → BUY (only when the signal is
+        # actually live) → HOLD. W6: held inventory is not a live signal.
+        fault = False
         if fills:
-            tier, status, stStyle = "active", "BUY", "buy"
+            tier = "active"
+            below = stop and price and price < stop
             near = stop and price and (price - stop) / stop < 0.03
-            if near:
-                status, stStyle = "NEAR-STOP", "near"
+            if below:
+                # price under the stop = the stop should have FIRED — loudest state
+                status, stStyle, fault = "BELOW-STOP", "near", True
+            elif near:
+                status, stStyle, fault = "NEAR-STOP", "near", True
+            elif pair_stale:
+                # stale data feeding a live position — fault tier (ui._tier)
+                status, stStyle, fault = "STALE", "stale", True
+            elif card and card.status == "BUY":
+                status, stStyle = "BUY", "buy"
+            else:
+                status, stStyle = "HOLD", "hold"
+        elif pair_stale:
+            # stale WITHOUT a position stays where its score puts it (ui._tier)
+            tier = "watch" if card and card.status in ("BUY", "WATCH") else "idle"
+            status, stStyle = "STALE", "stale"
         elif card and card.status == "BUY":
             tier, status, stStyle = "buy", "BUY", "buy"
         elif card and card.status == "WATCH":
@@ -233,7 +270,11 @@ def _assemble(conn):
             "fills": fills, "size": size, "pnl": pnl, "avg": avg, "stop": stop,
             "stops": (lad["stopped"] if lad else 0),   # open fills with a resting stop_txid
             "bid": bid, "bids": bids, "rungs": rungs, "vols": vols,
-            "lev": (lad["fills"][0]["lev"] if (lad and lad["fills"]) else 10),
+            "fstops": fstops, "prot": prot,            # per-fill stop / protection (W3/W4)
+            "fault": fault,
+            # W12: no hardcoded 10 — a 5x pair's default must be ITS max leverage
+            "lev": (lad["fills"][0]["lev"] if (lad and lad["fills"])
+                    else config.PER_PAIR_LEVERAGE.get(sym, 10)),
             "cardStatus": (card.status if card else "---"),
         })
 
@@ -264,6 +305,8 @@ def _assemble(conn):
             except (TypeError, ValueError):
                 swing_day = None
     recon = _recon(store.meta_get(conn, "last_recon"))
+    # W10: open rows on symbols no longer in config.PAIRS render nowhere — surface them
+    ghost = sorted(s for s, d in ladder.items() if d["fills"] and s not in DISPLAY)
     # exec mode: the web process doesn't inherit the bot's env var, so prefer the
     # bot's persisted value, then infer from what the live orders were placed under.
     mode = live.get("mode") if live.get("_fresh") else None
@@ -294,6 +337,11 @@ def _assemble(conn):
         "capacity": live.get("capacity") if live.get("_fresh") else None,
         "equity_series": _equity_series(conn),
         "recon_ok": recon.get("ok"), "recon_time": recon.get("time"),
+        "recon_per_pair": recon.get("per_pair"),       # W5: which pair(s) mismatch
+        "ghost_pairs": ghost,                          # W10
+        # T/P cycle + fee drag (new blob keys — absent in old blobs, degrade to null)
+        "tp_baseline": live.get("tp_baseline"), "tp_target": live.get("tp_target"),
+        "fees_day": live.get("fees_day"), "fees_total": live.get("fees_total"),
         "now_mt": now_local.strftime("%H:%M:%S"), "now_utc": now_utc.strftime("%H:%M"),
         "day": now_local.strftime("%a %b %d").lower(),
     }
@@ -303,7 +351,11 @@ def _assemble(conn):
         "label": reg.get("label"), "note": reg.get("note"), "daily_rsi": reg.get("drsi"),
     }
     return {"health": health, "regime": regime, "pairs": pairs,
-            "journal": _journal(conn), "v": VERSION}
+            "journal": _journal(conn), "v": VERSION,
+            # W1: the client must KNOW when market data is frozen. data_age_s is
+            # always sent (null only when no blob has ever been written).
+            "data_stale": not fresh,
+            "data_age_s": (round(data_age, 1) if data_age is not None else None)}
 
 
 def _regime(conn):
@@ -365,8 +417,10 @@ def _recon(raw):
             dt = datetime.datetime.fromisoformat(ts)
             if dt.tzinfo is None:
                 dt = dt.replace(tzinfo=UTC)
-            t = dt.astimezone(DENVER).strftime("%H:%M")
-        return {"ok": bool(d.get("all_ok", True)), "time": t}
+            # W5: date + time — after multi-day uptime a bare "03:14" lies
+            t = dt.astimezone(DENVER).strftime("%m-%d %H:%M")
+        return {"ok": bool(d.get("all_ok", True)), "time": t,
+                "per_pair": d.get("per_pair")}
     except Exception:
         return {}
 
@@ -391,12 +445,15 @@ def build_pair(sym_display):
         days = [[r[0], round(r[1], 6), round(r[2], 6), round(r[3], 6),
                  round(r[4], 6), round(r[5], 4)] for r in rows]
         fills, pendings = [], []
-        for (oid, ts, entry, stop, vol, lev, notional, margin,
+        for (oid, ts, entry, stop, stop_txid, vol, lev, notional, margin,
              score, req, status) in conn.execute(
-                "SELECT id,ts,entry,stop,volume,leverage,notional,margin,"
+                "SELECT id,ts,entry,stop,stop_txid,volume,leverage,notional,margin,"
                 "score,required,status FROM orders WHERE symbol=? "
                 "AND status IN ('open','pending') ORDER BY id", (ws,)):
+            # W3: per-fill stop AND stop_txid — protection is a per-fill truth,
+            # never a hardcode ("live" only when a resting stop order exists)
             row = {"id": oid, "ts": ts, "entry": entry, "stop": stop,
+                   "stop_txid": stop_txid or "",
                    "vol": vol, "lev": lev, "notional": notional,
                    "margin": margin, "score": score, "req": req}
             (fills if status == "open" else pendings).append(row)
@@ -406,6 +463,42 @@ def build_pair(sym_display):
         return {"closes": [], "start_ts": None}
     return {"closes": [d[4] for d in days], "start_ts": days[0][0],
             "days": days, "fills": fills, "pendings": pendings}
+
+
+def build_health():
+    """W2: a REAL health verdict for external watchdogs (desktop script keys on it).
+    ok is true ONLY when: the web_live blob is <120s old AND every link is up AND
+    the DB answered. Never raises — on any failure it reports ok:false + error."""
+    out = {"ok": False, "v": VERSION, "data_age_s": None, "links": None,
+           "last_equity_sample_age_s": None, "db_ok": False, "ghost_pairs": []}
+    try:
+        conn = _ro_conn()
+        try:
+            live = _web_live(conn)
+            updated = live.get("updated")
+            age = (time.time() - updated) if updated else None
+            out["data_age_s"] = round(age, 1) if age is not None else None
+            out["links"] = live.get("links")
+            try:
+                row = conn.execute("SELECT MAX(ts) FROM equity_history").fetchone()
+                if row and row[0]:
+                    out["last_equity_sample_age_s"] = round(time.time() - row[0], 1)
+            except sqlite3.OperationalError:
+                pass                                     # table appears post-upgrade
+            out["ghost_pairs"] = sorted(
+                s for (s,) in conn.execute(
+                    "SELECT DISTINCT symbol FROM orders WHERE status='open'")
+                if s not in DISPLAY)
+            out["db_ok"] = True                          # the queries answered
+        finally:
+            conn.close()
+        links = out["links"]
+        out["ok"] = bool(out["db_ok"]
+                         and age is not None and age < 120
+                         and links and all(links))
+    except Exception as e:                               # never-500 contract
+        out["error"] = str(e)
+    return out
 
 
 # ── HTTP handler ─────────────────────────────────────────────────────────────
@@ -442,7 +535,7 @@ class Handler(BaseHTTPRequestHandler):
                 else:
                     self._json(data)
             elif path == "/api/health":
-                self._json({"ok": True, "v": VERSION})
+                self._json(build_health())
             else:
                 self._send(404, "not found", "text/plain")
         except BrokenPipeError:
