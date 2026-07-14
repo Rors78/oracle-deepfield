@@ -65,15 +65,28 @@ def connect(db_path):
     (its own connection, per M4) now contend on the same WAL file on every
     (re)connect. Without it, a concurrent write throws "database is locked"
     instead of waiting the other side out.
+
+    30s (was 5s): the per-tick candle writer got starved past 5s during WRITE
+    BURSTS — a boot reconcile re-arming dozens of stops, or a seeding pass —
+    each of which serially hammers the executor's connection for 10-30s while
+    also driving frequent WAL auto-checkpoints. 5s expired mid-burst and skipped
+    candle writes (thousands during the 2026-07-13 flatten storm; a smaller boot
+    burst every restart). 30s waits any realistic burst out; steady state never
+    contends, so it never actually blocks that long. A lock still held past 30s
+    is a real bug worth surfacing, not masking further.
     """
     conn = sqlite3.connect(db_path)
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA synchronous=NORMAL")
-    conn.execute("PRAGMA busy_timeout=5000")
+    conn.execute("PRAGMA busy_timeout=30000")
     conn.executescript(SCHEMA)
     # Additive migration for DBs created before the orders conviction columns
     # (existing rows -> NULL score/required -> ladder falls back to flat min).
-    _ensure_columns(conn, "orders", [("score", "INTEGER"), ("required", "INTEGER")])
+    # userref (audit 2026-07-13): our client id sent on every live AddOrder so an
+    # order whose transport failed AMBIGUOUSLY (may or may not have landed) can be
+    # re-identified on Kraken instead of becoming an untracked naked position.
+    _ensure_columns(conn, "orders", [("score", "INTEGER"), ("required", "INTEGER"),
+                                     ("userref", "INTEGER")])
     conn.commit()
     return conn
 
@@ -176,7 +189,7 @@ def insert_order(conn, row):
     """row: dict of the orders columns. Returns the new order id."""
     cols = ["ts", "symbol", "margin_pair", "side", "ordertype", "mode", "entry", "stop",
             "volume", "leverage", "notional", "margin", "risk_usd", "score", "required",
-            "txid", "stop_txid", "status", "error"]
+            "txid", "stop_txid", "status", "error", "userref"]
     cur = conn.execute(
         f"INSERT INTO orders({','.join(cols)}) VALUES({','.join('?' * len(cols))})",
         [row.get(c) for c in cols],
@@ -185,21 +198,37 @@ def insert_order(conn, row):
     return cur.lastrowid
 
 
-def open_position_count(conn):
-    """Positions this bot opened and believes are open (status='open')."""
+def open_position_count(conn, mode=None):
+    """Positions this bot opened and believes are open (status='open').
+    mode (audit 2026-07-13 M6): scope to one exec mode so paper rows mixed into
+    this DB can never leak into live money-path decisions. None = all modes
+    (legacy display callers)."""
+    if mode:
+        return conn.execute("SELECT COUNT(*) FROM orders WHERE status='open' AND mode=?",
+                            (mode,)).fetchone()[0]
     return conn.execute("SELECT COUNT(*) FROM orders WHERE status='open'").fetchone()[0]
 
 
-def committed_position_count(conn):
+def committed_position_count(conn, mode=None):
     """Filled positions PLUS resting entry limits ('pending') — the count the
-    MAX_OPEN_POSITIONS rail must use, since every pending limit can still fill."""
+    MAX_OPEN_POSITIONS rail must use, since every pending limit can still fill.
+    mode: scope to one exec mode (see open_position_count)."""
+    if mode:
+        return conn.execute(
+            "SELECT COUNT(*) FROM orders WHERE status IN ('open','pending') AND mode=?",
+            (mode,)).fetchone()[0]
     return conn.execute(
         "SELECT COUNT(*) FROM orders WHERE status IN ('open','pending')").fetchone()[0]
 
 
-def has_pending_entry(conn, symbol):
+def has_pending_entry(conn, symbol, mode=None):
     """True if this symbol already has a resting (status='pending') entry order — its
-    BUY thesis is already expressed on the book, so the boot arm needn't re-fire it."""
+    BUY thesis is already expressed on the book, so the boot arm needn't re-fire it.
+    mode: scope to one exec mode (see open_position_count)."""
+    if mode:
+        return conn.execute(
+            "SELECT 1 FROM orders WHERE symbol=? AND status='pending' AND mode=? LIMIT 1",
+            (symbol, mode)).fetchone() is not None
     return conn.execute(
         "SELECT 1 FROM orders WHERE symbol=? AND status='pending' LIMIT 1", (symbol,)
     ).fetchone() is not None
