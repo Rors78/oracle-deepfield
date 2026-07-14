@@ -77,6 +77,15 @@ def _entry_ttl_expired(ts_iso):
     return config.ENTRY_TTL_SECS > 0 and _age_secs(ts_iso) > config.ENTRY_TTL_SECS
 
 
+def _new_userref():
+    """Fresh Kraken client order id (positive int32). Random, not sequential — two
+    processes/threads must never mint the same ref, and Kraken only needs it unique
+    enough to search by (collisions across our own history are harmless: recovery
+    matches OpenOrders/ClosedOrders, newest first, and refs live for minutes)."""
+    import random
+    return random.randint(1, 2**31 - 1)
+
+
 # symbol -> public REST pair id, for the live-price clamp on ladder rungs.
 _REST_PAIR = {p["ws"]: p["rest"] for p in config.PAIRS}
 
@@ -87,6 +96,14 @@ _REST_PAIR = {p["ws"]: p["rest"] for p in config.PAIRS}
 _RELADDER_RETRY_SECS = 600
 _reladder_next = {}     # symbol -> time.monotonic() of next allowed attempt
 _seed_next = {}         # symbol -> time.monotonic() of next allowed seed attempt
+# Runtime exchange-truth sweep cadence (audit 2026-07-13 #1): module-level because
+# an Executor is constructed per poll cycle. 0.0 = run on the first live cycle so a
+# stop that fired during a bot outage is caught minutes after boot, not next restart.
+_recon_next = 0.0
+# Ambiguous-AddOrder recovery: rows born from a network-unknown AddOrder carry a
+# userref and txid NULL; give Kraken this long to show the order before concluding
+# it never landed (poll cadence is ~15s, so this is ~20 attempts).
+_USERREF_RESOLVE_SECS = 300
 
 
 class Executor:
@@ -103,6 +120,17 @@ class Executor:
             store.journal(self.conn, kind, symbol, text)
         except Exception:
             log.exception("journal emit failed (%s %s) — trade path unaffected", kind, symbol)
+
+    def _safety(self, kind, symbol, text):
+        """Safety event -> journal + operator alert (sound/notify/telegram, throttled
+        in the alerter). Isolated — never raises into the money path. Lazy import
+        keeps executor importable in test contexts without audio deps."""
+        self._journal("safety", symbol or "", f"[{kind}] {text}")
+        try:
+            from . import alerter
+            alerter.fire_safety(kind, symbol, text)
+        except Exception:
+            log.exception("safety alert failed (%s %s) — trade path unaffected", kind, symbol)
 
     # ── portfolio + rails ────────────────────────────────────────────────────
 
@@ -140,7 +168,7 @@ class Executor:
         # Cap counts committed exposure: filled positions AND resting entry limits
         # (a 'pending' limit will become a position — counting only 'open' lets many
         # rest under the cap and fill together, breaching MAX_OPEN_POSITIONS).
-        n = store.committed_position_count(self.conn)
+        n = store.committed_position_count(self.conn, mode=self.mode)
         if n >= config.MAX_OPEN_POSITIONS:
             return False, f"max open positions ({n}/{config.MAX_OPEN_POSITIONS})"
         try:
@@ -193,8 +221,8 @@ class Executor:
         if price <= 0:
             return False
         rows = self.conn.execute(
-            "SELECT entry FROM orders WHERE symbol=? AND status='open' AND entry IS NOT NULL",
-            (symbol,)).fetchall()
+            "SELECT entry FROM orders WHERE symbol=? AND status='open' AND entry IS NOT NULL "
+            "AND mode=?", (symbol, self.mode)).fetchall()
         return any(abs(e - price) <= pct * price for (e,) in rows if e)
 
     def size(self, symbol, entry, stop, leverage, equity, card=None):
@@ -310,6 +338,34 @@ class Executor:
             return False, f"regime={regime} (accumulate only outside {tuple(blocked)})"
         return True, ""
 
+    def _stack_margin_ok(self):
+        """Margin-stack floor (audit 2026-07-13 #2): Kraken margin-calls at ml<=80%
+        and force-liquidates from ml<=40% — bypassing every stop. Below
+        config.MARGIN_LEVEL_STACK_FLOOR_PCT, SEEDS and LADDER RUNGS pause (they only
+        GROW the book); confirmed-BUY signal entries are never gated here (operator
+        no-blockers stance). Reads the margin level the app loop persisted to
+        meta['web_live'] ≤15s ago — no extra API call. FAILS OPEN: a stale (>120s),
+        missing, or unparseable level never pauses anything. Returns (ok, reason)."""
+        floor = float(getattr(config, "MARGIN_LEVEL_STACK_FLOOR_PCT", 0) or 0)
+        if floor <= 0:
+            return True, ""
+        try:
+            blob = json.loads(store.meta_get(self.conn, "web_live") or "{}")
+            lvl = blob.get("margin_level")
+            updated = float(blob.get("updated", 0) or 0)
+            if lvl is None or time.time() - updated > 120:
+                return True, ""                    # unknown/stale — fail open
+            lvl = float(lvl)
+            if lvl < floor:
+                self._safety("margin-level", "*",
+                             f"margin level {lvl:.0f}% < stack floor {floor:.0f}% — "
+                             f"seeds/rungs paused (Kraken liquidates at 40%)")
+                return False, f"margin level {lvl:.0f}% < stack floor {floor:.0f}%"
+            return True, ""
+        except Exception:
+            log.exception("stack margin check failed — failing open")
+            return True, ""
+
     def place_entry(self, symbol, entry_price, card):
         if self.mode == "off":
             return None
@@ -350,11 +406,17 @@ class Executor:
         # refused, while a corrupt row (orders of magnitude larger) still trips at every
         # tier. Guard on the BASE ceiling>0 so 0 still fully disables.
         cmult = sizing.get("conviction_mult", 1.0)
-        ceiling = config.EXEC_MAX_ORDER_NOTIONAL_USD * cmult
+        # SIZE_MULT scales the notional too (audit 2026-07-13 M5): the operator's 3x
+        # multiplier is a LEGITIMATE part of every order's size, so the sanity ceiling
+        # must budget for it — otherwise a price rally silently trips the refuse path
+        # on high-ordermin pairs (an unintended blocker). Corrupt-row protection is
+        # preserved: the ceiling still catches orders orders-of-magnitude oversized.
+        smult = max(1.0, float(sizing.get("size_mult", 1.0) or 1.0))
+        ceiling = config.EXEC_MAX_ORDER_NOTIONAL_USD * cmult * smult
         if config.EXEC_MAX_ORDER_NOTIONAL_USD > 0 and sizing["notional"] > ceiling:
-            log.error("EXEC %s REFUSED: order notional $%.2f exceeds %gx-conviction ceiling $%.2f "
-                      "— not sending (sanity guard, not a rail; check the pairs row / EXEC_SIZE_MODE)",
-                      symbol, sizing["notional"], cmult, ceiling)
+            log.error("EXEC %s REFUSED: order notional $%.2f exceeds %gx-conviction x %gx-size "
+                      "ceiling $%.2f — not sending (sanity guard, not a rail; check the pairs "
+                      "row / EXEC_SIZE_MODE)", symbol, sizing["notional"], cmult, smult, ceiling)
             return None
 
         margin_pair = config.MARGIN_PAIR[symbol]
@@ -392,6 +454,10 @@ class Executor:
             "score": getattr(card, "score", None), "required": getattr(card, "required", None),
             "txid": None, "stop_txid": None,
             "status": "pending", "error": None,
+            # Client order id (audit C3): sent on the live AddOrder so an order whose
+            # transport failed AMBIGUOUSLY can be re-identified on Kraken instead of
+            # becoming an untracked naked position. int32-positive per Kraken spec.
+            "userref": _new_userref(),
         }
 
         if self.mode == "paper":
@@ -414,13 +480,25 @@ class Executor:
         # limit is NOT a position — do not rest a stop yet (a stop with no position
         # would open a short) and do not count it as open. poll_fills() promotes
         # it to 'open' and rests the protective stop only once Kraken confirms fill.
-        res = broker.private("/0/private/AddOrder", params, idempotent=False)
+        params["userref"] = str(row["userref"])
+        tmeta = {}
+        res = broker.private("/0/private/AddOrder", params, idempotent=False, meta=tmeta)
         if res and res.get("txid"):
             row["txid"] = res["txid"][0]
             row["status"] = "pending"
             log.info("ENTRY %s: limit resting @ %s (pending fill) %s", symbol, px, row["txid"])
             conv = f" · {cmult:g}x conviction" if cmult > 1.0 else ""
             self._journal("order", symbol, f"{row['volume']:g} entry limit resting @ {px} (pending){conv}")
+            return store.insert_order(self.conn, row)
+        if not tmeta.get("definite"):
+            # Ambiguous transport (audit C3): the order MAY be on the book. Record it
+            # pending with NO txid; poll_fills' userref recovery adopts it if it landed
+            # or retires it 'rejected' once Kraken definitively shows nothing.
+            row["status"] = "pending"
+            row["error"] = "ambiguous AddOrder (network) — resolving by userref"
+            log.warning("ENTRY %s: AddOrder transport ambiguous — recorded pending, "
+                        "userref %s recovery will resolve", symbol, row["userref"])
+            self._journal("order", symbol, f"ambiguous entry AddOrder — resolving by userref {row['userref']}")
             return store.insert_order(self.conn, row)
         row["status"] = "rejected"
         row["error"] = "no txid from AddOrder"
@@ -434,13 +512,29 @@ class Executor:
         LIVE only; paper simulates instant fill at placement."""
         if self.mode != "live":
             return
+        # Re-protect BEFORE the T/P gate (audit 2026-07-13 M3): while an INCOMPLETE
+        # flatten retries, _check_take_profit returns True every cycle — but by then
+        # CancelOrderBatch has already swept the protective stops, so skipping the
+        # reprotect pass here left blocked pairs naked for the whole retry period
+        # (longest exactly when the Kraken API is degraded). Reprotect is cheap in
+        # the healthy case (no API call when nothing is naked); the flatten simply
+        # re-cancels anything it re-arms — churn, never nakedness.
+        self._reprotect_naked_open()
         if self._check_take_profit():
             return          # book was just flattened — nothing to promote or ladder this cycle
         rows = self.conn.execute(
             "SELECT id, symbol, margin_pair, volume, leverage, stop, txid, ts, entry, score, required "
-            "FROM orders WHERE status='pending'").fetchall()
+            "FROM orders WHERE status='pending' AND mode=?", (self.mode,)).fetchall()
         for oid, sym, mpair, vol, lev, stop, txid, ts, entry, score, required in rows:
-            o = broker.query_order(txid) if txid else None
+            if not txid:
+                # Ambiguous-AddOrder recovery (audit C3): this row was born from an
+                # AddOrder whose network transport failed — it MAY be on the book.
+                # Find it by our userref; adopt the txid if so, conclude 'rejected'
+                # only after Kraken definitively shows nothing for the ref.
+                txid = self._resolve_ambiguous_entry(oid, sym, ts)
+                if not txid:
+                    continue
+            o = broker.query_order(txid)
             if o is None:
                 continue                        # transient query failure — retry next cycle
             status = o.get("status")
@@ -499,12 +593,58 @@ class Executor:
                                   (f"entry {status}, unfilled", oid))
                 self.conn.commit()
                 log.info("ENTRY %s: %s unfilled — no position", sym, status)
-        # Runtime safety nets: re-protect any 'open' position whose stop-rest failed,
-        # re-place the next ladder rung for any chain whose resting bid died, then
-        # seed a starter chain on any SEED_PAIRS symbol with nothing working.
+        # Runtime safety nets: re-protect any 'open' position whose stop-rest failed
+        # (again — fresh fills this cycle can be naked; the pre-T/P pass above covers
+        # the flatten-retry window), re-place the next ladder rung for any chain whose
+        # resting bid died, then seed a starter chain on any SEED_PAIRS symbol with
+        # nothing working.
         self._reprotect_naked_open()
         self._ensure_ladder_rungs()
         self._seed_chains()
+        # Runtime exchange-truth sweep (audit 2026-07-13 #1): re-run the full
+        # ledger↔Kraken reconcile on a timer so intraday stop-fires, force-
+        # liquidations, and manual closes are noticed in minutes, not at restart.
+        global _recon_next
+        recon_secs = float(getattr(config, "RUNTIME_RECON_SECS", 0) or 0)
+        if recon_secs > 0 and time.monotonic() >= _recon_next:
+            _recon_next = time.monotonic() + recon_secs
+            try:
+                self.verify_open_stops(context="runtime")
+            except Exception:
+                log.exception("runtime reconcile sweep failed (poll_fills unaffected)")
+
+    def _resolve_ambiguous_entry(self, oid, sym, ts):
+        """A 'pending' row with NO txid came from an AddOrder whose transport failed
+        ambiguously. Look it up by userref: found -> adopt the txid (the order IS
+        ours, on the book or already terminal); definitively absent after the grace
+        window -> 'rejected' (it never landed); API unknown -> retry next cycle.
+        Returns the adopted txid or None."""
+        row = self.conn.execute("SELECT userref FROM orders WHERE id=?", (oid,)).fetchone()
+        userref = row[0] if row else None
+        if not userref:
+            # Legacy ambiguous row (pre-userref) — nothing to search by; age it out.
+            if _age_secs(ts) > _USERREF_RESOLVE_SECS:
+                self.conn.execute("UPDATE orders SET status='rejected', "
+                                  "error='ambiguous AddOrder, no userref to recover by' WHERE id=?",
+                                  (oid,))
+                self.conn.commit()
+            return None
+        txid, od = broker.find_order_by_userref(userref)
+        if txid:
+            self.conn.execute("UPDATE orders SET txid=? WHERE id=?", (txid, oid))
+            self.conn.commit()
+            log.warning("RECOVER %s: ambiguous AddOrder found on Kraken by userref %s -> %s",
+                        sym, userref, txid)
+            self._journal("order", sym, f"recovered ambiguous entry by userref -> {txid}")
+            return txid
+        if od == "unknown":
+            return None                          # API couldn't answer — retry next cycle
+        if _age_secs(ts) > _USERREF_RESOLVE_SECS:
+            self.conn.execute("UPDATE orders SET status='rejected', "
+                              "error='AddOrder never landed (userref not found)' WHERE id=?", (oid,))
+            self.conn.commit()
+            log.info("RECOVER %s: userref %s definitively absent — AddOrder never landed", sym, userref)
+        return None
 
     def _reprotect_naked_open(self):
         """Runtime safety net (gap B): a fill whose protective stop-rest FAILED
@@ -519,18 +659,60 @@ class Executor:
         try:
             naked = self.conn.execute(
                 "SELECT id, symbol, margin_pair, volume, leverage, stop FROM orders "
-                "WHERE status='open' AND stop_txid IS NULL").fetchall()
+                "WHERE status='open' AND stop_txid IS NULL AND mode=?", (self.mode,)).fetchall()
             if not naked:
                 return
             kr_open_orders = broker.open_orders()
             claimed = {t for (t,) in self.conn.execute(
                 "SELECT stop_txid FROM orders WHERE stop_txid IS NOT NULL")}
+            # Backing check (audit 2026-07-13 C2): a naked row whose position has since
+            # DIED (force-liquidation, manual close) must not get a fresh stop — that
+            # MANUFACTURES the orphan stop that opens a short on trigger. Rest a stop
+            # only when the pair's live long volume covers this row on top of the
+            # volume its sibling rows' resting stops already commit. Definite state
+            # only: OpenPositions None -> skip this cycle (retry ~15s), never guess.
+            kr_pos = broker.open_positions()
+            if kr_pos is None:
+                log.warning("REPROTECT: OpenPositions unavailable — cannot verify backing, "
+                            "retry next cycle")
+                return
+            positions = list(kr_pos.values()) if isinstance(kr_pos, dict) else []
+            rest_by_ws = {p["ws"]: p["rest"] for p in config.PAIRS}
+
+            def _pair_long_vol(sym):
+                key = rest_by_ws.get(sym, "")
+                tot = 0.0
+                for p in positions:
+                    if _norm_pair_key(p.get("pair", "")) != key:
+                        continue
+                    if str(p.get("type", "")).lower() == "sell":
+                        continue
+                    try:
+                        tot += max(0.0, float(p.get("vol", 0) or 0) - float(p.get("vol_closed", 0) or 0))
+                    except (TypeError, ValueError):
+                        continue
+                return tot
+
+            stopped_vol = {}   # sym -> volume already committed by sibling resting stops
+            for s, v in self.conn.execute(
+                    "SELECT symbol, COALESCE(volume,0) FROM orders "
+                    "WHERE status='open' AND stop_txid IS NOT NULL AND mode=?", (self.mode,)):
+                stopped_vol[s] = stopped_vol.get(s, 0.0) + float(v or 0)
             for oid, sym, mpair, vol, lev, stop in naked:
-                adopt = self._find_adoptable_stop(kr_open_orders, claimed, mpair, float(vol or 0))
+                volf = float(vol or 0)
+                free_backing = _pair_long_vol(sym) - stopped_vol.get(sym, 0.0)
+                if free_backing < volf - 1e-8:
+                    log.warning("REPROTECT %s: naked row %d NOT backed by live volume "
+                                "(free %.8g < %.8g) — position likely gone; leaving for "
+                                "the reconcile sweep to retire", sym, oid, free_backing, volf)
+                    self._journal("stop", sym, f"naked row {oid} unbacked — reconcile sweep will retire it")
+                    continue
+                adopt = self._find_adoptable_stop(kr_open_orders, claimed, mpair, volf)
                 if adopt:
                     self.conn.execute("UPDATE orders SET stop_txid=? WHERE id=?", (adopt, oid))
                     self.conn.commit()
                     claimed.add(adopt)
+                    stopped_vol[sym] = stopped_vol.get(sym, 0.0) + volf
                     log.warning("REPROTECT %s: adopted resting orphan stop %s for naked open row %d",
                                 sym, adopt, oid)
                     self._journal("stop", sym, f"reprotect: adopted resting stop {adopt}")
@@ -538,6 +720,7 @@ class Executor:
                 log.warning("REPROTECT %s: open row %d unprotected (stop-rest failed earlier) — "
                             "resting stop now", sym, oid)
                 self._rest_stop(sym, mpair, stop, vol, lev, oid, paper=False)
+                stopped_vol[sym] = stopped_vol.get(sym, 0.0) + volf
         except Exception:
             log.exception("reprotect pass failed (poll_fills unaffected)")
 
@@ -578,14 +761,14 @@ class Executor:
         try:
             rows = self.conn.execute(
                 "SELECT symbol, margin_pair, entry, stop, leverage, score, required "
-                "FROM orders WHERE status='open' AND mode='live' AND entry IS NOT NULL "
-                "ORDER BY symbol, entry ASC").fetchall()
+                "FROM orders WHERE status='open' AND mode=? AND entry IS NOT NULL "
+                "ORDER BY symbol, entry ASC", (self.mode,)).fetchall()
             lowest = {}
             for sym, mpair, entry, stop, lev, score, required in rows:
                 lowest.setdefault(sym, (mpair, entry, stop, lev, score, required))
             now = time.monotonic()
             for sym, (mpair, entry, stop, lev, score, required) in lowest.items():
-                if store.has_pending_entry(self.conn, sym):
+                if store.has_pending_entry(self.conn, sym, mode=self.mode):
                     continue
                 if now < _reladder_next.get(sym, 0.0):
                     continue
@@ -609,15 +792,21 @@ class Executor:
         Isolated — never raises into poll_fills."""
         if self.mode != "live" or not getattr(config, "SEED_PAIRS", ()):
             return
+        # Margin-stack floor (audit #2): seeds GROW the book — below the floor, stop
+        # growing (signal entries stay untouched; fails open on stale/unknown level).
+        ok_ml, ml_why = self._stack_margin_ok()
+        if not ok_ml:
+            log.info("SEED: paused — %s", ml_why)
+            return
         try:
             now = time.monotonic()
             for sym in config.SEED_PAIRS:
                 if now < _seed_next.get(sym, 0.0):
                     continue
-                if store.has_pending_entry(self.conn, sym):
+                if store.has_pending_entry(self.conn, sym, mode=self.mode):
                     continue
-                if self.conn.execute("SELECT 1 FROM orders WHERE symbol=? AND status='open' LIMIT 1",
-                                     (sym,)).fetchone():
+                if self.conn.execute("SELECT 1 FROM orders WHERE symbol=? AND status='open' "
+                                     "AND mode=? LIMIT 1", (sym, self.mode)).fetchone():
                     continue
                 _seed_next[sym] = now + _RELADDER_RETRY_SECS
                 live = self._live_last(sym)
@@ -710,19 +899,29 @@ class Executor:
         re-converges from definite state). complete=False means at least one pair
         is still open (blocked or a failed close) — the CALLER MUST KEEP THE
         BASELINE so the trigger re-fires and this retries what's left."""
-        # 1) ONE CancelAll sweeps every resting order — bids and stops — instead of
-        # ~2N serial CancelOrder calls grinding the private-API rate limiter. Best-
-        # effort: the reconcile below works from DEFINITE post-sweep state either way.
-        broker.private("/0/private/CancelAll", {}, idempotent=False)
+        # 1) ONE targeted CancelOrderBatch sweeps every resting order WE placed — bids
+        # and stops — instead of ~2N serial CancelOrder calls grinding the private-API
+        # rate limiter. Targeted, NOT the account-wide CancelAll it used to be (audit
+        # 2026-07-13 M4: CancelAll also swept manual/other-system orders, and stripped
+        # the stop off any Kraken position the ledger had no row for — permanently
+        # naked, since the flatten only closes DB-known pairs). Best-effort: the
+        # reconcile below works from DEFINITE post-sweep state either way.
+        ours = [t for (t,) in self.conn.execute(
+            "SELECT txid FROM orders WHERE status='pending' AND txid IS NOT NULL AND mode=?",
+            (self.mode,))]
+        ours += [t for (t,) in self.conn.execute(
+            "SELECT stop_txid FROM orders WHERE status='open' AND stop_txid IS NOT NULL "
+            "AND mode=?", (self.mode,))]
+        broker.cancel_order_batch(ours)
         oo = broker.open_orders()
         if oo is None:
-            log.warning("T/P: OpenOrders unavailable after CancelAll — cannot reconcile; "
+            log.warning("T/P: OpenOrders unavailable after cancel sweep — cannot reconcile; "
                         "retry next poll")
             return False, False
         by_sym = {}
         rows = self.conn.execute(
             "SELECT id, symbol, margin_pair, leverage, stop_txid FROM orders "
-            "WHERE status='open' ORDER BY symbol, id").fetchall()
+            "WHERE status='open' AND mode=? ORDER BY symbol, id", (self.mode,)).fetchall()
         for oid, sym, mpair, lev, stop_txid in rows:
             d = by_sym.setdefault(sym, {"mpair": mpair, "lev": lev, "rows": [],
                                         "stops": set(), "blocked": False})
@@ -870,9 +1069,13 @@ class Executor:
             if not ok_acc:
                 log.info("LADDER %s: accumulation paused (regime gate) — %s", symbol, why)
                 return
+            ok_ml, ml_why = self._stack_margin_ok()     # rungs grow the book (audit #2)
+            if not ok_ml:
+                log.info("LADDER %s: paused — %s", symbol, ml_why)
+                return
             if not filled_price or filled_price <= 0:
                 return
-            if store.has_pending_entry(self.conn, symbol):
+            if store.has_pending_entry(self.conn, symbol, mode=self.mode):
                 return                                  # skip if a bid already rests (best-effort; see docstring)
             tick = config.MARGIN_TICK_DECIMALS.get(symbol, 2)
             target = _round_price(filled_price * (1 - config.LADDER_STEP_PCT), tick)
@@ -920,21 +1123,20 @@ class Executor:
                 log.warning("LADDER %s: sizing produced nothing — no rung", symbol)
                 return
             cmult = sizing.get("conviction_mult", 1.0)
-            ceiling = config.EXEC_MAX_ORDER_NOTIONAL_USD * cmult   # conviction-scaled (see _place_entry)
+            smult = max(1.0, float(sizing.get("size_mult", 1.0) or 1.0))
+            ceiling = config.EXEC_MAX_ORDER_NOTIONAL_USD * cmult * smult   # conviction+size scaled (see _place_entry)
             if config.EXEC_MAX_ORDER_NOTIONAL_USD > 0 and sizing["notional"] > ceiling:
-                log.error("LADDER %s REFUSED: rung notional $%.2f exceeds %gx-conviction ceiling $%.2f",
-                          symbol, sizing["notional"], cmult, ceiling)
+                log.error("LADDER %s REFUSED: rung notional $%.2f exceeds %gx-conviction x %gx-size "
+                          "ceiling $%.2f", symbol, sizing["notional"], cmult, smult, ceiling)
                 return
             vol = sizing["volume"]
+            userref = _new_userref()
             params = {"pair": margin_pair, "type": "buy", "ordertype": "limit",
                       "volume": str(vol), "leverage": str(leverage),
-                      "price": str(target), "oflags": "post"}   # post-only can't fill instantly
-            res = broker.private("/0/private/AddOrder", params, idempotent=False)
-            if not (res and res.get("txid")):
-                log.warning("LADDER %s: next rung AddOrder returned no txid (post-only reject on a "
-                            "gap-down, or transient) — reladder safety net retries in %ds",
-                            symbol, _RELADDER_RETRY_SECS)
-                return
+                      "price": str(target), "oflags": "post",   # post-only can't fill instantly
+                      "userref": str(userref)}
+            tmeta = {}
+            res = broker.private("/0/private/AddOrder", params, idempotent=False, meta=tmeta)
             row = {
                 "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
                 "symbol": symbol, "margin_pair": margin_pair, "side": "buy",
@@ -943,8 +1145,23 @@ class Executor:
                 "margin": sizing["margin"], "risk_usd": sizing.get("actual_risk", 0.0),
                 # carry the entry conviction to the next rung so it doesn't decay to 1x
                 "score": score, "required": required,
-                "txid": res["txid"][0], "stop_txid": None, "status": "pending", "error": None,
+                "txid": None, "stop_txid": None, "status": "pending", "error": None,
+                "userref": userref,
             }
+            if not (res and res.get("txid")):
+                if not tmeta.get("definite"):
+                    # Ambiguous transport (audit C3): the rung MAY be on the book — record
+                    # it pending with no txid; the userref recovery adopts or retires it.
+                    row["error"] = "ambiguous AddOrder (network) — resolving by userref"
+                    store.insert_order(self.conn, row)
+                    log.warning("LADDER %s: rung AddOrder transport ambiguous — recorded pending, "
+                                "userref %s recovery will resolve", symbol, userref)
+                    return
+                log.warning("LADDER %s: next rung AddOrder returned no txid (post-only reject on a "
+                            "gap-down, or transient) — reladder safety net retries in %ds",
+                            symbol, _RELADDER_RETRY_SECS)
+                return
+            row["txid"] = res["txid"][0]
             store.insert_order(self.conn, row)
             conv_tag = f", {cmult:g}x conviction" if cmult > 1.0 else ""
             log.info("LADDER %s: next rung resting @ %s (%.6g%s) — one step below fill %s",
@@ -983,9 +1200,13 @@ class Executor:
         cands.sort()
         return cands[0][1]
 
-    def verify_open_stops(self):
-        """On live restart: reconcile each pair's OPEN ledger rows and their
-        protective stops against Kraken's ACTUAL open long volume for that pair.
+    def verify_open_stops(self, context="startup"):
+        """Reconcile each pair's OPEN ledger rows and their protective stops against
+        Kraken's ACTUAL open long volume for that pair. Runs at live restart AND —
+        audit 2026-07-13 #1 — on a runtime timer (context='runtime', every
+        config.RUNTIME_RECON_SECS from poll_fills), so an intraday stop-fire,
+        force-liquidation, or manual close is noticed in minutes, not at the next
+        restart. Runtime findings additionally fire safety alerts.
         CRITICAL SAFETY RULE: act ONLY on DEFINITE exchange state. A transient API
         failure (None) is never treated as 'gone'.
 
@@ -1004,9 +1225,10 @@ class Executor:
         untouched for the next restart."""
         if self.mode != "live":
             return
+        pfx = context                                      # 'startup' | 'runtime' log tag
         kr = broker.open_positions()
         if kr is None:                                     # could not check -> do NOTHING
-            log.warning("startup: OpenPositions unavailable — skipping stop verification")
+            log.warning("%s: OpenPositions unavailable — skipping stop verification", pfx)
             return
 
         # Kraken OpenPositions is posid -> {"pair": <key|altname>, "vol": str,
@@ -1034,8 +1256,8 @@ class Executor:
         # read every row as unbacked and cancel real protective stops. (An empty dict
         # is the legitimate 'account flat' state and falls through to close rows.)
         if kr and not any(_long_vol(p) > 0 for p in positions):
-            log.warning("startup: OpenPositions returned %d entries but no parseable long "
-                        "volume — unexpected shape, skipping stop verification", len(kr))
+            log.warning("%s: OpenPositions returned %d entries but no parseable long "
+                        "volume — unexpected shape, skipping stop verification", pfx, len(kr))
             return
 
         def _pair_open_volume(sym):
@@ -1048,7 +1270,7 @@ class Executor:
         # volume is allocated to the earliest rows; the newest (now-unbacked) rows retire.
         rows = self.conn.execute(
             "SELECT id, symbol, margin_pair, volume, leverage, stop, stop_txid, txid "
-            "FROM orders WHERE status='open' ORDER BY id").fetchall()
+            "FROM orders WHERE status='open' AND mode=? ORDER BY id", (self.mode,)).fetchall()
 
         # Batch every row's stop status into ONE QueryOrders sweep (50 txids/call)
         # instead of one call per row: a 60-position reconcile otherwise fires 60+
@@ -1095,8 +1317,10 @@ class Executor:
                                   (pnl_json, oid))
                 self.conn.commit()
                 recon[sym]["closed"] += 1
-                log.info("startup: %s order %d stop executed — closed w/ P&L, budget preserved for siblings",
-                         sym, oid)
+                recon[sym]["stop_fired"] = recon[sym].get("stop_fired", 0) + 1
+                log.info("%s: %s order %d stop executed — closed w/ P&L, budget preserved for siblings",
+                         pfx, sym, oid)
+                self._journal("stop", sym, f"stop EXECUTED — row {oid} closed with P&L recorded")
                 continue
             # No open volume left to back this row (and its stop did NOT execute) ->
             # position gone by manual close / liquidation. Its stop, if any, is now an
@@ -1107,26 +1331,60 @@ class Executor:
             if budget[key] < volf - 1e-8:
                 if ostatus in ("open", "pending"):
                     if broker.cancel_order(stop_txid) is None:
-                        log.warning("startup: %s order %d unbacked but orphan-stop cancel FAILED — "
-                                    "leaving open, retry next restart", sym, oid)
+                        log.warning("%s: %s order %d unbacked but orphan-stop cancel FAILED — "
+                                    "leaving open, retry next restart", pfx, sym, oid)
                         recon[sym]["unknown"] += 1
                         continue
-                    log.warning("startup: %s order %d unbacked (pair open %.8g < %.8g) — "
-                                "canceled orphan stop %s", sym, oid, budget[key], volf, stop_txid)
+                    log.warning("%s: %s order %d unbacked (pair open %.8g < %.8g) — "
+                                "canceled orphan stop %s", pfx, sym, oid, budget[key], volf, stop_txid)
                     self._journal("stop", sym, f"canceled orphan stop {stop_txid} (row unbacked)")
                 elif o is None and stop_txid:
-                    log.warning("startup: %s order %d unbacked but stop status UNKNOWN — "
-                                "leaving open, retry next restart", sym, oid)
+                    log.warning("%s: %s order %d unbacked but stop status UNKNOWN — "
+                                "leaving open, retry next restart", pfx, sym, oid)
                     recon[sym]["unknown"] += 1
                     continue
                 # orphan gone (canceled/expired) or no stop_txid: nothing live to strand.
                 self.conn.execute("UPDATE orders SET status='closed' WHERE id=?", (oid,))
                 self.conn.commit()
                 recon[sym]["closed"] += 1
-                log.info("startup: %s order %d not backed by open volume — closed, no re-place", sym, oid)
+                log.info("%s: %s order %d not backed by open volume — closed, no re-place", pfx, sym, oid)
                 continue
             budget[key] -= volf                            # row consumes real open volume
             backed.append((oid, sym, mpair, vol, lev, stop, stop_txid))
+
+        # Surplus check (audit 2026-07-13 M1): leftover pair budget after every row is
+        # allocated = exchange volume NO ledger row tracks (an ambiguous AddOrder that
+        # landed, a manual position, another system). It has NO stop under our control.
+        # Silently discarding it was how 'all_ok' overstated coherence. Loud, and it
+        # degrades the pair's ok flag; relative threshold so lot-dust never false-alarms.
+        for (sym, _mp), leftover in budget.items():
+            openvol = recon.get(sym, {}).get("openvol", 0.0) or 0.0
+            if leftover > max(1e-8, 0.005 * openvol):
+                recon[sym]["surplus"] = leftover
+                log.error("%s: %s has %.8g open volume on Kraken NO ledger row tracks — "
+                          "untracked position (no stop under our control)", pfx, sym, leftover)
+                self._journal("recon", sym, f"UNTRACKED exchange volume {leftover:.8g} — no ledger row")
+                self._safety("recon-mismatch", sym,
+                             f"{leftover:.8g} open volume on Kraken has no ledger row (no stop)")
+        # ... including pairs with NO ledger rows at all (an exchange position on a pair
+        # the loop above never visited — the fully-invisible case) and pairs outside the
+        # config universe entirely (ghost pairs — 6 were dropped this week).
+        seen_keys = {rest_by_ws.get(s, "") for (s, _m) in budget}
+        vol_by_key = {}
+        for p in positions:
+            k = _norm_pair(p.get("pair", ""))
+            if k and k not in seen_keys:
+                vol_by_key[k] = vol_by_key.get(k, 0.0) + _long_vol(p)
+        ws_by_rest = {p["rest"]: p["ws"] for p in config.PAIRS}
+        for k, v in vol_by_key.items():
+            if v <= 1e-8:
+                continue
+            sym = ws_by_rest.get(k, k)              # ghost pairs keep the raw key
+            log.error("%s: %s has %.8g open volume on Kraken with ZERO ledger rows — "
+                      "fully untracked position", pfx, sym, v)
+            self._journal("recon", sym, f"UNTRACKED position {v:.8g} — zero ledger rows")
+            self._safety("recon-mismatch", sym,
+                         f"{v:.8g} open volume on Kraken with zero ledger rows (no stop)")
 
         # PASS 2 — ADDITIONS only, after every removal is done: ensure each backed row
         # has exactly one resting stop; re-place only a DEFINITELY-gone/missing one.
@@ -1140,7 +1398,7 @@ class Executor:
                 # Stop status UNKNOWN (query failed) while backed: do NOT re-place
                 # blindly (it might already rest -> duplicate -> short). Retry later.
                 recon[sym]["unknown"] += 1
-                log.warning("startup: %s order %d stop query failed — leaving as-is, retry next restart", sym, oid)
+                log.warning("%s: %s order %d stop query failed — leaving as-is, retry next restart", pfx, sym, oid)
                 continue
             if not config.PROTECTIVE_STOP:                 # stops disabled -> never place one
                 continue
@@ -1153,14 +1411,24 @@ class Executor:
                 self.conn.commit()
                 claimed_stops.add(adopt)
                 recon[sym]["resting"] += 1
-                log.warning("startup: %s order %d adopted resting orphan stop %s (ledger had %s) — "
-                            "no duplicate placed", sym, oid, adopt, stop_txid or "none")
+                log.warning("%s: %s order %d adopted resting orphan stop %s (ledger had %s) — "
+                            "no duplicate placed", pfx, sym, oid, adopt, stop_txid or "none")
                 self._journal("stop", sym, f"adopted resting orphan stop {adopt}")
                 continue
             # Stop DEFINITELY gone (closed/canceled/expired) or never placed, no orphan to
             # adopt, and the position is backed: re-place once, non-idempotent transport.
-            log.warning("startup: %s order %d position backed but stop %s — re-placing",
-                        sym, oid, status or "missing")
+            log.warning("%s: %s order %d position backed but stop %s — re-placing",
+                        pfx, sym, oid, status or "missing")
+            # Stale-price tell (audit M4): if the market gapped BELOW the stored stop
+            # while it was off the book, this stop-loss sell triggers the moment it
+            # rests — that is the stop honoring itself LATE (correct for a long under
+            # its invalidation), but say so loudly instead of letting it read as a
+            # surprise market close.
+            live = self._live_last(sym)
+            if live and stop and live <= float(stop):
+                log.warning("%s: %s re-placing stop %s AT/ABOVE live %s — it will trigger "
+                            "immediately (late stop honor)", pfx, sym, stop, live)
+                self._journal("stop", sym, f"stop {stop} at/above live {live} — will trigger on rest")
             res = broker.private("/0/private/AddOrder", {
                 "pair": mpair, "type": "sell", "ordertype": "stop-loss",
                 "price": str(stop), "volume": str(vol), "leverage": str(lev), "trigger": "index"},
@@ -1175,6 +1443,7 @@ class Executor:
             else:
                 log.error("PROTECT %s: re-place FAILED — position may be UNPROTECTED", sym)
                 self._journal("stop", sym, "re-place FAILED — position may be UNPROTECTED")
+                self._safety("unprotected", sym, "stop re-place FAILED — position may be UNPROTECTED")
 
         # Positive evidence: one line per pair, so a clean reconcile leaves proof it ran
         # and the invariant held — not silence to interpret (audit re-review). E.g.
@@ -1186,21 +1455,42 @@ class Executor:
 
         # v6 SURVEY: publish this reconcile as display-truth for the header/BOOK
         # coherence readout. A pair is 'ok' iff no stop status was left UNKNOWN
-        # (a query failure that could hide an unprotected row); all_ok gates the
-        # header's teal 'recon ok' vs alarm 'MISMATCH'. Boot-time stamp — this
-        # runs only at startup, so the UI labels its age honestly, not as live.
+        # (a query failure that could hide an unprotected row) AND no untracked
+        # surplus volume was found (audit M1 — surplus used to pass silently).
+        # Since audit 2026-07-13 #1 this runs on the RUNTIME_RECON_SECS timer too,
+        # so the stamp is minutes old at most, not boot-old.
         try:
             per_pair = {sym: {"rows": r["rows"], "vol": round(r["openvol"], 8),
-                              "stops": r["resting"] + r["replaced"], "ok": r["unknown"] == 0}
+                              "stops": r["resting"] + r["replaced"],
+                              "ok": r["unknown"] == 0 and not r.get("surplus")}
                         for sym, r in recon.items()}
             payload = {"ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-                       "per_pair": per_pair, "all_ok": all(p["ok"] for p in per_pair.values())}
+                       "per_pair": per_pair, "all_ok": all(p["ok"] for p in per_pair.values()),
+                       "context": context}
             store.meta_set(self.conn, "last_recon", json.dumps(payload))
         except Exception:
             log.exception("last_recon publish failed (reconcile itself unaffected)")
         total_rows = sum(r["rows"] for r in recon.values())
         total_stops = sum(r["resting"] + r["replaced"] for r in recon.values())
         self._journal("recon", "", f"{len(recon)} pairs · {total_stops}/{total_rows} stops resting")
+        # Runtime findings page the operator (audit #1/#3): a stop-fire cluster, an
+        # unbacked-row retirement, or a re-placed stop found MID-SESSION is exactly
+        # what used to stay invisible until restart.
+        if context == "runtime":
+            fired = {s: r["stop_fired"] for s, r in recon.items() if r.get("stop_fired")}
+            if fired:
+                detail = ", ".join(f"{s}×{n}" for s, n in fired.items())
+                self._safety("stop-fired", "*", f"protective stops EXECUTED: {detail} — "
+                                                f"rows closed with P&L recorded")
+            closed_other = sum(r["closed"] - r.get("stop_fired", 0) for r in recon.values())
+            if closed_other > 0:
+                self._safety("recon-mismatch", "*",
+                             f"{closed_other} ledger row(s) retired — position gone without "
+                             f"our stop (manual close / liquidation)")
+            replaced = sum(r["replaced"] for r in recon.values())
+            if replaced > 0:
+                self._safety("unprotected", "*",
+                             f"{replaced} missing protective stop(s) re-placed mid-session")
 
     def _stop_exit_pnl_json(self, sym, oid, entry_txid, stop_order):
         """Realized P&L for a STOP-triggered close, from Kraken's own execution records:
@@ -1262,3 +1552,5 @@ class Executor:
         else:
             log.error("PROTECT %s: FAILED to rest stop — position is UNPROTECTED", symbol)
             self._journal("stop", symbol, "STOP FAILED — position UNPROTECTED")
+            self._safety("unprotected", symbol,
+                         "stop-rest FAILED — naked leveraged long (reprotect retries each cycle)")

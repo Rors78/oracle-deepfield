@@ -228,6 +228,38 @@ SEED_PAIRS = ("BTC/USD", "ETH/USD", "XRP/USD", "SOL/USD", "SUI/USD",
 TP_ENABLED = True
 TP_PCT = 0.20
 
+# Runtime exchange-truth sweep (audit 2026-07-13 #1): re-run the startup ledger↔Kraken
+# reconcile (verify_open_stops) every this-many seconds from the poll cycle, so an
+# intraday stop-fire, force-liquidation, or manual close is noticed within minutes —
+# not at the next restart. Costs ~4 private API calls per pass at the current book.
+# 0 disables (restores boot-only reconcile). NOT a rail: it only trues the ledger up
+# to the exchange and cancels provably-orphaned stops; it never blocks an entry.
+RUNTIME_RECON_SECS = 900
+
+# Margin-level watch (audit 2026-07-13 #2). Kraken margin-calls at ml<=80% and force-
+# liquidates from ml<=40% — bypassing every stop, invisibly to the ledger. This is
+# protection against the EXCHANGE seizing the book, not a self-brake:
+#  - below MARGIN_LEVEL_ALERT_PCT: fire a (throttled) safety alert. Display + noise only.
+#  - below MARGIN_LEVEL_STACK_FLOOR_PCT: pause SEEDS and LADDER RUNGS only — confirmed-BUY
+#    signal entries are NEVER gated by this (operator no-blockers stance). FAILS OPEN:
+#    a stale/unknown margin level never pauses anything.
+# 0 disables either threshold.
+MARGIN_LEVEL_ALERT_PCT = 150
+MARGIN_LEVEL_STACK_FLOOR_PCT = 120
+
+# Safety-alert channel (audit 2026-07-13 #3): sound + notify-send (+ Telegram iff the
+# env vars are set) for money-path safety events — UNPROTECTED positions, reconcile
+# mismatches, margin-level danger, T/P cycle events. Throttled per event-kind so a
+# retry loop can't turn the speaker into a siren. 0 disables throttling (every event).
+SAFETY_ALERT_THROTTLE_SECS = 1800
+
+# Rollover-fee accounting (audit 2026-07-13 #2): Kraken charges 0.01-0.05% of notional
+# per 4h to hold a margin position. Poll the Ledgers API for rollover/margin entries
+# at this cadence and accumulate the paid fees into meta (fees_total / fees_day) so
+# the drag is VISIBLE next to realized P&L instead of silently mimicking market losses.
+# Display/accounting only — never gates an order. 0 disables the poll.
+ROLLOVER_POLL_SECS = 3600
+
 # FORK A regime gate: accumulate in weakness, not strength. When True, new confirmed
 # entries AND ladder rungs are placed ONLY when the BTC regime is not confirmed BULL
 # ("stop adding once BULL" — buy the fall/turn, not the strength). FAILS OPEN: an

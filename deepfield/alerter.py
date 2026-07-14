@@ -156,6 +156,50 @@ def test_alert(conn):
     return fire(conn, "TEST/USD", 0.0, 0, 0, ["test-alert"], kind="test")
 
 
+# ── safety alerts (audit 2026-07-13 #3) ─────────────────────────────────────
+# Before this, only BUY signals ever paged anyone: UNPROTECTED positions, reconcile
+# mismatches, margin-level danger, and T/P events were log lines on an unwatched
+# machine (the 12h-offline incident is the precedent). fire_safety routes them
+# through the same sound -> notify-send -> telegram chain, throttled per
+# (kind, symbol) so a failing retry loop can't turn the speaker into a siren.
+_safety_last = {}    # (kind, symbol) -> time.monotonic() of last fired
+
+
+def fire_safety(kind, symbol, message):
+    """Money-path safety event -> sound + notify-send (+ telegram iff configured).
+    kind: unprotected | recon-mismatch | margin-level | tp | stop-fired | ...
+    Throttled per (kind, symbol) by config.SAFETY_ALERT_THROTTLE_SECS. NEVER
+    raises into the caller (money path) and takes no DB connection — journaling
+    is the caller's job (executor._journal already covers it)."""
+    import time as _t
+    try:
+        throttle = float(getattr(config, "SAFETY_ALERT_THROTTLE_SECS", 1800) or 0)
+        key = (kind, symbol or "*")
+        now = _t.monotonic()
+        if throttle > 0 and now - _safety_last.get(key, -throttle) < throttle:
+            log.info("SAFETY %s %s (throttled): %s", kind, symbol, message)
+            return None
+        _safety_last[key] = now
+        text = f"DEEPFIELD SAFETY [{kind}] {symbol or ''}: {message}"
+        sound_tier = play_alert()
+        notified = False
+        if shutil.which("notify-send"):
+            try:
+                r = subprocess.run(["notify-send", "-u", "critical",
+                                    f"DEEPFIELD SAFETY: {kind}", f"{symbol or ''} {message}"],
+                                   timeout=3, capture_output=True)
+                notified = r.returncode == 0
+            except Exception:
+                log.exception("safety notify-send failed")
+        tg_result = _telegram(text)
+        log.warning("SAFETY ALERT fired kind=%s symbol=%s sound=%s notify=%s telegram=%s — %s",
+                    kind, symbol, sound_tier, notified, tg_result, message)
+        return {"sound": sound_tier, "notify": notified, "telegram": tg_result}
+    except Exception:
+        log.exception("fire_safety failed (money path unaffected)")
+        return None
+
+
 def import_legacy_csv(conn, csv_path):
     """§12 `import-legacy <csv>`: seed the F10 cooldown ledger from a legacy
     v4.x dca_log.csv, so a symbol logged as BUY there recently doesn't get an
