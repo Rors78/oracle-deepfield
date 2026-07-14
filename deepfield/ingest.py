@@ -29,6 +29,14 @@ log = logging.getLogger("deepfield.ingest")
 
 BTC_SYMBOL = "BTC/USD"
 
+# §5(b) REST-confirm deferral ceiling: how long a clock-detected close may wait
+# for a successful REST confirm before we flip+fire on the partial WS data
+# anyway. The watchdog retries every CLOSE_POLL_SECS (~15s), so a transient
+# outage just delays the close a few polls; a PERMANENT outage must not silence
+# closes forever (operator no-blockers doctrine) — after this many seconds past
+# the first failed confirm we proceed loudly on clock authority.
+REST_CONFIRM_DEFER_SECS = 1800
+
 
 def _elapsed_fraction(interval_begin, interval_min, now=None):
     now = time.time() if now is None else now
@@ -58,6 +66,12 @@ class Ingest:
                                   # Thu 00:00 UTC — both must collapse to ONE fire. (flip_closed's
                                   # rowcount can't be trusted: upsert_candle already set closed=1
                                   # on the clock-close/late-update path.) Fire once per NEW instant.
+        self._rest_defer = {}     # (symbol, interval, forming_ts) -> unix ts of the FIRST
+                                  # failed REST confirm for that bar. A clock-close whose
+                                  # REST confirm fails is DEFERRED (no flip, no fire) so the
+                                  # watchdog's next find_overdue pass retries it — until
+                                  # REST_CONFIRM_DEFER_SECS, when we flip+fire loudly anyway.
+                                  # Pruned on every successful confirm/close so it can't grow.
         self._boot_buys = None    # set of symbols BUY at BOOT (first startup_sweep). The
                                   # one-shot arm may fire ONLY these — otherwise a reconciler
                                   # resweep / 'f'-key that flips a symbol to BUY mid-session
@@ -135,6 +149,37 @@ class Ingest:
         fire = close_at > self._last_fired.get(ev.symbol, -1)
         if fire:
             self._last_fired[ev.symbol] = close_at
+            # Coincident-border stale-weekly fix (audit 2026-07-13): weekly bars are
+            # epoch-anchored, so EVERY weekly border is also a daily border (Thu 00:00
+            # UTC). The dedup above gives exactly one of the two coincident events
+            # fire=True — but flip_closed (top of this handler) flipped only THIS
+            # event's bar, so the fire=True recompute would read a closed-series that
+            # still EXCLUDES the other interval's just-completed bar (closed=0): six of
+            # seven signals are weekly-driven, and daily-first ordering made the weekly
+            # bar a whole week stale at evaluation time. Before the single recompute,
+            # flip the OTHER interval's just-completed bar too — symmetric, so whichever
+            # event arrives first flips both. flip_closed is idempotent (0 if already
+            # closed); a missing row is the reconciler's gap to heal, not ours to block on.
+            # This runs only inside the fire=True edge, so the ed74968 double-fire dedup
+            # is untouched: the second coincident event still arrives with fire=False.
+            for other in config.INTERVALS:
+                if other == ev.interval or close_at % (other * 60) != 0:
+                    continue
+                other_ts = close_at - other * 60
+                n_other = store.flip_closed(self.conn, ev.symbol, other, other_ts)
+                if n_other:
+                    self.conn.commit()
+                    log.info("coincident border: flipped %s/%d ts=%d closed alongside %d "
+                             "close so the recompute sees BOTH completed bars",
+                             ev.symbol, other, other_ts, ev.interval)
+                else:
+                    log.debug("coincident border: %s/%d ts=%d already closed or not in DB "
+                              "yet (gap-heal covers it)", ev.symbol, other, other_ts)
+                # Either way the bar is being handled here — drop any REST-confirm
+                # deferral tracked for it.
+                self._rest_defer.pop((ev.symbol, other, other_ts), None)
+        # This bar is closed by whatever path got us here — prune its deferral entry.
+        self._rest_defer.pop((ev.symbol, ev.interval, ev.interval_begin), None)
         self._recompute_confirmed(ev.symbol, fire=fire)
         if ev.symbol == BTC_SYMBOL:
             self._recompute_regime()
@@ -235,10 +280,20 @@ class Ingest:
     def apply_rest_confirm(self, ws, interval, forming_ts, rows):
         """REST-confirm a clock-detected close: upsert the authoritative closed
         bar (and the new forming bar if present), then run the exact same
-        close path a WS CandleClosed would."""
+        close path a WS CandleClosed would.
+
+        Confirm-or-defer (audit 2026-07-13): if the REST fetch FAILED (rows is
+        None/empty — outage), do NOT flip the bar closed and do NOT fire — that
+        would promote partial pre-outage WS data to closed truth and place live
+        orders on it. Leave the bar forming; the watchdog's next find_overdue
+        pass (~every CLOSE_POLL_SECS) retries. After REST_CONFIRM_DEFER_SECS of
+        failed confirms for the same bar, flip+fire anyway with a loud warning
+        so a permanent REST outage can't silence closes forever (no-blockers)."""
         now = int(time.time())
+        key = (ws, interval, forming_ts)
         found = False
         if rows:
+            self._rest_defer.pop(key, None)   # confirm succeeded — clear any deferral
             for r in rows[-4:]:  # only the recent tail is relevant
                 ts = int(r[0])
                 if ts < forming_ts:
@@ -252,9 +307,25 @@ class Ingest:
                 if closed == 0:
                     self._advance_countdown(interval, ts)
             self.conn.commit()
-        if not found:
-            # REST didn't return the bar (shouldn't happen) — flip on clock
-            # authority alone; hourly reconciler will true-up the values.
+        else:
+            # REST confirm failed (outage). Defer: no flip, no fire — retry next pass.
+            first_seen = self._rest_defer.setdefault(key, now)
+            waited = now - first_seen
+            if waited < REST_CONFIRM_DEFER_SECS:
+                log.warning("clock-close: REST confirm FAILED for %s/%s ts=%d — deferring "
+                            "flip/fire (%ds of %ds); watchdog will retry",
+                            ws, interval, forming_ts, waited, REST_CONFIRM_DEFER_SECS)
+                return
+            # Deferral ceiling hit: proceed on clock authority + partial WS data,
+            # loudly. Hourly reconciler will true-up the values afterwards.
+            self._rest_defer.pop(key, None)
+            log.warning("clock-close: REST confirm still failing after %ds for %s/%s ts=%d — "
+                        "DEFERRAL CEILING hit; flipping + firing on partial WS data "
+                        "(no-blockers: a permanent REST outage must not silence closes)",
+                        waited, ws, interval, forming_ts)
+        if not found and rows:
+            # REST answered but didn't return the bar (shouldn't happen) — flip on
+            # clock authority alone; hourly reconciler will true-up the values.
             log.warning("clock-close: REST confirm missing bar %s/%s ts=%d — flipping on clock",
                         ws, interval, forming_ts)
         log.info("CLOCK CLOSE confirmed %s/%s ts=%d (silent border — no trade rolled the feed)",
@@ -268,6 +339,14 @@ class Ingest:
             await asyncio.sleep(poll_secs)
             try:
                 overdue = self.find_overdue()
+                # Prune deferral entries for bars no longer overdue (e.g. closed by
+                # gap-heal, which upserts closed=1 without a CandleClosed event) so
+                # self._rest_defer cannot grow without bound.
+                live_keys = {(ws, interval, forming_ts)
+                             for ws, _rest, interval, forming_ts in overdue}
+                for k in list(self._rest_defer):
+                    if k not in live_keys:
+                        self._rest_defer.pop(k, None)
                 for ws, rest, interval, forming_ts in overdue:
                     rows = await asyncio.to_thread(fetch_ohlc, rest, interval)
                     self.apply_rest_confirm(ws, interval, forming_ts, rows)
