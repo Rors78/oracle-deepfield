@@ -226,6 +226,7 @@ button{ font-family:inherit; color:inherit; }
 .jkind{ font-weight:600; letter-spacing:.04em; font-size:10px; }
 .k-fill{ color:var(--teal); } .k-stop{ color:var(--alarm); } .k-order{ color:var(--ink-2); }
 .k-detect{ color:var(--brass); } .k-recon{ color:var(--teal); } .k-sys{ color:var(--ink-dim); } .k-expire{ color:var(--amber); }
+.k-tp{ color:var(--gain); font-weight:700; }   /* T/P cycle — the largest money events */
 .jtext{ color:var(--ink-dim); }
 .jtext .s{ color:var(--ink); }
 .jday{ font-size:9.5px; letter-spacing:.14em; text-transform:uppercase; color:var(--ink-faint); padding:9px 5px 4px; border-top:1px solid var(--line); margin-top:4px; }
@@ -333,6 +334,15 @@ svg .axt2{ fill:var(--ink-faint); font-size:9.5px; font-family:var(--mono); }
 .footer b{ color:var(--ink-2); }
 
 .keybar{ margin-top:12px; font-family:var(--mono); font-size:10.5px; color:var(--ink-faint); letter-spacing:.03em; }
+
+/* W1 — market-data freshness banner: full-width, unmissable, red */
+.stalebanner{ display:none; margin:0 0 10px; padding:10px 14px; border-radius:var(--r);
+  border:1px solid var(--alarm); background:rgba(224,72,62,.14); color:var(--alarm);
+  font-family:var(--mono); font-weight:700; font-size:13px; letter-spacing:.06em;
+  box-shadow:0 0 18px var(--glow-alarm); text-align:center; }
+.stalebanner.on{ display:block; animation:stalepulse 1.6s ease-in-out infinite; }
+@keyframes stalepulse{ 0%,100%{ box-shadow:0 0 10px var(--glow-alarm); } 50%{ box-shadow:0 0 26px rgba(224,72,62,.38); } }
+@media (prefers-reduced-motion: reduce){ .stalebanner.on{ animation:none; } }
 </style>
 
 <div class="wrap">
@@ -349,6 +359,7 @@ svg .axt2{ fill:var(--ink-faint); font-size:9.5px; font-family:var(--mono); }
   </div>
 
   <div id="liveerr" style="display:none;color:var(--alarm);font-size:11px;padding:2px 4px 8px">● live API disconnected — retrying…</div>
+  <div id="stalebanner" class="stalebanner" role="alert"></div>
 
   <!-- ═══════════════ FIELD (overview) ═══════════════ -->
   <section class="view active" id="view-field">
@@ -386,6 +397,7 @@ svg .axt2{ fill:var(--ink-faint); font-size:9.5px; font-family:var(--mono); }
             <button data-jf="all" class="on">all</button>
             <button data-jf="fill">fills</button>
             <button data-jf="detect">detect</button>
+            <button data-jf="tp">tp</button>
           </div>
         </div>
         <div class="jfeed" id="jfeed"></div>
@@ -551,6 +563,8 @@ const SIGNALS = [
 // per-pair signal state: 1 fired · 0 quiet · -1 n/a(+reason). LTC/SUI = real.
 const F=1,Q=0,NA=-1;
 let PAIRS=[], PMAP={}, JOURNAL=[], HEALTH={}, REGIME={};
+let DATA_STALE=false, DATA_AGE=null;   // W1: blob freshness (server-verdict)
+let FLASH={};                          // W8: syms whose price really changed, → flash dir
 const CLOSES={};        // per-pair daily close series (fetched from /api/pair)
 const START_TS={};      // per-pair series start ts (unix)
 
@@ -562,6 +576,19 @@ const fmtUsd = v => { if(v==null) return "—"; if(Math.abs(v)<0.005) return "$0
 const fmtVol = v => String(parseFloat(v.toFixed(6)));   // 1.7/17 → 0.1, not 0.09999…
 const pnlClass = v => v>=0 ? "gain":"loss";
 const fmtChg = v => v==null?"—":(v>=0?"+":"")+v.toFixed(1)+"%";
+const fmtAgeS = s => s==null?"?":s<90?Math.round(s)+"s":s<5400?Math.round(s/60)+"m":(s/3600).toFixed(1)+"h";
+// W4: per-fill stops diverge across ladder chains — show the RANGE when they do
+function stopsOf(p, fills){
+  let st=(fills&&fills.length?fills.map(f=>f.stop):null) || p.fstops || (p.stop!=null?[p.stop]:[]);
+  st=st.filter(v=>v!=null);
+  return st.length?st:(p.stop!=null?[p.stop]:[]);
+}
+function fmtStopRange(p, fills){
+  const st=stopsOf(p, fills);
+  if(!st.length) return "—";
+  const lo=Math.min(...st), hi=Math.max(...st);
+  return lo===hi ? fmtPx(lo) : fmtPx(lo)+"–"+fmtPx(hi);
+}
 
 /* ── field rendering ───────────────────────────────────────────────────── */
 function zoneBounds(p){
@@ -624,11 +651,16 @@ function sigGrid(p){
 
 function fieldRow(p){
   const near = p.rungs && p.stop && p.price && (p.price-p.stop)/p.stop < 0.03;
-  const cls = "frow t-"+p.tier + (near?" fault":"");
+  // W1: while market data is frozen, near-stop/uP&L colorings are claims we
+  // can't back — dim them with a ⚠ instead of asserting live risk states.
+  const fault = !DATA_STALE && (p.fault || near);
+  const cls = "frow t-"+p.tier + (fault?" fault":"");
   const chgCls = p.chg>=0?"gain":"loss";
   const chgArrow = p.chg>=0?"▲":"▼";
   const posCell = p.fills ? `<div class="pos">${p.fills}f·${p.size}</div>` : `<div class="pos dim">—</div>`;
-  const pnlCell = p.pnl!=null ? `<div class="pnl ${pnlClass(p.pnl)}">${fmtUsd(p.pnl)}</div>` : `<div class="pnl dim">—</div>`;
+  const pnlCell = p.pnl==null ? `<div class="pnl dim">—</div>`
+    : DATA_STALE ? `<div class="pnl dim" title="market data frozen — value from last daily close">⚠ ${fmtUsd(p.pnl)}</div>`
+    : `<div class="pnl ${pnlClass(p.pnl)}">${fmtUsd(p.pnl)}</div>`;
   const stopMeta = p.stop!=null
      ? `<span class="mbmeta">${(((p.stop/p.price)-1)*100).toFixed(1)}% stop · +${p.pctLow}% ↑low</span>`
      : `<span class="mbmeta">+${p.pctLow}% ↑52w low</span>`;
@@ -640,7 +672,9 @@ function fieldRow(p){
     <div class="chg ${(p.chg||0)>=0?'gain':'loss'}">${fmtChg(p.chg)}</div>
     ${posCell}
     ${pnlCell}
-    <div class="st ${p.stStyle}">${p.status}</div>
+    ${DATA_STALE && p.stStyle==="near"
+      ? `<div class="st dim" title="market data frozen — proximity unverifiable">⚠ ${p.status}</div>`
+      : `<div class="st ${p.stStyle}">${p.status}</div>`}
     <div class="miniband">${rangeBar(p)}${stopMeta}</div>
   </div>`;
 }
@@ -664,23 +698,36 @@ function renderBook(){
     const rows = p.rungs.map((r,i)=>{
       const vi = p.vols ? p.vols[i] : p.size/p.fills;   // real conviction-sized vol, not the average
       const up = (p.price-r)*vi;
+      const si = (p.fstops && p.fstops[i]!=null) ? p.fstops[i] : p.stop;   // W4: this fill's OWN stop
+      // W3: "live" only when a resting stop order actually protects this fill
+      // (stop_txid non-empty). Unknown (old payload) → never claim protection.
+      const prot = p.prot ? p.prot[i] : null;
+      const stCell = prot===true ? `<td class="st-live">live</td>`
+        : prot===false ? `<td class="alarm" style="font-weight:700">⚠ no-stop</td>`
+        : `<td class="amber">unverified</td>`;
+      const upCell = DATA_STALE ? `<td class="dim">⚠ ${fmtUsd(up)}</td>`
+                                : `<td class="${pnlClass(up)}">${fmtUsd(up)}</td>`;
       return `<tr><td class="l dim">#${i+1}</td><td>${fmtVol(vi)}@${p.lev}x</td><td>${fmtPx(r)}</td>
-        <td class="dim">now ${fmtPx(p.price)}</td><td class="${pnlClass(up)}">${fmtUsd(up)}</td>
-        <td class="alarm">stop ${fmtPx(p.stop)}</td><td class="st-live">live</td></tr>`;
+        <td class="dim">now ${fmtPx(p.price)}</td>${upCell}
+        <td class="alarm">stop ${fmtPx(si)}</td>${stCell}</tr>`;
     }).join("");
     const bidList = p.bids && p.bids.length ? p.bids : (p.bid!=null ? [{price:p.bid, vol:null}] : []);
     const restRows = bidList.map(b=>
       `<tr class="rest"><td class="l">○</td><td>${b.vol!=null?fmtVol(b.vol):"—"}</td><td>@ ${fmtPx(b.price)}</td><td colspan="4" class="l">resting post-only</td></tr>`
     ).join("");
-    // real per-pair stop coverage (open fills with a resting stop_txid), not a hardcode:
-    // all covered → teal ▣ coherent; a gap → alarm ▢ N/M stops (mirrors the header badge).
-    // p.stops absent (older server not yet restarted) → assume coherent, never false-alarm.
-    const coh = (p.stops == null || p.stops >= p.fills)
-      ? `<span class="teal">▣ coherent</span>`
-      : `<span class="alarm">▢ ${p.stops}/${p.fills} stops</span>`;
+    // real per-pair stop coverage (open fills with a resting stop_txid), not a hardcode.
+    // W5 FAIL-CLOSED: absent data can NEVER read as coherent — it reads "unverified"
+    // in the alarm state until the server proves coverage.
+    const coh = (p.stops == null || p.fills == null)
+      ? `<span class="alarm">▢ unverified</span>`
+      : (p.stops >= p.fills
+          ? `<span class="teal">▣ coherent</span>`
+          : `<span class="alarm">▢ ${p.stops}/${p.fills} stops</span>`);
+    const upnl = DATA_STALE ? `<span class="dim">⚠ ${fmtUsd(p.pnl)}</span>`
+                            : `<span class="${pnlClass(p.pnl)}">${fmtUsd(p.pnl)}</span>`;
     return `<div class="card" style="margin-bottom:10px">
       <h3 style="margin-bottom:8px"><span style="color:var(--brass)">${p.sym}</span>
-        <span class="dim mono" style="font-weight:400;text-transform:none;letter-spacing:0">${p.fills}f · ${p.size} vol · ø ${fmtPx(p.avg)} · uP&L <span class="${pnlClass(p.pnl)}">${fmtUsd(p.pnl)}</span> · stop ${fmtPx(p.stop)} ${coh}</span></h3>
+        <span class="dim mono" style="font-weight:400;text-transform:none;letter-spacing:0">${p.fills}f · ${p.size} vol · ø ${fmtPx(p.avg)} · uP&L ${upnl} · stop ${fmtStopRange(p)} ${coh}</span></h3>
       <div style="overflow-x:auto"><table class="ledger">${rows}${restRows}</table></div></div>`;
   }).join("");
 }
@@ -926,11 +973,22 @@ function riskCard(p){
   }
   const notional = fills.length ? fills.reduce((a,f)=>a+(f.notional ?? f.entry*(f.vol||0)),0) : p.size*(p.avg||0);
   const margin   = fills.reduce((a,f)=>a+(f.margin||0),0);
-  const swept    = p.stop!=null ? (fills.length
-                     ? fills.reduce((a,f)=>a+(p.stop-f.entry)*(f.vol||0),0)
-                     : (p.stop-p.avg)*p.size) : null;
-  const fromHere = (p.stop!=null && p.price!=null) ? (p.stop-p.price)*p.size : null;
-  const dist     = (p.stop&&p.price) ? (p.stop/p.price-1)*100 : null;
+  // W4: each fill has its OWN stop (chains diverge) — swept = Σ (stop_i − entry_i)·vol_i.
+  // Per-fill stop from /api/pair, else the state payload's fstops, else the collapsed stop.
+  const stopAt   = i => (fills[i]&&fills[i].stop!=null) ? fills[i].stop
+                      : (p.fstops&&p.fstops[i]!=null) ? p.fstops[i] : p.stop;
+  const swept    = fills.length
+                     ? (fills.every((f,i)=>stopAt(i)==null) ? null
+                        : fills.reduce((a,f,i)=>a+((stopAt(i)??0)-f.entry)*(f.vol||0),0))
+                     : (p.stop!=null ? (p.stop-p.avg)*p.size : null);
+  const fromHere = p.price==null ? null
+                   : fills.length
+                     ? (fills.every((f,i)=>stopAt(i)==null) ? null
+                        : fills.reduce((a,f,i)=>a+((stopAt(i)??0)-p.price)*(f.vol||0),0))
+                     : (p.stop!=null ? (p.stop-p.price)*p.size : null);
+  const stops    = stopsOf(p, fills);
+  const stopHi   = stops.length?Math.max(...stops):null;   // nearest stop = the binding one
+  const dist     = (stopHi&&p.price) ? (stopHi/p.price-1)*100 : null;
   const rmin=Math.min(...p.rungs), rmax=Math.max(...p.rungs);
   const distCls = dist==null?"dim" : dist>-3?"alarm" : dist>-6?"amber":"ink";
   tag.textContent = `${p.lev}× · live`;
@@ -938,7 +996,7 @@ function riskCard(p){
   const delta=Math.max(0,(p.score||0)-(p.req||0)), mult=[1,2,3][Math.min(delta,2)];
   const bid0 = pends.length ? pends.reduce((a,f)=>f.entry>a.entry?f:a) : null;
   body.innerHTML =
-    `<div class="rk"><span class="k">Stop</span><span class="v"><b class="alarm">${fmtPx(p.stop)}</b> · <span class="${distCls}">${dist!=null?dist.toFixed(1)+"%":"—"}</span> <span class="dim">below price</span></span></div>
+    `<div class="rk"><span class="k">Stop</span><span class="v"><b class="alarm">${fmtStopRange(p, fills)}</b> · <span class="${distCls}">${dist!=null?dist.toFixed(1)+"%":"—"}</span> <span class="dim">below price${stops.length>1&&Math.min(...stops)!==stopHi?" (nearest)":""}</span></span></div>
      <div class="rk"><span class="k">If swept</span><span class="v"><b class="${pnlClass(swept||0)}">${fmtUsd(swept)}</b> <span class="dim">book result</span>${fromHere!=null?` · ${fmtUsd(fromHere)} <span class="dim">from here</span>`:""}</span></div>
      <div class="rk"><span class="k">Exposure</span><span class="v"><b class="violet">$${notional.toFixed(2)}</b> <span class="dim">notional</span>${margin?` · $${margin.toFixed(2)} <span class="dim">margin</span>`:""} <span class="dim">@ ${p.lev}×</span></span></div>
      <div class="rk"><span class="k">Ladder</span><span class="v"><b>${p.fills}</b> <span class="dim">rungs</span> ${fmtPx(rmin)} — ${fmtPx(rmax)} · <span class="dim">ø</span> ${fmtPx(p.avg)}</span></div>
@@ -980,31 +1038,41 @@ function renderLedger(p){
     const msg=p.cardStatus==="BUY"?"Confirmed BUY — no fills yet (awaiting entry).":"No filled rungs — on watch.";
     t.innerHTML=`<tbody><tr><td class="l dim" colspan="8" style="padding:20px 0;text-align:center">${msg}</td></tr></tbody>`; return;
   }
-  // real order rows when the API provides them; otherwise the state summary
+  // real order rows when the API provides them; otherwise the state summary.
+  // W3: protection is per-fill truth — stop + stop_txid ride each row; "live"
+  // renders ONLY on a non-empty stop_txid, unknown renders "unverified".
   const rows = fills.length
-    ? fills.map((f,i)=>({i, ts:f.ts, vol:f.vol, entry:f.entry, not:(f.notional ?? f.entry*(f.vol||0))}))
-    : (p.rungs||[]).map((r,i)=>({i, ts:null, vol:(p.vols?p.vols[i]:p.size/p.fills), entry:r, not:null}));
+    ? fills.map((f,i)=>({i, ts:f.ts, vol:f.vol, entry:f.entry, not:(f.notional ?? f.entry*(f.vol||0)),
+                         stop:f.stop, prot:("stop_txid" in f ? !!f.stop_txid : null)}))
+    : (p.rungs||[]).map((r,i)=>({i, ts:null, vol:(p.vols?p.vols[i]:p.size/p.fills), entry:r, not:null,
+                         stop:(p.fstops?p.fstops[i]:p.stop), prot:(p.prot?p.prot[i]:null)}));
   const maxAbs=Math.max(...rows.map(r=>Math.abs((p.price-r.entry)*(r.vol||0))), 1e-9);
   const tr=rows.map(r=>{
     const up=(p.price-r.entry)*(r.vol||0), dpc=(p.price/r.entry-1)*100;
     const bar=`<span class="pnlbar ${up>=0?'gain':'loss'}" style="width:${Math.max(2,Math.abs(up)/maxAbs*36).toFixed(0)}px"></span>`;
+    const upCell = DATA_STALE ? `<td class="dim">⚠ ${fmtUsd(up)}</td>`
+                              : `<td class="${pnlClass(up)}">${fmtUsd(up)}${bar}</td>`;
+    const stCell = r.prot===true ? `<td class="l st-live">live</td>`
+      : r.prot===false ? `<td class="l alarm" style="font-weight:700">⚠ no-stop</td>`
+      : `<td class="l amber">unverified</td>`;
     return `<tr><td class="l dim">${r.i+1}</td><td class="time">${fmtAge(r.ts)}</td><td class="violet">${fmtVol(r.vol||0)}</td>
       <td style="color:var(--ink)">${fmtPx(r.entry)}</td><td class="dim">${r.not!=null?"$"+r.not.toFixed(2):"—"}</td>
-      <td class="${pnlClass(up)}">${fmtUsd(up)}${bar}</td>
-      <td class="${dpc>=0?'gain':'loss'}">${(dpc>=0?"+":"")+dpc.toFixed(1)}%</td><td class="l st-live">live</td></tr>`;
+      ${upCell}
+      <td class="${DATA_STALE?'dim':(dpc>=0?'gain':'loss')}">${(dpc>=0?"+":"")+dpc.toFixed(1)}%</td>
+      <td class="alarm">${r.stop!=null?fmtPx(r.stop):"—"}</td>${stCell}</tr>`;
   }).join("");
   const bidList = pends.length ? pends.map(b=>({price:b.entry, vol:b.vol, ts:b.ts}))
     : (p.bids&&p.bids.length ? p.bids.map(b=>({price:b.price, vol:b.vol, ts:null}))
        : (p.bid!=null?[{price:p.bid, vol:null, ts:null}]:[]));
   const restRows = bidList.map(b=>
-    `<tr class="rest"><td class="l">○</td><td>${fmtAge(b.ts)}</td><td>${b.vol!=null?fmtVol(b.vol):"—"}</td><td>@ ${fmtPx(b.price)}</td><td colspan="3" class="l">resting post-only</td><td></td></tr>`
+    `<tr class="rest"><td class="l">○</td><td>${fmtAge(b.ts)}</td><td>${b.vol!=null?fmtVol(b.vol):"—"}</td><td>@ ${fmtPx(b.price)}</td><td colspan="4" class="l">resting post-only</td><td></td></tr>`
   ).join("");
   const totNot=rows.reduce((a,r)=>a+(r.not||0),0);
-  t.innerHTML = `<thead><tr><th class="l">#</th><th>age</th><th>vol</th><th>entry</th><th>notional</th><th>uP&L</th><th>Δ now</th><th class="l">state</th></tr></thead>
+  t.innerHTML = `<thead><tr><th class="l">#</th><th>age</th><th>vol</th><th>entry</th><th>notional</th><th>uP&L</th><th>Δ now</th><th>stop</th><th class="l">state</th></tr></thead>
     <tbody>${tr}${restRows}</tbody>
     ${p.rungs?`<tfoot><tr><td class="l">Σ</td><td></td><td class="violet">${p.size}</td><td>ø ${fmtPx(p.avg)}</td>
-      <td>${totNot?"$"+totNot.toFixed(2):"—"}</td><td class="${pnlClass(p.pnl)}">${fmtUsd(p.pnl)}</td>
-      <td class="alarm">stop ${p.stop&&p.price?((p.stop/p.price-1)*100).toFixed(1)+"%":"—"}</td><td></td></tr></tfoot>`:""}`;
+      <td>${totNot?"$"+totNot.toFixed(2):"—"}</td><td class="${DATA_STALE?'dim':pnlClass(p.pnl)}">${DATA_STALE?"⚠ ":""}${fmtUsd(p.pnl)}</td>
+      <td class="alarm">stop ${p.stop&&p.price?((p.stop/p.price-1)*100).toFixed(1)+"%":"—"}</td><td class="alarm">${fmtStopRange(p, fills)}</td><td></td></tr></tfoot>`:""}`;
 }
 function renderPairFeed(p){
   const rows = JOURNAL.filter(j=>j[2]===p.sym+"/USD");
@@ -1131,18 +1199,20 @@ document.querySelectorAll("#jfilter button").forEach(b=>{
   });
 });
 
-/* ── live feel: gentle simulated ticks (respects reduced-motion) ───────── */
-function liveTick(){
-  if(window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
-  const actives=document.querySelectorAll(".frow.t-active .px");
-  actives.forEach(el=>{
-    if(Math.random()<0.5){
-      el.style.transition="color .15s"; el.style.color=Math.random()<0.5?"var(--gain)":"var(--loss)";
-      setTimeout(()=>{ el.style.color="var(--ink)"; }, 220);
-    }
+/* ── W8: real ticks only — flash a price cell ONLY when its price actually
+   changed between refreshes, colored by direction. No simulated motion on a
+   real-money console: implied freshness must equal actual freshness. ─────── */
+function applyFlash(){
+  if(window.matchMedia("(prefers-reduced-motion: reduce)").matches){ FLASH={}; return; }
+  Object.entries(FLASH).forEach(([sym,dir])=>{
+    const el=document.querySelector(`.frow[data-sym="${CSS.escape(sym)}"] .px`);
+    if(!el) return;
+    el.style.transition="color .15s";
+    el.style.color = dir>0 ? "var(--gain)" : "var(--loss)";
+    setTimeout(()=>{ el.style.color=""; }, 420);
   });
+  FLASH={};
 }
-setInterval(liveTick, 2600);
 
 /* ── live clock + countdowns (seeded from /api/state, ticked locally) ───── */
 let SPEC_DONE=false, HASH_DONE=false;
@@ -1210,17 +1280,38 @@ function renderHealth(h){
   const marginRow = h.margin_used!=null
     ? `<span class="mtrack"><span class="mfill" style="width:${(mtot?Math.min(100,h.margin_used/mtot*100):0).toFixed(0)}%"></span></span> <span class="violet">$${h.margin_used.toFixed(2)}</span> used · <span class="violet">$${(h.free_margin||0).toFixed(2)}</span> free · lvl <span class="${lvlCls}" style="font-weight:600">${lvl!=null?lvl+'%':'—'}</span> · capacity ≈ <span class="violet">${h.capacity!=null?h.capacity:'—'}</span> min-fills`
     : `<span class="dim">equity / margin populate on the next bot cycle (broker-only values)</span>`;
+  // W5: MISMATCH must say WHICH pair(s) and by how much — per-pair recon detail
+  let reconSub = `${h.pos_count} pos · ${h.stops_covered}/${h.stops_total}`;
+  if(!h.recon_ok && h.recon_per_pair){
+    const bad = Object.entries(h.recon_per_pair).filter(([,v])=>v && v.ok===false)
+      .map(([s,v])=>`${s.replace('/USD','')} ${v.rows??'?'}r/${v.vol??'?'}v/${v.stops??'?'}s`);
+    if(bad.length) reconSub = `<span class="alarm">${bad.join(" · ")}</span>`;
+  }
+  // W10: open rows on pairs no longer in config render nowhere — loud chip
+  const ghostChip = (h.ghost_pairs && h.ghost_pairs.length)
+    ? `<div class="vsep"></div><div class="stat"><span class="k">Ghost</span><span class="val" style="height:26px;display:flex;align-items:center"><span class="pill crit" title="open positions on pairs not in config.PAIRS — rendered NOWHERE on this console">● ${h.ghost_pairs.length} pos on unlisted pairs: ${h.ghost_pairs.map(s=>s.replace('/USD','')).join(', ')}</span></span></div>`
+    : "";
+  // T/P cycle target + fee drag (new blob keys — hidden when absent)
+  const tpBits=[];
+  if(h.tp_target!=null){
+    const away = (h.equity!=null && h.equity>0) ? ` (+${((h.tp_target/h.equity-1)*100).toFixed(1)}% away)` : "";
+    tpBits.push(`<span class="dim">T/P target</span> <span class="gain" style="font-weight:600">$${(+h.tp_target).toFixed(2)}</span><span class="dim">${away}${h.tp_baseline!=null?` · baseline $${(+h.tp_baseline).toFixed(2)}`:""}</span>`);
+  }
+  if(h.fees_day!=null || h.fees_total!=null)
+    tpBits.push(`<span class="dim">fees</span> <span class="loss">−$${Math.abs(h.fees_day||0).toFixed(2)}</span> <span class="dim">today /</span> <span class="loss">−$${Math.abs(h.fees_total||0).toFixed(2)}</span> <span class="dim">total</span>`);
+  const tpRow = tpBits.length ? `<div class="marginbar">${tpBits.join(' · ')}</div>` : "";
   el.innerHTML=`
     <div><div class="hl">
       <div class="stat"><span class="k">Link</span><span class="val" style="display:flex;gap:5px;align-items:center;height:26px">${linkDots}<span class="sub" style="margin-left:4px">${linkTxt}</span></span></div>
       <div class="vsep"></div>
       <div class="stat"><span class="k">Stops</span><span class="val ${h.stops_covered>=h.stops_total?'teal':'alarm'}">${h.stops_covered}/${h.stops_total}</span><span class="sub">${h.stops_covered>=h.stops_total?'all covered':'GAP'}</span></div>
       <div class="vsep"></div>
-      <div class="stat"><span class="k">Reconcile</span><span class="val">${h.recon_ok?'<span class="teal">ok</span>':'<span class="alarm">MISMATCH</span>'} <span class="time" style="font-size:13px">${h.recon_time||''}</span></span><span class="sub">${h.pos_count} pos · ${h.stops_covered}/${h.stops_total}</span></div>
+      <div class="stat"><span class="k">Reconcile</span><span class="val">${h.recon_ok?'<span class="teal">ok</span>':'<span class="alarm">MISMATCH</span>'} <span class="time" style="font-size:13px">${h.recon_time||''}</span></span><span class="sub">${reconSub}</span></div>
       <div class="vsep"></div>
       <div class="stat"><span class="k">Exec</span><span class="val" style="height:26px;display:flex;align-items:center">${modePill}</span></div>
       <div class="vsep"></div>
       <div class="stat"><span class="k">Halt</span><span class="val" style="height:26px;display:flex;align-items:center">${haltPill}</span></div>
+      ${ghostChip}
     </div></div>
     <div>
       <div class="equityrow">
@@ -1232,6 +1323,7 @@ function renderHealth(h){
         <div class="stat"><span class="k">Book</span><span class="val"><span class="violet">${h.pos_count}</span> <span class="dim" style="font-size:11px">pos</span> · <span class="violet">${h.bid_count}</span> <span class="dim" style="font-size:11px">bids</span></span></div>
       </div>
       <div class="marginbar"><span class="dim">margin</span> ${marginRow}</div>
+      ${tpRow}
     </div>`;
 }
 function renderRegime(r){
@@ -1259,11 +1351,25 @@ async function fetchState(){
   try{
     const r=await fetch("/api/state",{cache:"no-store"}); if(!r.ok) throw 0;
     const st=await r.json();
+    const prevPx=Object.fromEntries(PAIRS.map(p=>[p.sym,p.price]));   // W8: last rendered prices
     PAIRS=st.pairs||[]; PMAP=Object.fromEntries(PAIRS.map(p=>[p.sym,p]));
     JOURNAL=st.journal||[]; HEALTH=st.health||{}; REGIME=st.regime||{};
+    // W1: server freshness verdict — banner + suppressed risk coloring while frozen
+    DATA_STALE=!!st.data_stale; DATA_AGE=st.data_age_s;
+    const sb=document.getElementById("stalebanner");
+    if(sb){
+      if(DATA_STALE){
+        sb.textContent=`⚠ MARKET DATA FROZEN — ${DATA_AGE!=null?fmtAgeS(DATA_AGE)+" old":"no live feed yet"} · prices fall back to last daily close · uP&L and stop proximity unverifiable`;
+        sb.classList.add("on");
+      } else { sb.classList.remove("on"); sb.textContent=""; }
+    }
+    FLASH={};
+    if(!DATA_STALE) PAIRS.forEach(p=>{ const o=prevPx[p.sym];
+      if(o!=null && p.price!=null && p.price!==o) FLASH[p.sym]=p.price>o?1:-1; });
     renderHealth(HEALTH); renderRegime(REGIME); seedClock(HEALTH);
     const onBook=document.querySelector('#fieldmode button.on')?.dataset.fm==='book';
     onBook ? renderBook() : renderField();
+    applyFlash();
     renderJournal();
     if(document.getElementById("view-detail").classList.contains("active"))
       fetchPair(curSym).then(()=>{ if(document.getElementById("view-detail").classList.contains("active")) renderDetail(PMAP[curSym]); });
