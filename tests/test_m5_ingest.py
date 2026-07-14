@@ -41,7 +41,11 @@ def test_provisional_throttle_does_not_consume_window_on_cold_start(tmp_path):
     conn.close()
 
 
-def test_confirmed_recompute_alerts_then_cooldown_suppresses_repeat(tmp_path):
+def test_confirmed_recompute_alerts_then_cooldown_suppresses_repeat(tmp_path, monkeypatch):
+    """The live config runs REALERT_HOURS=0 (operator deliberately disabled the
+    F10 cooldown — no-blockers stance). This test proves the cooldown MECHANISM
+    still works when armed (REALERT_HOURS>0), then documents the override: with
+    it at 0 an immediate repeat is NOT suppressed."""
     conn = store.connect(str(tmp_path / "t.db"))
     now = int(time.time())
     _seed_minimal(conn, now)
@@ -49,17 +53,28 @@ def test_confirmed_recompute_alerts_then_cooldown_suppresses_repeat(tmp_path):
 
     # Force a BUY by monkeypatching evaluate is unnecessary here — we only need
     # to prove the cooldown *mechanism*, so drive it directly via _maybe_alert
-    # with a synthetic ScoreCard-like object.
+    # with a synthetic ScoreCard-like object. ingest binds REALERT_HOURS at
+    # import (`from .config import REALERT_HOURS`), so patch the ingest-module
+    # name, not config.
     class Card:
         status = "BUY"; price = 1.0; score = 5; denom = 7; fired = ["x"]
+
+    monkeypatch.setattr("deepfield.ingest.REALERT_HOURS", 6)
 
     ing._maybe_alert(SYM, Card(), kind="confirmed")
     n1 = conn.execute("SELECT COUNT(*) FROM alerts WHERE symbol=? AND kind='confirmed'", (SYM,)).fetchone()[0]
     assert n1 == 1
 
-    ing._maybe_alert(SYM, Card(), kind="confirmed")  # immediate repeat
+    ing._maybe_alert(SYM, Card(), kind="confirmed")  # immediate repeat, cooldown armed
     n2 = conn.execute("SELECT COUNT(*) FROM alerts WHERE symbol=? AND kind='confirmed'", (SYM,)).fetchone()[0]
     assert n2 == 1, "cooldown failed to suppress an immediate repeat alert"
+
+    # Companion: with the operator's live setting (REALERT_HOURS=0) the repeat
+    # is NOT suppressed — the cooldown is intentionally disarmed, not broken.
+    monkeypatch.setattr("deepfield.ingest.REALERT_HOURS", 0)
+    ing._maybe_alert(SYM, Card(), kind="confirmed")
+    n3 = conn.execute("SELECT COUNT(*) FROM alerts WHERE symbol=? AND kind='confirmed'", (SYM,)).fetchone()[0]
+    assert n3 == 2, "REALERT_HOURS=0 must disable suppression (operator override)"
     conn.close()
 
 

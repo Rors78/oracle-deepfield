@@ -1,7 +1,7 @@
 """M7 regression tests: legacy dca_log.csv import (F10 seeding) + CSV export."""
 import datetime
 
-from deepfield import store, alerter, engine, config
+from deepfield import store, alerter, engine
 
 
 def _write_csv(path, rows):
@@ -39,6 +39,10 @@ def test_import_legacy_skips_unmapped_symbols(tmp_path):
 
 
 def test_imported_row_gates_f10_cooldown(tmp_path):
+    """An imported legacy row must feed the F10 cooldown ledger. The live config
+    runs REALERT_HOURS=0 (operator disabled the cooldown — no-blockers stance),
+    so test the MECHANISM with an armed value, and document the override: at 0
+    the same imported row suppresses nothing."""
     csv_path = tmp_path / "dca_log.csv"
     _write_csv(csv_path, [["2026-07-04 04:23", "LTC", "44.81", "5", "x"]])
     conn = store.connect(str(tmp_path / "t.db"))
@@ -46,7 +50,11 @@ def test_imported_row_gates_f10_cooldown(tmp_path):
 
     now = datetime.datetime(2026, 7, 4, 12, 0, tzinfo=datetime.timezone.utc).timestamp()
     last_ts = store.last_alert_ts(conn, "LTC/USD", "confirmed")
-    assert engine.should_alert(last_ts, now, config.REALERT_HOURS) is False  # ~1h40m later, still cooling down
+    # Mechanism (cooldown armed): ~1h37m after the imported alert, a 6h cooldown
+    # still suppresses.
+    assert engine.should_alert(last_ts, now, realert_hours=6) is False
+    # Operator override (live config runs REALERT_HOURS=0): 0 disables suppression.
+    assert engine.should_alert(last_ts, now, realert_hours=0) is True
     conn.close()
 
 
