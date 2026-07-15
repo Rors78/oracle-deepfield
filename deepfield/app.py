@@ -81,6 +81,49 @@ def _poll_fills_threaded():
         c.close()
 
 
+def _poll_rollover_fees_threaded():
+    """Off-loop (own conn): accumulate margin rollover fees into meta for display
+    (audit 2026-07-13 #2 'rollover-fee accounting' — the config knob + broker reader
+    existed but were never wired to a caller, so the drag was invisible; wired
+    2026-07-15). Two bounded Ledgers reads:
+      - fees_day: exact re-sum since UTC midnight (a day's rollovers stay well under
+        the broker's 1000-entry page cap), so it resets naturally each UTC day.
+      - fees_total: running all-time sum. Each poll sums only the window
+        [fees_cursor, now] and banks it: fees_banked += window, cursor -> the poll
+        instant. So every steady-state read is just the last hour (~a handful of
+        entries, one page) — never a re-walk of all history — and because the cursor
+        lands on an arbitrary poll second while rollovers post only on 4h UTC marks,
+        the bank neither drops nor double-counts a boundary entry. Only the very first
+        poll (cursor 0) walks history once to seed the baseline. Blocking Kraken I/O +
+        display-only writes; never gates an order, never raises into the loop."""
+    from . import broker
+    import datetime as _dt
+    c = store.connect(config.DB_PATH)
+    try:
+        now = _dt.datetime.now(_dt.timezone.utc)
+        midnight = now.replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
+        day = broker.rollover_fees_since(midnight)
+        if day is not None:                          # None == API failure: keep last value
+            store.meta_set(c, "fees_day", round(day[0], 4))
+
+        def _mf(key):
+            try:
+                return float(store.meta_get(c, key, 0) or 0)
+            except (TypeError, ValueError):
+                return 0.0
+        banked, cursor = _mf("fees_banked"), _mf("fees_cursor")
+        win = broker.rollover_fees_since(cursor)
+        if win is not None:                          # None == API failure: bank nothing, retry
+            new_total = round(banked + win[0], 4)
+            store.meta_set(c, "fees_total", new_total)
+            store.meta_set(c, "fees_banked", new_total)
+            store.meta_set(c, "fees_cursor", now.timestamp())
+    except Exception:
+        log.exception("rollover fee poll failed (display only)")
+    finally:
+        c.close()
+
+
 def _sys_journal(conn, text):
     """Isolated 'sys' journal emit for lifecycle events — never raises out."""
     try:
@@ -154,6 +197,9 @@ async def _exec_state_refresh(appstate, conn, ing, interval=15):
     import time as _t
     from . import broker
     ex = ing.executor
+    # monotonic gate for the rollover-fee poll; first run held ~2min past boot so its
+    # one-time history walk doesn't contend with the boot reconcile on the private API.
+    fees_next = _t.monotonic() + 120
     while True:
         try:
             mode = config.EXEC_MODE
@@ -176,6 +222,14 @@ async def _exec_state_refresh(appstate, conn, ing, interval=15):
                 margin_used, free_margin = _bf("m"), _bf("mf")
                 if equity:
                     ex._update_peak(equity)      # DB write, back on the loop
+                # Rollover fee drag (audit 2026-07-13 #2, wired 2026-07-15): poll the
+                # Ledgers API on its own cadence so held-position financing is VISIBLE
+                # next to P&L instead of mimicking market losses. Off-loop (own conn),
+                # display-only, gated so it never rides the 15s equity cadence.
+                rsecs = float(getattr(config, "ROLLOVER_POLL_SECS", 0) or 0)
+                if rsecs > 0 and _t.monotonic() >= fees_next:
+                    fees_next = _t.monotonic() + rsecs
+                    await asyncio.to_thread(_poll_rollover_fees_threaded)
             else:
                 equity = config.PAPER_PORTFOLIO_USD
                 free_margin, margin_used = equity, 0.0
@@ -292,12 +346,26 @@ def _persist_web_live(conn, appstate, equity, margin_used, free_margin, balance)
         lvl = None
     links = ([bool(appstate.links[n].get("up")) for n in sorted(appstate.links)]
              if appstate.links else None)
+
+    # T/P cycle + rollover fee drag: web/server.py and console.html already read these
+    # blob keys (their fee/T-P row renders blank without them). tp values from meta,
+    # fees populated by _poll_rollover_fees_threaded. Best-effort — never blank the blob.
+    def _mg(key):
+        try:
+            v = store.meta_get(conn, key)
+            return float(v) if v not in (None, "") else None
+        except (TypeError, ValueError):
+            return None
+    tpb = _mg("tp_baseline")
     blob = {
         "equity": equity, "margin_used": margin_used, "free_margin": free_margin,
         "margin_level": round(lvl) if lvl else None,
         "capacity": appstate.exec.get("capacity"),
         "prices": prices, "chg": chg, "links": links,
         "mode": config.EXEC_MODE, "started": appstate.started_ts, "updated": _t.time(),
+        "tp_baseline": round(tpb, 2) if tpb else None,
+        "tp_target": round(tpb * (1 + config.TP_PCT), 2) if tpb else None,
+        "fees_day": _mg("fees_day"), "fees_total": _mg("fees_total"),
     }
     store.meta_set(conn, "web_live", _json.dumps(blob))
     if equity is not None:
