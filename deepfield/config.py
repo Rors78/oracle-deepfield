@@ -201,8 +201,12 @@ MARGIN_CAP_PCT = 0.90               # a single position may post at most this fr
 # conviction rung at SIZE_MULT=3 is 9x min (~$30-45 notional — still under the
 # conviction-scaled EXEC_MAX_ORDER_NOTIONAL ceiling). Fail-safe: an unparseable
 # env override runs at 1x (min), never at a surprise size.
+# 2026-07-15: default raised 3 -> 16 (operator "squeeze more profit"). At 1656%
+# margin-level the book was ~6% deployed (~$115 notional on $181 equity); 16x
+# targets margin-level ~350% (~$520 notional, still a 4.4x buffer over the 120%
+# stack floor). Env still overrides. The ceiling scales with SIZE_MULT so no clamp.
 try:
-    SIZE_MULT = max(1.0, float(os.environ.get("DEEPFIELD_SIZE_MULT", "3")))
+    SIZE_MULT = max(1.0, float(os.environ.get("DEEPFIELD_SIZE_MULT", "16")))
 except ValueError:
     _log.error("DEEPFIELD_SIZE_MULT=%r is not a number — running at 1x (min size)",
                os.environ.get("DEEPFIELD_SIZE_MULT"))
