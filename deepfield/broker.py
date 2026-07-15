@@ -340,11 +340,12 @@ def query_order(txid):
 
 
 def setup_raw_log(log_dir):
-    """Route the RAW order audit trail to its own file (append), 5MB x 3."""
-    from logging.handlers import RotatingFileHandler
+    """Route the RAW order audit trail to its own file (append) — UNBOUNDED, no rotation.
+
+    Operator prunes by hand when the drive fills; this bot owns the disk.
+    """
     os.makedirs(log_dir, exist_ok=True)
-    h = RotatingFileHandler(os.path.join(log_dir, "deepfield_orders_raw.log"),
-                            maxBytes=5 * 1024 * 1024, backupCount=3)
+    h = logging.FileHandler(os.path.join(log_dir, "deepfield_orders_raw.log"))
     h.setFormatter(logging.Formatter("%(asctime)s %(message)s"))
     _raw.handlers = [h]
     _raw.setLevel(logging.INFO)
