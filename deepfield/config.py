@@ -206,7 +206,7 @@ MARGIN_CAP_PCT = 0.90               # a single position may post at most this fr
 # targets margin-level ~350% (~$520 notional, still a 4.4x buffer over the 120%
 # stack floor). Env still overrides. The ceiling scales with SIZE_MULT so no clamp.
 try:
-    SIZE_MULT = max(1.0, float(os.environ.get("DEEPFIELD_SIZE_MULT", "16")))
+    SIZE_MULT = max(1.0, float(os.environ.get("DEEPFIELD_SIZE_MULT", "8")))  # 2026-07-16: 16->8. The "16 targets ~$520 notional" model above was 2.8x low — real book hit ~$1,484 (9x equity) and put ML at 106%. Halved to bet smaller.
 except ValueError:
     _log.error("DEEPFIELD_SIZE_MULT=%r is not a number — running at 1x (min size)",
                os.environ.get("DEEPFIELD_SIZE_MULT"))
@@ -249,7 +249,7 @@ RUNTIME_RECON_SECS = 900
 #    a stale/unknown margin level never pauses anything.
 # 0 disables either threshold.
 MARGIN_LEVEL_ALERT_PCT = 150
-MARGIN_LEVEL_STACK_FLOOR_PCT = 120
+MARGIN_LEVEL_STACK_FLOOR_PCT = 160  # 2026-07-16: raised 120->160 after a market drop compressed ML to 106% (7% from trouble). Book operates at the floor, so this ~doubles the liquidation cushion.
 
 # Safety-alert channel (audit 2026-07-13 #3): sound + notify-send (+ Telegram iff the
 # env vars are set) for money-path safety events — UNPROTECTED positions, reconcile
