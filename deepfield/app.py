@@ -3,6 +3,7 @@ writer -> clock-close watchdog -> hourly reconciler -> UI (rich or --simple)
 -> keys (q/p/f/a). SPEC §5/§8/§12.
 """
 import asyncio
+import json
 import logging
 import datetime
 import statistics
@@ -18,6 +19,7 @@ from . import ingest as ingest_mod
 from . import ui
 from . import simple_ui
 from . import alerter
+from . import defense
 from .ws_client import WSClient
 from .state import AppState
 from .keys import KeyController
@@ -287,6 +289,12 @@ async def _exec_state_refresh(appstate, conn, ing, interval=15):
                 "SELECT COUNT(*), COALESCE(SUM(CASE WHEN stop_txid IS NOT NULL "
                 "AND stop_txid<>'' THEN 1 ELSE 0 END),0) FROM orders WHERE status='open'"
             ).fetchone()
+            # Defense buffer engine (Wave 1): price-space liq telemetry +
+            # edge-triggered escalation. Live only (needs the real TradeBalance
+            # notional `v`); display/alert only, never gates or sizes an order.
+            defense_blob = None
+            if mode == "live" and balance:
+                defense_blob = _run_defense(conn, balance, equity, margin_used, _t.time())
             appstate.exec = {
                 "mode": mode, "equity": equity, "open_count": len(positions),
                 "positions": positions, "pending": pending,
@@ -302,6 +310,7 @@ async def _exec_state_refresh(appstate, conn, ing, interval=15):
                 "capacity": _snapshot_capacity(conn, appstate, free_margin),
                 "last_recon": store.meta_get(conn, "last_recon"),
                 "stops_total": scov[0], "stops_covered": scov[1],
+                "defense": defense_blob,
             }
             for sym, ps in list(appstate.pairs.items()):
                 card = ps.confirmed
@@ -325,6 +334,76 @@ async def _exec_state_refresh(appstate, conn, ing, interval=15):
         except Exception:
             log.exception("exec state refresh failed (will retry)")
         await asyncio.sleep(interval)
+
+
+def _journal_safe(conn, kind, symbol, text):
+    """Isolated journal emit for the display path (same rule as executor._journal):
+    a journal failure (locked DB, disk) must never break the exec-refresh loop."""
+    try:
+        store.journal(conn, kind, symbol, text)
+    except Exception:
+        log.exception("defense journal emit failed (display value only)")
+
+
+def _emit_defense_event(conn, ev, computed, tier):
+    """Render one escalation event to journal (kind='defense') + operator alert.
+    Severity keyed on the tier being ENTERED: CRITICAL -> a distinct 'liq-risk'
+    page (throttle key carries the buffer level, so a worsening crash keeps
+    paging instead of being swallowed by the 30-min per-kind throttle); CAUTION
+    -> a 'defense' notify; recovery to NOMINAL / boot baseline -> journal only
+    (no beep on good news). Never raises into the caller."""
+    line = defense.format_line(computed, tier)
+    b = ev.get("buffer")
+    bkey = f"{b:.0f}%buf" if isinstance(b, (int, float)) else "*"
+    if ev.get("kind") == "recritical":
+        text = f"DEFENSE CRITICAL worsening — {line}"
+        _journal_safe(conn, "defense", "*", text)
+        alerter.fire_safety("liq-risk", bkey, text)
+        return
+    frm, to = ev.get("from"), ev.get("to")
+    text = f"DEFENSE {frm or 'init'}→{to} — {line}"
+    _journal_safe(conn, "defense", "*", text)
+    if to == defense.TIER_CRITICAL:
+        alerter.fire_safety("liq-risk", bkey, text)
+    elif to == defense.TIER_CAUTION:
+        alerter.fire_safety("defense", "*", text)
+    # to NOMINAL (recovery / boot baseline) and UNKNOWN: journal only, no alert.
+
+
+def _run_defense(conn, balance, equity, margin_used, now):
+    """Compute the price-space liq buffer from the live TradeBalance, run the
+    edge-triggered escalation state machine (deepfield.defense), persist its
+    state, and journal + alert ONLY on tier transitions (and >=2% further decay
+    within CRITICAL). Returns the computed dict (buffer_call/liq_pct,
+    eff_leverage, tier) for the UI + web blob, or None on failure. TELEMETRY
+    ONLY — never places, cancels, or sizes an order; never raises into the loop."""
+    try:
+        try:
+            v = float(balance.get("v")) if balance else 0.0
+        except (TypeError, ValueError, AttributeError):
+            v = 0.0
+        computed = defense.compute(equity, margin_used, v)
+        nominal = float(getattr(config, "DEFENSE_BUFFER_NOMINAL_PCT", 12.0) or 12.0)
+        critical = float(getattr(config, "DEFENSE_BUFFER_CRITICAL_PCT", 6.0) or 6.0)
+        blq = computed.get("buffer_liq_pct") if computed else None
+        tier = defense.tier_for(blq, nominal, critical)
+        try:
+            prev = json.loads(store.meta_get(conn, "defense_state") or "{}")
+        except Exception:
+            prev = {}
+        new_state, events = defense.step(prev, computed, tier, now)
+        try:
+            store.meta_set(conn, "defense_state", json.dumps(new_state))
+        except Exception:
+            log.exception("defense_state persist failed (display value only)")
+        for ev in events:
+            _emit_defense_event(conn, ev, computed, tier)
+        out = dict(computed) if computed else {}
+        out["tier"] = tier
+        return out
+    except Exception:
+        log.exception("defense engine failed (display value only — trade path unaffected)")
+        return None
 
 
 def _persist_web_live(conn, appstate, equity, margin_used, free_margin, balance):
@@ -357,6 +436,17 @@ def _persist_web_live(conn, appstate, equity, margin_used, free_margin, balance)
         except (TypeError, ValueError):
             return None
     tpb = _mg("tp_baseline")
+    # Defense telemetry (Wave 1) for the web dashboard's future health band. inf
+    # (flat book) -> None so the blob stays STRICT JSON (JS JSON.parse rejects
+    # Infinity); a JS reader treats None as "no positions / no risk".
+    dfn = appstate.exec.get("defense") or {}
+
+    def _finite(x):
+        try:
+            x = float(x)
+            return round(x, 2) if x == x and abs(x) != float("inf") else None
+        except (TypeError, ValueError):
+            return None
     blob = {
         "equity": equity, "margin_used": margin_used, "free_margin": free_margin,
         "margin_level": round(lvl) if lvl else None,
@@ -366,6 +456,10 @@ def _persist_web_live(conn, appstate, equity, margin_used, free_margin, balance)
         "tp_baseline": round(tpb, 2) if tpb else None,
         "tp_target": round(tpb * (1 + config.TP_PCT), 2) if tpb else None,
         "fees_day": _mg("fees_day"), "fees_total": _mg("fees_total"),
+        "buffer_liq_pct": _finite(dfn.get("buffer_liq_pct")),
+        "buffer_call_pct": _finite(dfn.get("buffer_call_pct")),
+        "eff_leverage": _finite(dfn.get("eff_leverage")),
+        "defense_tier": dfn.get("tier"),
     }
     store.meta_set(conn, "web_live", _json.dumps(blob))
     if equity is not None:

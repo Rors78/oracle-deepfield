@@ -14,6 +14,7 @@ from zoneinfo import ZoneInfo
 from . import store
 from . import engine
 from . import config
+from . import defense
 from . import VERSION
 from .signals import FIRED, NOT, NA
 
@@ -89,6 +90,9 @@ def render_frame_text(appstate, conn):
         eq = f"${ex['equity']:,.2f}" if ex.get("equity") is not None else "?"
         rail = "HALTED" if ex.get("halt") else ("OK" if ex.get("rails_ok", True) else "BLOCKED")
         lines.append(f"EXEC {ex['mode'].upper()}  equity {eq}  pos {ex.get('open_count',0)}/{config.MAX_OPEN_POSITIONS}  rails {rail}")
+        dfn = ex.get("defense")
+        if dfn:
+            lines.append(f"DEFENSE {defense.format_line(dfn, dfn.get('tier'))}")
     lines.append(sep)
 
     lines.append(_countdown("D", appstate.daily_interval_begin, 86400, _fmt_hms, now)

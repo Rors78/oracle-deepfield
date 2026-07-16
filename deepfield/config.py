@@ -251,6 +251,17 @@ RUNTIME_RECON_SECS = 900
 MARGIN_LEVEL_ALERT_PCT = 150
 MARGIN_LEVEL_STACK_FLOOR_PCT = 160  # 2026-07-16: raised 120->160 after a market drop compressed ML to 106% (7% from trouble). Book operates at the floor, so this ~doubles the liquidation cushion.
 
+# Defense buffer engine (audit Wave 1, DEEPFIELD_AUDIT_EVIDENCE.md §B/§G). The
+# ml floor above is a ratio; the DEFENSE tiers below are the SAME comfort zone
+# expressed in PRICE space — the adverse basket move (%) that would drop the
+# account to Kraken's ml=40% force-liquidation line. With all pairs at 10:1,
+# ml 160 ≡ exactly a 12% liq buffer, so NOMINAL=12 IS the ml-160 floor, just
+# readable as "how far price can fall before liquidation" instead of a ratio.
+# Tiers on buffer_liq_pct:  NOMINAL >= 12 > CAUTION >= 6 > CRITICAL.
+# TELEMETRY/ALERTING ONLY — deepfield.defense never gates or sizes an order.
+DEFENSE_BUFFER_NOMINAL_PCT = 12.0   # >= this liq buffer is healthy (== the ml-160 floor)
+DEFENSE_BUFFER_CRITICAL_PCT = 6.0   # < this liq buffer pages an escalated 'liq-risk' alert
+
 # Safety-alert channel (audit 2026-07-13 #3): sound + notify-send (+ Telegram iff the
 # env vars are set) for money-path safety events — UNPROTECTED positions, reconcile
 # mismatches, margin-level danger, T/P cycle events. Throttled per event-kind so a

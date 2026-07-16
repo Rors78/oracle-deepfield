@@ -100,6 +100,13 @@ _seed_next = {}         # symbol -> time.monotonic() of next allowed seed attemp
 # an Executor is constructed per poll cycle. 0.0 = run on the first live cycle so a
 # stop that fired during a bot outage is caught minutes after boot, not next restart.
 _recon_next = 0.0
+# Stack-floor pause narration (audit Wave 1): module-level (Executor is rebuilt
+# per cycle) so the "seeds/rungs paused" line is EDGE-triggered — journaled once
+# on entry and once on exit (with duration) — instead of the per-attempt spam the
+# audit found (531 identical safety events in 24h). None = not paused; a monotonic
+# ts = paused since. Operator ALERTING for the danger now lives in the price-space
+# defense engine (app._run_defense); this stays a quiet book-state journal note.
+_stack_pause_since = None
 # Ambiguous-AddOrder recovery: rows born from a network-unknown AddOrder carry a
 # userref and txid NULL; give Kraken this long to show the order before concluding
 # it never landed (poll cadence is ~15s, so this is ~20 attempts).
@@ -357,14 +364,37 @@ class Executor:
                 return True, ""                    # unknown/stale — fail open
             lvl = float(lvl)
             if lvl < floor:
-                self._safety("margin-level", "*",
-                             f"margin level {lvl:.0f}% < stack floor {floor:.0f}% — "
-                             f"seeds/rungs paused (Kraken liquidates at 40%)")
+                self._note_stack_pause(True, lvl, floor)
                 return False, f"margin level {lvl:.0f}% < stack floor {floor:.0f}%"
+            self._note_stack_pause(False, lvl, floor)
             return True, ""
         except Exception:
             log.exception("stack margin check failed — failing open")
             return True, ""
+
+    def _note_stack_pause(self, active, lvl, floor):
+        """Edge-triggered pause narration (audit Wave 1): journal the seeds/rungs
+        pause ONCE on entry and ONCE on exit (with duration), replacing the
+        per-attempt safety spam. State is module-level (the Executor is rebuilt
+        each poll cycle). This is a quiet book-state note — the escalated,
+        operator-paging danger alert now comes from the price-space defense engine
+        (app._run_defense). Trading behavior is UNCHANGED: the caller still pauses
+        below the floor exactly as before. Never raises into the money path."""
+        global _stack_pause_since
+        try:
+            if active and _stack_pause_since is None:
+                _stack_pause_since = time.monotonic()
+                self._journal("defense", "*",
+                              f"seeds/rungs paused — margin level {lvl:.0f}% < stack "
+                              f"floor {floor:.0f}% (see DEFENSE liq-buffer line)")
+            elif not active and _stack_pause_since is not None:
+                dur = time.monotonic() - _stack_pause_since
+                _stack_pause_since = None
+                self._journal("defense", "*",
+                              f"seeds/rungs resumed — margin level {lvl:.0f}% ≥ floor "
+                              f"{floor:.0f}% (paused {dur / 60:.0f}m)")
+        except Exception:
+            log.exception("stack-pause note failed (trade path unaffected)")
 
     def place_entry(self, symbol, entry_price, card):
         if self.mode == "off":

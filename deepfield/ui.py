@@ -27,6 +27,7 @@ from rich.live import Live
 
 from . import engine
 from . import config
+from . import defense
 from . import VERSION
 
 DENVER = ZoneInfo("America/Denver")
@@ -789,6 +790,21 @@ def _margin_line(appstate, w):
         m.append("    capacity ≈ ", style=INK)
         m.append(f"{cap}", style=QTY)
         m.append(" min-fills", style=INK)
+    # Defense buffer (Wave 1): price-space distance to Kraken's force-liq line +
+    # tier. The lvl% above is the lagging ratio; THIS is "how far price can fall".
+    dfn = ex.get("defense")
+    if dfn and dfn.get("tier"):
+        tier = dfn.get("tier")
+        blq = dfn.get("buffer_liq_pct")
+        t_style = {defense.TIER_NOMINAL: HEALTH, defense.TIER_CAUTION: ATTN,
+                   defense.TIER_CRITICAL: RISK}.get(tier, INK)
+        m.append("    liq buffer ", style=INK)
+        if isinstance(blq, (int, float)) and blq == blq and abs(blq) != float("inf"):
+            m.append(f"{blq:.1f}%", style=t_style)
+        else:
+            m.append("—", style=INK)
+        m.append(" ", style=INK)
+        m.append(tier, style=t_style)
     return m
 
 

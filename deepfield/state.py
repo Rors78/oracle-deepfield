@@ -71,6 +71,10 @@ class AppState:
         "realized_day": 0.0, "realized_week": 0.0, "capacity": None,
         "last_recon": None, "free_margin": None, "margin_used": None,
         "stops_total": None, "stops_covered": None,
+        # Defense buffer engine (Wave 1): price-space distance to Kraken's
+        # margin-call / force-liq lines + tier. Populated by _exec_state_refresh
+        # via deepfield.defense; None until the first live poll. Display-only.
+        "defense": None,
     })
 
     def pair(self, symbol):
