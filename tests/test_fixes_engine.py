@@ -8,7 +8,7 @@ from deepfield import engine
 from deepfield import VERSION, USER_AGENT
 from deepfield.signals import FIRED, NOT, NA
 from deepfield.profiles import COMPAT, FULL
-from deepfield.logsetup import setup_logging, MAX_BYTES, BACKUPS
+from deepfield.logsetup import setup_logging
 
 
 # ── F3: young listing -> sig1 N/A, denom shrinks, required recomputed ───────
@@ -83,10 +83,11 @@ def test_F11_single_version_in_user_agent():
     assert USER_AGENT == f"OracleDeepfield/{VERSION}"
 
 
-# ── F12: RotatingFileHandler 5 MB x 3 ───────────────────────────────────────
-def test_F12_rotating_log(tmp_path):
+# ── F12: UNBOUNDED append log (rotation removed on purpose, commit 33dd66d —
+# "deep history is the priority; operator prunes by hand") ───────────────────
+def test_F12_unbounded_log(tmp_path):
     h = setup_logging(debug=False, log_dir=str(tmp_path))
-    assert isinstance(h, RotatingFileHandler)
-    assert h.maxBytes == MAX_BYTES == 5 * 1024 * 1024
-    assert h.backupCount == BACKUPS == 3
+    # plain FileHandler, NOT a RotatingFileHandler: no maxBytes cap, no backups.
+    assert isinstance(h, logging.FileHandler)
+    assert not isinstance(h, RotatingFileHandler)
     assert logging.getLogger().level == logging.INFO
