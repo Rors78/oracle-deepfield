@@ -262,6 +262,31 @@ MARGIN_LEVEL_STACK_FLOOR_PCT = 160  # 2026-07-16: raised 120->160 after a market
 DEFENSE_BUFFER_NOMINAL_PCT = 12.0   # >= this liq buffer is healthy (== the ml-160 floor)
 DEFENSE_BUFFER_CRITICAL_PCT = 6.0   # < this liq buffer pages an escalated 'liq-risk' alert
 
+# ── Reverse gear (audit Wave 4): the DELEVERAGE GOVERNOR ─────────────────────
+# The account had an accelerator (stacking) and a brake (the ml floor pausing new
+# rungs) but NO reverse gear — when the book got too big for its cash, the only way
+# out was price rising, stops firing, or the operator wiring a deposit (2026-07-16,
+# at a 4.4% funding fee). This closes that gap: when the price-space liq buffer
+# decays below TRIGGER, the bot sheds whole fill-lots (largest-notional first) until
+# the buffer recovers to TARGET, then stops. The closes are EVENT-TRIGGERED market
+# orders sized to live open long volume (capped at net long — can never flip short),
+# exactly like the T/P flatten; NEVER a resting sell (long-only rule intact).
+#
+# Per-LOT by design (the 2026-07-16 out-of-band trim incident): it closes whole DB
+# rows — cancel that lot's stop, market-close its volume, retire the row — so it can
+# never oversize a stop (flip risk) or leave a partial position naked. It also cancels
+# resting entry bids on fire, so a bid can't refill and re-lever mid-deleverage (the
+# other failure seen that day). FAIL-OPEN: an unknown/None/flat buffer never trims.
+# Capped per pass so a single bad read can't flatten the book.
+#
+# OFF by default — this is a new money-path ACTUATOR that autonomously SELLS. Arm it
+# deliberately: DEEPFIELD_REVERSE_GEAR=1 (env) or set REVERSE_GEAR_ENABLED=True here.
+REVERSE_GEAR_ENABLED = os.environ.get("DEEPFIELD_REVERSE_GEAR", "0") == "1"
+REVERSE_GEAR_TRIGGER_PCT = 8.0      # fire when liq buffer < this (lower CAUTION band, above CRITICAL 6)
+REVERSE_GEAR_TARGET_PCT = 12.0      # trim until liq buffer >= this (== the 12% law / ml-160 floor)
+REVERSE_GEAR_MAX_LOTS_PER_PASS = 4  # cap lots closed per poll pass; re-evaluates next cycle (bad read can't flatten)
+REVERSE_GEAR_CANCEL_BIDS = True     # cancel resting entry bids on fire so they can't re-lever mid-trim
+
 # Safety-alert channel (audit 2026-07-13 #3): sound + notify-send (+ Telegram iff the
 # env vars are set) for money-path safety events — UNPROTECTED positions, reconcile
 # mismatches, margin-level danger, T/P cycle events. Throttled per event-kind so a

@@ -629,6 +629,7 @@ class Executor:
         # resting bid died, then seed a starter chain on any SEED_PAIRS symbol with
         # nothing working.
         self._reprotect_naked_open()
+        self._reverse_gear()             # deleverage governor (Wave 4) — sheds before it grows
         self._ensure_ladder_rungs()
         self._seed_chains()
         # Runtime exchange-truth sweep (audit 2026-07-13 #1): re-run the full
@@ -848,6 +849,174 @@ class Executor:
                 self.place_entry(sym, live, card=None)
         except Exception:
             log.exception("seed pass failed (poll_fills unaffected)")
+
+    # ── reverse gear: deleverage governor (Wave 4) ───────────────────────────
+
+    def _liq_buffer(self, bal):
+        """Price-space liq buffer % from a live TradeBalance (e, m, v), via the
+        shared defense math (ONE definition, so the governor and the Wave-1
+        telemetry can never disagree). None on unknown/bad read."""
+        from . import defense
+        if not bal:
+            return None
+        try:
+            e = broker.equity(bal)
+            m = float(bal.get("m") or 0)
+            v = float(bal.get("v") or 0)
+        except (TypeError, ValueError):
+            return None
+        c = defense.compute(e, m, v)
+        return c.get("buffer_liq_pct") if c else None
+
+    def _pair_net_long(self, sym):
+        """Live net long volume for a pair from OpenPositions (long lots' vol minus
+        vol_closed; shorts ignored). None on API FAILURE (never guess — a failed read
+        must not be read as 'nothing to back the close', which would sell blind)."""
+        key = _REST_PAIR.get(sym, "")
+        kr = broker.open_positions()
+        if kr is None:
+            return None
+        tot = 0.0
+        for p in (kr.values() if isinstance(kr, dict) else []):
+            if _norm_pair_key(p.get("pair", "")) != key:
+                continue
+            if str(p.get("type", "")).lower() == "sell":
+                continue
+            try:
+                tot += max(0.0, float(p.get("vol", 0) or 0) - float(p.get("vol_closed", 0) or 0))
+            except (TypeError, ValueError):
+                continue
+        return tot
+
+    def _pick_trim_lot(self):
+        """The next whole fill-lot to shed: the largest-notional OPEN row (sheds the
+        most exposure per close -> fewest closes, least fee drag). Rows closed earlier
+        in this pass are already status!='open', so they self-exclude. None when flat."""
+        row = self.conn.execute(
+            "SELECT id, symbol, margin_pair, volume, leverage, stop_txid, "
+            "COALESCE(notional,0) FROM orders WHERE status='open' AND mode=? "
+            "ORDER BY COALESCE(notional,0) DESC, volume DESC LIMIT 1", (self.mode,)).fetchone()
+        if not row:
+            return None
+        return {"id": row[0], "symbol": row[1], "margin_pair": row[2], "volume": row[3],
+                "leverage": row[4], "stop_txid": row[5], "notional": row[6]}
+
+    def _close_lot(self, lot):
+        """Close ONE whole fill-lot: cancel its stop, market-close its long volume
+        (capped at the pair's live net long so it can NEVER flip short), retire the
+        row. The per-lot primitive of the reverse gear — closes a whole DB row exactly
+        as the bot models it, so no stop is ever left oversized or partially naked.
+        Returns True on a confirmed close. On a FAILED close it NULLs the row's
+        stop_txid so _reprotect_naked_open re-arms a stop next cycle (never leaves a
+        silently-naked lot). Never raises."""
+        oid = lot["id"]; sym = lot["symbol"]; mpair = lot["margin_pair"]
+        lev = lot["leverage"]; stx = lot["stop_txid"]
+        try:
+            vol = float(lot["volume"] or 0)
+        except (TypeError, ValueError):
+            vol = 0.0
+        if vol <= 0:
+            self.conn.execute("UPDATE orders SET status='closed', error='reverse-gear (zero vol)' WHERE id=?", (oid,))
+            self.conn.commit()
+            return True
+        net = self._pair_net_long(sym)
+        if net is None:
+            log.warning("REVERSE-GEAR %s: net long unavailable — not closing lot %d blind", sym, oid)
+            return False
+        info = store.get_pair_info(self.conn, sym) or {}
+        lot_dec = info.get("lot_decimals")
+        close_vol = _round_down(min(vol, net), lot_dec) if lot_dec is not None else min(vol, net)
+        if close_vol <= 0:
+            # position already gone/flat for this pair — retire the row, drop its stop
+            if stx:
+                broker.cancel_order(stx)
+            self.conn.execute("UPDATE orders SET status='closed', stop_txid=NULL, error='reverse-gear (no backing)' WHERE id=?", (oid,))
+            self.conn.commit()
+            return True
+        volstr = f"{close_vol:.{lot_dec}f}" if lot_dec is not None else f"{close_vol:.8f}"
+        if stx:                                   # cancel this lot's whole stop first (no partial resize)
+            broker.cancel_order(stx)
+        res = broker.private("/0/private/AddOrder",
+                             {"pair": mpair, "type": "sell", "ordertype": "market",
+                              "volume": volstr, "leverage": str(lev)}, idempotent=False)
+        if res and res.get("txid"):
+            self.conn.execute("UPDATE orders SET status='closed', stop_txid=NULL, error='reverse-gear trim' WHERE id=?", (oid,))
+            self.conn.commit()
+            log.warning("REVERSE-GEAR %s: closed lot %d (%s) %s", sym, oid, volstr, res["txid"][0])
+            self._journal("reverse-gear", sym, f"trim: market-closed {volstr} (lot {oid})")
+            return True
+        # close FAILED — the stop is already canceled, so NULL it in the DB too and let
+        # _reprotect_naked_open re-arm a stop next cycle (never a silently-naked lot).
+        self.conn.execute("UPDATE orders SET stop_txid=NULL, error='reverse-gear close failed' WHERE id=?", (oid,))
+        self.conn.commit()
+        log.error("REVERSE-GEAR %s: market close FAILED for lot %d — stop dropped, reprotect re-arms next cycle", sym, oid)
+        self._journal("reverse-gear", sym, f"trim close FAILED lot {oid} — reprotect will re-arm")
+        return False
+
+    def _cancel_resting_bids(self):
+        """On a reverse-gear fire, cancel every resting entry bid so a fill can't
+        re-lever the book mid-deleverage (the 2026-07-16 incident: ladder bids kept
+        filling on the exchange and grew the book back while it was being trimmed).
+        Best-effort, isolated."""
+        oo = broker.open_orders()
+        if oo is None:
+            return 0
+        n = 0
+        for txid, o in oo.items():
+            if (o.get("descr") or {}).get("type") == "buy":
+                broker.cancel_order(txid)
+                n += 1
+        if n:
+            self.conn.execute("UPDATE orders SET status='canceled', "
+                              "error='reverse-gear: bid canceled to stop re-lever' WHERE status='pending' AND mode=?",
+                              (self.mode,))
+            self.conn.commit()
+            self._journal("reverse-gear", "*", f"canceled {n} resting bid(s) to prevent re-lever")
+        return n
+
+    def _reverse_gear(self):
+        """DELEVERAGE GOVERNOR. When the price-space liq buffer decays below
+        REVERSE_GEAR_TRIGGER_PCT, shed whole fill-lots (largest notional first) until
+        it recovers to REVERSE_GEAR_TARGET_PCT — event-triggered market closes of open
+        long volume (capped at net long, never a resting sell, never net short). Per
+        LOT so a stop can never oversize/naked. FAIL-OPEN: unknown/flat buffer never
+        trims. Capped per pass (a bad read can't flatten the book). LIVE + armed only.
+        Isolated — never raises into poll_fills."""
+        from . import defense
+        if self.mode != "live" or not getattr(config, "REVERSE_GEAR_ENABLED", False):
+            return
+        try:
+            trigger = float(getattr(config, "REVERSE_GEAR_TRIGGER_PCT", 8.0) or 8.0)
+            target = float(getattr(config, "REVERSE_GEAR_TARGET_PCT", 12.0) or 12.0)
+            max_lots = int(getattr(config, "REVERSE_GEAR_MAX_LOTS_PER_PASS", 4) or 4)
+            start = self._liq_buffer(broker.trade_balance_full())
+            if not defense.should_trim(start, trigger):
+                return                               # healthy / unknown / flat — never trim blind
+            log.warning("REVERSE-GEAR ARMED: liq buffer %.1f%% < trigger %.0f%% — deleveraging to %.0f%%",
+                        start, trigger, target)
+            if getattr(config, "REVERSE_GEAR_CANCEL_BIDS", True):
+                self._cancel_resting_bids()          # stop re-lever before shedding
+            closed = []
+            for _ in range(max_lots):
+                buf = self._liq_buffer(broker.trade_balance_full())
+                if buf is None or buf >= target:
+                    break
+                lot = self._pick_trim_lot()
+                if not lot:
+                    log.warning("REVERSE-GEAR: buffer %.1f%% still < target but no lots left to shed", buf)
+                    break
+                if not self._close_lot(lot):
+                    break                            # a close failed — stop, re-evaluate next cycle
+                closed.append(lot["symbol"])
+            if closed:
+                end = self._liq_buffer(broker.trade_balance_full())
+                self._safety("reverse-gear", "*",
+                             f"deleveraged: liq buffer {start:.1f}% < trigger {trigger:.0f}% — shed "
+                             f"{len(closed)} lot(s) [{', '.join(closed)}] -> buffer "
+                             f"{end:.1f}%" if end is not None else
+                             f"deleveraged: shed {len(closed)} lot(s) [{', '.join(closed)}]")
+        except Exception:
+            log.exception("reverse gear failed (poll_fills unaffected)")
 
     # ── equity take-profit (operator 2026-07-13) ─────────────────────────────
 
