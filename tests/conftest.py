@@ -25,3 +25,7 @@ def _isolate_operator_stack_knobs(monkeypatch):
     monkeypatch.setattr(config, "SIZE_MULT", 1.0)
     monkeypatch.setattr(config, "SEED_PAIRS", ())
     monkeypatch.setattr(config, "TP_ENABLED", False)
+    # Reverse gear (Wave 4) now defaults ARMED — like the knobs above it adds live
+    # behavior to poll_fills; default it inert so legacy tests test exactly what they
+    # tested. The dedicated test_reverse_gear.py monkeypatches it on.
+    monkeypatch.setattr(config, "REVERSE_GEAR_ENABLED", False)

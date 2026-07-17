@@ -279,9 +279,11 @@ DEFENSE_BUFFER_CRITICAL_PCT = 6.0   # < this liq buffer pages an escalated 'liq-
 # other failure seen that day). FAIL-OPEN: an unknown/None/flat buffer never trims.
 # Capped per pass so a single bad read can't flatten the book.
 #
-# OFF by default — this is a new money-path ACTUATOR that autonomously SELLS. Arm it
-# deliberately: DEEPFIELD_REVERSE_GEAR=1 (env) or set REVERSE_GEAR_ENABLED=True here.
-REVERSE_GEAR_ENABLED = os.environ.get("DEEPFIELD_REVERSE_GEAR", "0") == "1"
+# ARMED (operator-enabled 2026-07-16, after the near-margin-call + manual deleverage):
+# this actuator autonomously SELLS to deleverage when the liq buffer decays below
+# TRIGGER. Default ON so it survives a desktop relaunch; set DEEPFIELD_REVERSE_GEAR=0
+# (env) to disable without a code edit. Dormant unless the buffer is actually < TRIGGER.
+REVERSE_GEAR_ENABLED = os.environ.get("DEEPFIELD_REVERSE_GEAR", "1") != "0"
 REVERSE_GEAR_TRIGGER_PCT = 8.0      # fire when liq buffer < this (lower CAUTION band, above CRITICAL 6)
 REVERSE_GEAR_TARGET_PCT = 12.0      # trim until liq buffer >= this (== the 12% law / ml-160 floor)
 REVERSE_GEAR_MAX_LOTS_PER_PASS = 4  # cap lots closed per poll pass; re-evaluates next cycle (bad read can't flatten)
