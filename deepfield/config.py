@@ -361,7 +361,21 @@ STRESS_LEVERAGE_ALERT_RATIO = 1.0
 # (env) to disable without a code edit. Dormant unless the buffer is actually < TRIGGER.
 REVERSE_GEAR_ENABLED = os.environ.get("DEEPFIELD_REVERSE_GEAR", "1") != "0"
 REVERSE_GEAR_TRIGGER_PCT = 8.0      # fire when liq buffer < this (lower CAUTION band, above CRITICAL 6)
-REVERSE_GEAR_TARGET_PCT = 12.0      # trim until liq buffer >= this (== the 12% law / ml-160 floor)
+# 2026-07-19: target 12 -> 16 (operator), to land on the ml-200 stack floor rather
+# than the retired ml-160 one. Previously the gear trimmed to 12% and the floor then
+# refused to grow below 16%, so a fired gear left the book parked in a dead band it
+# could not trade out of. Landing ON the floor means post-trim the book is
+# immediately allowed to accumulate again.
+#
+# This makes the gear sell HARDER, which is the real cost of the change. At all-10:1,
+# firing at an 8% buffer means L_eff 8.33x; recovering to 12% sheds ~25% of notional,
+# recovering to 16% sheds ~40% — roughly 60% more closed per event, and every close
+# crystallises loss plus fees (the 2026-07-16 manual trim cost ~$12.33 + $3.44). The
+# trigger deliberately stays at 8: when to act is an emergency question, how far to
+# correct is a coherence one, and only the latter changed. MAX_LOTS_PER_PASS still
+# caps each pass, so a deeper target simply takes more passes rather than one big
+# flatten.
+REVERSE_GEAR_TARGET_PCT = 16.0      # trim until liq buffer >= this (== the ml-200 floor)
 REVERSE_GEAR_MAX_LOTS_PER_PASS = 4  # cap lots closed per poll pass; re-evaluates next cycle (bad read can't flatten)
 REVERSE_GEAR_CANCEL_BIDS = True     # cancel resting entry bids on fire so they can't re-lever mid-trim
 
