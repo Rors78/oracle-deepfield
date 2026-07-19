@@ -296,6 +296,28 @@ MARGIN_LEVEL_STACK_FLOOR_PCT = 160  # 2026-07-16: raised 120->160 after a market
 DEFENSE_BUFFER_NOMINAL_PCT = 12.0   # >= this liq buffer is healthy (== the ml-160 floor)
 DEFENSE_BUFFER_CRITICAL_PCT = 6.0   # < this liq buffer pages an escalated 'liq-risk' alert
 
+# --- Intraday stress telemetry (2026-07-19) -------------------------------------
+# buffer_liq_pct is denominated in ADVERSE BASKET MOVE, so the honest question is
+# "how big a basket move actually happens?" Measured over 2y of daily bars on 20
+# live pairs: worst 1-day -16.76%, worst 5-day -23.17%, with mean pairwise
+# correlation 0.60 — a single-beta basket whose tail is common, not idiosyncratic.
+# Against that, buffer = 1/L_eff - 0.40*m/v says a book at 5x per-pair leverage
+# only survives the worst observed DAY below ~4.0x effective, and the worst 5-DAY
+# stretch below ~3.2x. The book ran 9x into a 3.1% buffer twice.
+#
+# These are TELEMETRY thresholds, not brakes: crossing them journals and alerts,
+# and never blocks, sizes or cancels an order. The reverse gear (below) remains the
+# only actuator. Sourced from the DAILY series so the reference move is a real
+# historical basket move, refreshed as history grows rather than frozen here.
+STRESS_ENABLED = True
+STRESS_POLL_SECS = 300              # own cadence; well off the ~8s exec loop
+STRESS_INTRADAY_LOOKBACK_BARS = 96  # 96 x 15m == last 24h of intraday structure
+STRESS_REFERENCE_DAYS = 730         # daily-bar window the reference move is drawn from
+STRESS_REFERENCE_HORIZONS = (1, 5)  # measure worst 1-day and 5-day basket moves
+# Alert when live eff_leverage exceeds the ceiling that survives the worst observed
+# 1-day basket move. Multiplier gives a little headroom before paging.
+STRESS_LEVERAGE_ALERT_RATIO = 1.0
+
 # ── Reverse gear (audit Wave 4): the DELEVERAGE GOVERNOR ─────────────────────
 # The account had an accelerator (stacking) and a brake (the ml floor pausing new
 # rungs) but NO reverse gear — when the book got too big for its cash, the only way

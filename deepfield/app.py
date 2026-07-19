@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import datetime
+import math
 import statistics
 import time
 
@@ -178,6 +179,121 @@ def _poll_rollover_fees_threaded():
         c.close()
 
 
+def _stress_weights(conn):
+    """[(symbol, notional)] for the OPEN book, notional at last known entry price.
+
+    Only the PROPORTIONS matter (basket_index normalises), so entry-priced notional
+    is sufficient and avoids needing a live tick for every symbol. Deliberately
+    approximate: DB volume can lag Kraken's by vol_closed, so a symbol's share may
+    be slightly off. That biases the basket weighting, never the absolute buffer —
+    e/m/v for the actual buffer numbers come from live TradeBalance, not from here."""
+    rows = conn.execute(
+        "SELECT symbol, SUM(volume * entry) FROM orders WHERE status='open' "
+        "AND volume > 0 AND entry > 0 GROUP BY symbol").fetchall()
+    return [(r[0], float(r[1])) for r in rows if r[1] and r[1] > 0]
+
+
+def _aligned_series(conn, symbols, interval, limit, field="c"):
+    """[(symbol, [prices oldest->newest])] truncated to a COMMON bar count.
+
+    Alignment matters: basket math over unaligned series invents moves that never
+    happened. Bars are taken newest-first then reversed, and every series is cut to
+    the shortest so all of them cover the same span."""
+    out = []
+    for s in symbols:
+        rows = conn.execute(
+            f"SELECT {field} FROM candles WHERE pair=? AND interval=? AND closed=1 "
+            "ORDER BY ts DESC LIMIT ?", (s, interval, limit)).fetchall()
+        p = [r[0] for r in reversed(rows) if r[0] and r[0] > 0]
+        if len(p) > 1:
+            out.append((s, p))
+    if not out:
+        return []
+    n = min(len(p) for _, p in out)
+    return [(s, p[-n:]) for s, p in out]
+
+
+def _poll_stress_threaded():
+    """Off-loop (own conn): intraday liq-buffer stress telemetry.
+
+    buffer_liq_pct is denominated in ADVERSE BASKET MOVE, so this measures the moves
+    that actually happen and reports what they would do to the CURRENT book:
+
+      - intraday_dd: worst basket drawdown over the last 24h of 15m LOWS. Daily bars
+        structurally cannot show this — a -3% daily close may have wicked -9% and
+        recovered, and the point-in-time buffer poll never saw it. This is the
+        near-miss the operator otherwise learns about from the exchange app.
+      - ref_move_1d/5d: worst 1- and 5-day basket moves over ~2y of daily bars, the
+        historical reference the ceiling is judged against.
+      - lev_ceiling: eff-leverage ceiling that survives ref_move_1d, from live m/v.
+
+    TELEMETRY ONLY: writes meta and journals/alerts on a breach. It never places,
+    cancels or sizes an order — the reverse gear stays the only actuator. Blocking
+    DB reads; never raises into the loop."""
+    from . import broker
+    c = store.connect(config.DB_PATH)
+    try:
+        weights = _stress_weights(c)
+        if not weights:
+            store.meta_set(c, "stress_state", json.dumps({"flat": True}))
+            return
+        syms = [s for s, _ in weights]
+        wmap = dict(weights)
+
+        intr = _aligned_series(c, syms, 15, int(config.STRESS_INTRADAY_LOOKBACK_BARS), field="l")
+        intraday_dd = defense.basket_drawdown([(wmap[s], p) for s, p in intr]) if intr else 0.0
+
+        daily = _aligned_series(c, syms, 1440, int(config.STRESS_REFERENCE_DAYS), field="c")
+        idx = defense.basket_index([(wmap[s], p) for s, p in daily]) if daily else []
+        refs = {h: defense.worst_move(idx, h) for h in config.STRESS_REFERENCE_HORIZONS}
+
+        bal = broker.trade_balance_full()
+        if not bal:
+            return                                   # no live e/m/v: stay silent
+        e = broker.equity(bal)
+        m, v = float(bal.get("m") or 0), float(bal.get("v") or 0)
+        ref1 = refs.get(1) or 0.0
+        out = {
+            "intraday_dd_pct": round(intraday_dd * 100, 3),
+            "intraday_bars": len(intr[0][1]) if intr else 0,
+            "ref_move_pct": {str(h): round(r * 100, 3) for h, r in refs.items()},
+            "buffer_now_pct": None, "buffer_under_intraday_pct": None,
+            "lev_now": None, "lev_ceiling": None,
+        }
+        cur = defense.compute(e, m, v)
+        if cur:
+            out["buffer_now_pct"] = _round_or_none(cur.get("buffer_liq_pct"))
+            out["lev_now"] = _round_or_none(cur.get("eff_leverage"), 3)
+        out["buffer_under_intraday_pct"] = _round_or_none(
+            defense.stress_buffer(e, m, v, intraday_dd))
+        ceiling = defense.max_survivable_leverage(m, v, ref1)
+        out["lev_ceiling"] = _round_or_none(ceiling, 3)
+        store.meta_set(c, "stress_state", json.dumps(out))
+
+        lev, ratio = out["lev_now"], float(config.STRESS_LEVERAGE_ALERT_RATIO or 1.0)
+        if (lev is not None and ceiling is not None and ref1 > 0
+                and not math.isinf(ceiling) and lev > ceiling * ratio):
+            text = (f"STRESS leverage {lev:.2f}x over the {ceiling:.2f}x ceiling that "
+                    f"survives the worst 1-day basket move on record ({ref1*100:.1f}%) "
+                    f"— buffer {out['buffer_now_pct']}%")
+            _journal_safe(c, "defense", "*", text)
+            alerter.fire_safety("liq-risk", f"lev{lev:.1f}", text)
+    except Exception:
+        log.exception("stress telemetry poll failed (display only)")
+    finally:
+        c.close()
+
+
+def _round_or_none(x, nd=3):
+    try:
+        f = float(x)
+    except (TypeError, ValueError):
+        return None
+    if math.isnan(f):
+        return None
+    return None if math.isinf(f) else round(f, nd)
+
+
 def _sys_journal(conn, text):
     """Isolated 'sys' journal emit for lifecycle events — never raises out."""
     try:
@@ -256,6 +372,9 @@ async def _exec_state_refresh(appstate, conn, ing, interval=15):
     fees_next = _t.monotonic() + 120
     kr_pos = {}   # last-good Kraken per-pair open-P/L truth (display-only; survives blips)
     krpos_next = _t.monotonic()   # throttle gate for the per-pair OpenPositions(docalcs) poll
+    # Intraday stress telemetry: held past boot like the fee poll so its multi-pair
+    # candle scan doesn't contend with the boot reconcile.
+    stress_next = _t.monotonic() + 90
     while True:
         try:
             mode = config.EXEC_MODE
@@ -303,6 +422,13 @@ async def _exec_state_refresh(appstate, conn, ing, interval=15):
                             kr_pos = _agg_kraken_positions(pc)
                     except Exception:
                         log.exception("open_positions_calc failed (display value only)")
+                # Intraday liq-buffer stress (2026-07-19). Off-loop, own conn, own
+                # cadence; reads stored candles + one TradeBalance. Telemetry only.
+                ssecs = float(getattr(config, "STRESS_POLL_SECS", 0) or 0)
+                if (getattr(config, "STRESS_ENABLED", False) and ssecs > 0
+                        and _t.monotonic() >= stress_next):
+                    stress_next = _t.monotonic() + ssecs
+                    await asyncio.to_thread(_poll_stress_threaded)
             else:
                 equity = config.PAPER_PORTFOLIO_USD
                 free_margin, margin_used = equity, 0.0
@@ -548,6 +674,13 @@ def _persist_web_live(conn, appstate, equity, margin_used, free_margin, balance)
             return float(v) if v not in (None, "") else None
         except (TypeError, ValueError):
             return None
+
+    def _mg_json(key):
+        try:
+            v = store.meta_get(conn, key)
+            return json.loads(v) if v else None
+        except Exception:
+            return None
     tpb = _mg("tp_baseline")
     # Defense telemetry (Wave 1) for the web dashboard's future health band. inf
     # (flat book) -> None so the blob stays STRICT JSON (JS JSON.parse rejects
@@ -573,6 +706,9 @@ def _persist_web_live(conn, appstate, equity, margin_used, free_margin, balance)
         "buffer_call_pct": _finite(dfn.get("buffer_call_pct")),
         "eff_leverage": _finite(dfn.get("eff_leverage")),
         "defense_tier": dfn.get("tier"),
+        # Intraday stress telemetry (_poll_stress_threaded). Read from meta rather
+        # than recomputed here so the blob build stays a cheap pure read.
+        "stress": _mg_json("stress_state"),
         # Kraken ground-truth open P/L (see _agg_kraken_positions): total header number +
         # per-pair map so the dashboard shows what Kraken shows, not a ledger recompute.
         "open_pnl": _finite(appstate.exec.get("open_pnl")),

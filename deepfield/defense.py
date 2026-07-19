@@ -146,6 +146,120 @@ def project_buffer(e, m, v, d_margin=0.0, d_value=0.0):
     return (e - LIQ_ML * (m - d_margin)) / nv * 100.0
 
 
+def stress_buffer(e, m, v, adverse_move):
+    """Liq buffer % the CURRENT book would have after an adverse basket move of
+    `adverse_move` (a fraction: 0.10 == the whole book down 10%).
+
+    Under a move d the loss is v*d, so equity falls to e - v*d and notional to
+    v*(1-d). Used margin is NOT scaled: Kraken sizes margin off the position's
+    OPENING cost, so it does not shrink as the mark falls — that is precisely why
+    a drawdown compresses the margin level instead of leaving it flat.
+
+    Returns a float that may be <= 0, meaning the move would have breached
+    liquidation — the caller needs that as a number, not as None. None only on
+    unusable inputs. Pure; never raises."""
+    try:
+        e = float(e); m = float(m); v = float(v); d = float(adverse_move)
+    except (TypeError, ValueError):
+        return None
+    if not (e > 0) or m < 0 or d < 0:
+        return None
+    if v <= 0:
+        return math.inf                    # flat book: nothing to mark down
+    if d >= 1.0:
+        return None                        # a 100% basket move is not a scenario
+    return (e - v * d - LIQ_ML * m) / (v * (1.0 - d)) * 100.0
+
+
+def max_survivable_leverage(m, v, adverse_move):
+    """The effective-leverage ceiling below which `adverse_move` does NOT liquidate.
+
+    From the same law compute() uses: buffer = e/v - LIQ_ML*m/v, and e/v is exactly
+    1/eff_leverage. Requiring buffer > d gives
+
+        L_eff  <  1 / (d + LIQ_ML * m / v)
+
+    Derived from LIVE m/v rather than a nominal per-pair leverage, so it stays
+    correct on a mixed-leverage book. Returns None when m/v is unusable, +inf for a
+    flat book (nothing to liquidate). Pure."""
+    try:
+        m = float(m); v = float(v); d = float(adverse_move)
+    except (TypeError, ValueError):
+        return None
+    if v <= 0:
+        return math.inf
+    if m < 0 or d < 0:
+        return None
+    denom = d + LIQ_ML * m / v
+    if denom <= 0:
+        return math.inf
+    return 1.0 / denom
+
+
+def basket_index(series):
+    """NOTIONAL-WEIGHTED basket index, normalised to 1.0 at the first bar.
+
+    `series` is [(weight, [prices oldest->newest]), ...]; weights need not sum to 1.
+    All price lists must be time-aligned — the caller owns that, because mixing
+    unaligned series would silently invent moves that never happened; the length is
+    truncated to the shortest. Returns [] when there is nothing to measure. Pure."""
+    rows = [(float(w), p) for w, p in (series or []) if w and p and len(p) > 1]
+    if not rows:
+        return []
+    n = min(len(p) for _, p in rows)
+    total = sum(w for w, _ in rows)
+    if n < 2 or total <= 0:
+        return []
+    base = []
+    for w, p in rows:
+        p0 = next((x for x in p[:n] if x and x > 0), None)
+        if p0:
+            base.append((w / total, p[:n], p0))
+    if not base:
+        return []
+    out = []
+    for i in range(n):
+        idx = 0.0
+        for w, p, p0 in base:
+            v = p[i]
+            idx += w * ((v / p0) if (v and v > 0) else 1.0)   # gap -> hold last-known ratio
+        out.append(idx)
+    return out
+
+
+def basket_drawdown(series):
+    """Worst peak-to-trough move of the weighted basket, as a fraction.
+
+    This is the quantity buffer_liq_pct is denominated in: an adverse BASKET move.
+    Feeding it 15m LOWS surfaces intraday approaches that daily closes structurally
+    cannot show — a daily bar closing -3% may have wicked -9% and recovered. Pure."""
+    idx = basket_index(series)
+    peak, worst = None, 0.0
+    for v in idx:
+        if peak is None or v > peak:
+            peak = v
+        if peak and peak > 0:
+            worst = max(worst, (peak - v) / peak)
+    return worst
+
+
+def worst_move(index, horizon):
+    """Most adverse `horizon`-bar move in a basket index, as a POSITIVE fraction
+    (0.1676 == the basket fell 16.76% over that many bars). 0.0 if none adverse.
+
+    Distinct from basket_drawdown: that finds the worst peak-to-trough over the
+    whole window, this finds the worst move over a FIXED span — which is what maps
+    onto "could the book survive a day like the worst day". Pure."""
+    if not index or horizon < 1 or len(index) <= horizon:
+        return 0.0
+    worst = 0.0
+    for i in range(len(index) - horizon):
+        a, b = index[i], index[i + horizon]
+        if a and a > 0:
+            worst = max(worst, (a - b) / a)
+    return worst
+
+
 def should_trim(buffer_liq_pct, trigger_pct):
     """The reverse-gear trigger. FAIL-OPEN: None/NaN/inf (unknown or flat book) is
     never a trim — the governor never sells on missing data. Pure."""
