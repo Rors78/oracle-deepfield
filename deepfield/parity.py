@@ -81,7 +81,10 @@ def run_series_equality(db_path=None):
     report = []
     for p in config.PAIRS:
         ws, rest = p["ws"], p["rest"]
-        for interval in config.INTERVALS:
+        # SIGNAL_INTERVALS: parity proves the SCORING series matches v4.4, and v4.4
+        # only ever read daily+weekly. Fast intervals are ingested but never scored,
+        # so including them here would fail the gate on series v4.4 cannot produce.
+        for interval in config.SIGNAL_INTERVALS:
             db_closed = _closed_rows(conn, ws, interval)
             res = fetch(rest, interval)  # None when < 20 closed candles (under-backfilled)
             if res is None:

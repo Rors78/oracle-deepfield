@@ -133,6 +133,17 @@ class Ingest:
             else:
                 log.debug("CandleClosed duplicate (already closed): %s/%s ts=%d",
                           ev.symbol, ev.interval, ev.interval_begin)
+        # Fast intervals (15m/1h) are INGESTED for display/analysis but must never
+        # reach the scoring recompute or the order path — they are stored above and
+        # we stop here. The edge-gate below keys on the close INSTANT per symbol, so
+        # letting a 15m close through would both re-fire the confirmed-BUY path every
+        # 15 minutes AND, via the boot seed, push _last_fired past the daily close
+        # instant and suppress daily entries outright. See config.SIGNAL_INTERVALS.
+        if ev.interval not in config.SIGNAL_INTERVALS:
+            log.debug("candle closed %s/%d ts=%d — stored, not a signal interval",
+                      ev.symbol, ev.interval, ev.interval_begin)
+            self._rest_defer.pop((ev.symbol, ev.interval, ev.interval_begin), None)
+            return
         # The old provisional card still counts the just-closed bar as forming —
         # honest display is "unknown" until fresh forming data arrives (seconds).
         self.state.pair(ev.symbol).provisional = None
@@ -162,7 +173,7 @@ class Ingest:
             # closed); a missing row is the reconciler's gap to heal, not ours to block on.
             # This runs only inside the fire=True edge, so the ed74968 double-fire dedup
             # is untouched: the second coincident event still arrives with fire=False.
-            for other in config.INTERVALS:
+            for other in config.SIGNAL_INTERVALS:
                 if other == ev.interval or close_at % (other * 60) != 0:
                     continue
                 other_ts = close_at - other * 60
@@ -250,8 +261,12 @@ class Ingest:
             # orders from one restart. A genuinely newer bar (close instant > seed) still
             # fires. Seed the same close-INSTANT the edge compares (interval_begin +
             # interval*60), per symbol; the latest daily close instant dominates the weekly.
+            # SIGNAL_INTERVALS only: this takes the MAX close instant per symbol, so a
+            # fast interval closing minutes ago would seed the dedup PAST the daily
+            # close instant and suppress the next daily fire entirely — entries would
+            # silently stop after a restart. Only bars that can fire may seed it.
             for p in config.PAIRS:
-                for interval in config.INTERVALS:
+                for interval in config.SIGNAL_INTERVALS:
                     mt = store.max_closed_ts(self.conn, p["ws"], interval)
                     if mt is not None:
                         self._last_fired[p["ws"]] = max(
@@ -269,7 +284,11 @@ class Ingest:
         overdue = []
         for p in config.PAIRS:
             ws = p["ws"]
-            for interval in config.INTERVALS:
+            # SIGNAL_INTERVALS only. This watchdog exists so a silent border cannot
+            # delay a SCORING close, and each overdue bar costs a REST confirm — at
+            # 15m granularity something is always overdue, which would turn a safety
+            # net into a constant REST drip. Fast intervals ride the hourly gap-heal.
+            for interval in config.SIGNAL_INTERVALS:
                 f = store.get_forming(self.conn, ws, interval)
                 if f is None:
                     continue

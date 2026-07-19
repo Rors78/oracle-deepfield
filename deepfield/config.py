@@ -16,7 +16,29 @@ DB_PATH = os.path.join(PROJECT_ROOT, "deepfield.db")
 LOG_DIR = os.path.join(PROJECT_ROOT, "logs")
 
 # Backfill/live intervals (minutes). SPEC §6.
-INTERVALS = (1440, 10080)
+# INTERVALS is what we INGEST, store, backfill and gap-heal — the operator's
+# "broaden our horizons" (2026-07-19). SIGNAL_INTERVALS is what drives scoring and
+# the ORDER PATH, and the two are deliberately not the same list.
+#
+# Why they must stay split: ingest.handle_candle_closed edge-gates on the close
+# INSTANT per symbol (close_at > _last_fired[symbol]), not per interval, because
+# daily and weekly close at the same instant every Thu and that collapsed a real
+# double-order. Feeding fast intervals into that same gate would (a) re-fire the
+# confirmed-BUY path on EVERY 15m close — 96 order attempts/day/symbol instead of
+# ~2 — and worse (b) the boot seed takes max(close_instant) across the list, so a
+# 15m bar closing minutes ago would seed _last_fired PAST the daily close instant
+# and silently suppress daily entries after every restart. The strategy is a
+# weekly/daily cycle thesis (6 of 7 signals are weekly); fast bars are data to
+# look at, not a trigger to trade on.
+#
+# Kraken's OHLC enum is 1/5/15/30/60/240/1440/10080/21600 — there is NO monthly
+# candle (21600 is 15 days), which is why monthly is DERIVED in engine
+# .monthly_closes() by sampling every 4th weekly close for the regime M-RSI.
+# Depth is capped at 720 rows per fetch regardless of `since`, so history per
+# interval is bounded: 15m ~7.5d, 1h ~30d, 1d ~2y, 1w ~13.8y. Fast intervals
+# accumulate forward from switch-on; they cannot be backfilled deeper.
+INTERVALS = (15, 60, 1440, 10080)
+SIGNAL_INTERVALS = (1440, 10080)
 
 # v1 asset code -> v2 symbol normalization (the rename traps). SPEC §6.
 NORMALIZE = {"XBT": "BTC", "XDG": "DOGE"}

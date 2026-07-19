@@ -45,17 +45,37 @@ def _make_gap_heal_cb(intervals):
     return gap_heal_cb
 
 
+_IV_LABEL = {15: "15m", 60: "1h", 240: "4h", 1440: "D", 10080: "W"}
+
+
 def _make_ws_clients(symbols, queue):
-    """Two connections (§6 discrepancy, M4): Kraken v2 allows one ohlc interval
-    per symbol per connection. A = ticker+ohlc@1440 (30 subs), B = ohlc@10080
-    (15 subs) — 45 subscriptions total, just not on one socket."""
-    client_a = WSClient(symbols, queue,
-                        subs=[{"channel": "ticker"}, {"channel": "ohlc", "interval": 1440}],
-                        on_connect=_make_gap_heal_cb((1440,)), name="A(ticker+D)")
-    client_b = WSClient(symbols, queue,
-                        subs=[{"channel": "ohlc", "interval": 10080}],
-                        on_connect=_make_gap_heal_cb((10080,)), name="B(W)")
-    return [client_a, client_b]
+    """One connection PER OHLC INTERVAL (§6 discrepancy, M4): Kraken v2 allows only
+    one ohlc interval per symbol per connection — a second ohlc@interval subscribe
+    on the same socket ACKs success:false for every symbol. Ticker rides along on
+    the first connection (verified: ticker + one ohlc interval coexist fine).
+
+    Generalized 2026-07-19 from the hardcoded A/B pair so config.INTERVALS drives
+    the topology: N intervals -> N connections, each gap-healing only the interval
+    it carries. Reconnect backoff stays far under Cloudflare's ~150 attempts/10min
+    even at 4 sockets."""
+    # Ticker rides the DAILY socket, not merely the first one. It is the live-price
+    # feed the executor, stop math and P/L read, so it belongs on the quietest,
+    # most stable connection — pinning it to a fast interval would couple execution
+    # pricing to the noisiest, most reconnect-prone socket. 1440 carried it before
+    # this generalization; keep it there.
+    ticker_on = 1440 if 1440 in config.INTERVALS else config.INTERVALS[0]
+    clients = []
+    for i, interval in enumerate(config.INTERVALS):
+        subs = [{"channel": "ohlc", "interval": interval}]
+        label = _IV_LABEL.get(interval, str(interval))
+        if interval == ticker_on:
+            subs.insert(0, {"channel": "ticker"})
+            label = f"ticker+{label}"
+        clients.append(WSClient(
+            symbols, queue, subs=subs,
+            on_connect=_make_gap_heal_cb((interval,)),
+            name=f"{chr(ord('A') + i)}({label})"))
+    return clients
 
 
 def _heal_all():
