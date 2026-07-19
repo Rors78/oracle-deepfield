@@ -240,7 +240,7 @@ MARGIN_CAP_PCT = 0.90               # a single position may post at most this fr
 # targets margin-level ~350% (~$520 notional, still a 4.4x buffer over the 120%
 # stack floor). Env still overrides. The ceiling scales with SIZE_MULT so no clamp.
 try:
-    SIZE_MULT = max(1.0, float(os.environ.get("DEEPFIELD_SIZE_MULT", "2")))  # 2026-07-19: 8->2. Operator T/P'd the heavy book (banked at $186) and reverted to the "old way" — 2x-minimum dip buys. 8 still built a book that twice took ML near a margin call; 2x keeps it light. (History: 16->8 on 07-16 after the $1,484/9x/ML-106% near-call.)
+    SIZE_MULT = max(1.0, float(os.environ.get("DEEPFIELD_SIZE_MULT", "3")))  # 2026-07-19 (later): 2->3, operator. At the time of the change the book sat at 0.44x effective leverage against a measured 4.22x survivable ceiling — a tenth of the limit — so 3x only changes the PACE of accumulation, not where it ends. The ceiling is enforced by MARGIN_LEVEL_STACK_FLOOR_PCT (raised 160->200 in the same change), NOT by this multiplier. (History: 16->8 on 07-16 after the $1,484/9x/ML-106% near-call; 8->2 on 07-19 after the T/P flatten.)
 except ValueError:
     _log.error("DEEPFIELD_SIZE_MULT=%r is not a number — running at 1x (min size)",
                os.environ.get("DEEPFIELD_SIZE_MULT"))
@@ -283,17 +283,37 @@ RUNTIME_RECON_SECS = 900
 #    a stale/unknown margin level never pauses anything.
 # 0 disables either threshold.
 MARGIN_LEVEL_ALERT_PCT = 150
-MARGIN_LEVEL_STACK_FLOOR_PCT = 160  # 2026-07-16: raised 120->160 after a market drop compressed ML to 106% (7% from trouble). Book operates at the floor, so this ~doubles the liquidation cushion.
+# 2026-07-19: raised 160->200 (operator). The book OPERATES AT THIS FLOOR, so this
+# number — not SIZE_MULT — is what actually caps leverage. At all-10:1, ml 160 permits
+# L_eff 6.25x and a 12% liq buffer; measured over 2y the worst 1-day adverse basket
+# move is 16.76% universe-wide and 19.67% for the pairs actually held, so the old
+# floor allowed a book that a repeat of an ALREADY-OBSERVED day takes through
+# liquidation. ml 200 -> L_eff 5.0x, 16% buffer. (Full enforcement of the 4.22x
+# survivable ceiling would need ml ~237; 200 is the operator's chosen midpoint
+# between cushion and deployment.) Caveat kept honest: stops sit ~8-15% below entry
+# and fire first, so the liq buffer is the BACKSTOP for gap-through risk, not the
+# primary defense. Prior: 2026-07-16 raised 120->160 after a drop compressed ml to
+# 106% (7% from trouble). See deepfield/backtest_ladder.py and STRESS_* below.
+MARGIN_LEVEL_STACK_FLOOR_PCT = 200
 
 # Defense buffer engine (audit Wave 1, DEEPFIELD_AUDIT_EVIDENCE.md §B/§G). The
 # ml floor above is a ratio; the DEFENSE tiers below are the SAME comfort zone
 # expressed in PRICE space — the adverse basket move (%) that would drop the
 # account to Kraken's ml=40% force-liquidation line. With all pairs at 10:1,
-# ml 160 ≡ exactly a 12% liq buffer, so NOMINAL=12 IS the ml-160 floor, just
-# readable as "how far price can fall before liquidation" instead of a ratio.
+# ml 160 ≡ a 12% liq buffer and ml 200 ≡ a 16% one.
+#
+# NOTE (2026-07-19): NOMINAL=12 was written as the price-space TWIN of the ml-160
+# floor. The floor moved to 200 (≡16%) and this deliberately did NOT follow, so the
+# two are no longer the same line: growth pauses at a 16% buffer while the tier
+# still reads NOMINAL down to 12%. That dead band is intentional — raising NOMINAL
+# would re-tier the alert stream, and REVERSE_GEAR_TARGET_PCT=12 (an actuator that
+# SELLS) is calibrated against this same 12, so moving it is a risk decision in its
+# own right rather than a knock-on edit. Consequence to know: after a reverse-gear
+# trim the book rests at a 12% buffer (L_eff 6.25x) and simply cannot grow again
+# until it recovers to 16% — conservative, not contradictory.
 # Tiers on buffer_liq_pct:  NOMINAL >= 12 > CAUTION >= 6 > CRITICAL.
 # TELEMETRY/ALERTING ONLY — deepfield.defense never gates or sizes an order.
-DEFENSE_BUFFER_NOMINAL_PCT = 12.0   # >= this liq buffer is healthy (== the ml-160 floor)
+DEFENSE_BUFFER_NOMINAL_PCT = 12.0   # price-space twin of ml-160 (see NOTE above)
 DEFENSE_BUFFER_CRITICAL_PCT = 6.0   # < this liq buffer pages an escalated 'liq-risk' alert
 
 # --- Intraday stress telemetry (2026-07-19) -------------------------------------
