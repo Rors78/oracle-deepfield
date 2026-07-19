@@ -360,6 +360,17 @@ def _assemble(conn):
         # T/P cycle + fee drag (new blob keys — absent in old blobs, degrade to null)
         "tp_baseline": live.get("tp_baseline"), "tp_target": live.get("tp_target"),
         "fees_day": live.get("fees_day"), "fees_total": live.get("fees_total"),
+        # Liq-buffer telemetry. Wave 1 has published these into the blob since
+        # a5e2d39 but this allowlist never forwarded them, so the console showed
+        # nothing — the operator's only price-space risk read was the TUI, the
+        # journal and alerts. Gated on _fresh like the other equity-derived
+        # numbers: a stale buffer is worse than a blank one. `stress` carries its
+        # own poll and is passed through as-is.
+        "buffer_liq_pct": live.get("buffer_liq_pct") if live.get("_fresh") else None,
+        "buffer_call_pct": live.get("buffer_call_pct") if live.get("_fresh") else None,
+        "eff_leverage": live.get("eff_leverage") if live.get("_fresh") else None,
+        "defense_tier": live.get("defense_tier") if live.get("_fresh") else None,
+        "stress": live.get("stress"),
         "now_mt": now_local.strftime("%H:%M:%S"), "now_utc": now_utc.strftime("%H:%M"),
         "day": now_local.strftime("%a %b %d").lower(),
     }

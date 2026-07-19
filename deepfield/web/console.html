@@ -1300,6 +1300,28 @@ function renderHealth(h){
   if(h.fees_day!=null || h.fees_total!=null)
     tpBits.push(`<span class="dim">fees</span> <span class="loss">−$${Math.abs(h.fees_day||0).toFixed(2)}</span> <span class="dim">today /</span> <span class="loss">−$${Math.abs(h.fees_total||0).toFixed(2)}</span> <span class="dim">total</span>`);
   const tpRow = tpBits.length ? `<div class="marginbar">${tpBits.join(' · ')}</div>` : "";
+  // Liq-buffer risk row. buffer_liq_pct is an adverse BASKET move: "prices can fall
+  // this far before forced liquidation". lev vs ceiling is the operating limit —
+  // the ceiling is the leverage that survives the worst 1-day basket move on record
+  // for the pairs actually held, so lev over ceiling means a repeat of a move that
+  // has ALREADY happened would liquidate. dip is the worst 24h intraday drawdown
+  // from 15m lows: the near-miss a daily candle hides entirely.
+  const rk=[], st=h.stress||{};
+  // 'warn' only exists as a compound .pill.warn — a bare span needs .amber.
+  const tierCls = t => t==='CRITICAL'?'alarm':(t==='CAUTION'?'amber':'teal');
+  if(h.buffer_liq_pct!=null)
+    rk.push(`<span class="dim">liq buffer</span> <span class="${tierCls(h.defense_tier)}" style="font-weight:600">${(+h.buffer_liq_pct).toFixed(1)}%</span>${h.defense_tier?` <span class="dim">${h.defense_tier.toLowerCase()}</span>`:""}`);
+  if(h.eff_leverage!=null){
+    const c=st.lev_ceiling, over=(c!=null && h.eff_leverage>c);
+    rk.push(`<span class="dim">leverage</span> <span class="${over?'loss':'teal'}" style="font-weight:600">${(+h.eff_leverage).toFixed(2)}x</span>`
+      +(c!=null?` <span class="dim">/ ceiling</span> <span class="${over?'loss':'dim'}">${(+c).toFixed(2)}x</span>`:""));
+  }
+  if(st.intraday_dd_pct!=null)
+    rk.push(`<span class="dim">worst 24h dip</span> <span class="${st.intraday_dd_pct>=6?'loss':'dim'}">${(+st.intraday_dd_pct).toFixed(2)}%</span>`
+      +(st.buffer_under_intraday_pct!=null?` <span class="dim">→ buffer ${(+st.buffer_under_intraday_pct).toFixed(1)}%</span>`:""));
+  if(st.ref_move_pct && st.ref_move_pct["1"]!=null)
+    rk.push(`<span class="dim">worst 1d on record</span> <span class="dim">${(+st.ref_move_pct["1"]).toFixed(1)}%</span>`);
+  const riskRow = rk.length ? `<div class="marginbar">${rk.join(' · ')}</div>` : "";
   el.innerHTML=`
     <div><div class="hl">
       <div class="stat"><span class="k">Link</span><span class="val" style="display:flex;gap:5px;align-items:center;height:26px">${linkDots}<span class="sub" style="margin-left:4px">${linkTxt}</span></span></div>
@@ -1323,7 +1345,7 @@ function renderHealth(h){
         <div class="stat"><span class="k">Book</span><span class="val"><span class="violet">${h.pos_count}</span> <span class="dim" style="font-size:11px">pos</span> · <span class="violet">${h.bid_count}</span> <span class="dim" style="font-size:11px">bids</span></span></div>
       </div>
       <div class="marginbar"><span class="dim">margin</span> ${marginRow}</div>
-      ${tpRow}
+      ${tpRow}${riskRow}
     </div>`;
 }
 function renderRegime(r){
