@@ -206,7 +206,7 @@ MARGIN_CAP_PCT = 0.90               # a single position may post at most this fr
 # targets margin-level ~350% (~$520 notional, still a 4.4x buffer over the 120%
 # stack floor). Env still overrides. The ceiling scales with SIZE_MULT so no clamp.
 try:
-    SIZE_MULT = max(1.0, float(os.environ.get("DEEPFIELD_SIZE_MULT", "8")))  # 2026-07-16: 16->8. The "16 targets ~$520 notional" model above was 2.8x low — real book hit ~$1,484 (9x equity) and put ML at 106%. Halved to bet smaller.
+    SIZE_MULT = max(1.0, float(os.environ.get("DEEPFIELD_SIZE_MULT", "2")))  # 2026-07-19: 8->2. Operator T/P'd the heavy book (banked at $186) and reverted to the "old way" — 2x-minimum dip buys. 8 still built a book that twice took ML near a margin call; 2x keeps it light. (History: 16->8 on 07-16 after the $1,484/9x/ML-106% near-call.)
 except ValueError:
     _log.error("DEEPFIELD_SIZE_MULT=%r is not a number — running at 1x (min size)",
                os.environ.get("DEEPFIELD_SIZE_MULT"))
