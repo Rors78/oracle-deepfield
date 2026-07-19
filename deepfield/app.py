@@ -202,6 +202,8 @@ async def _exec_state_refresh(appstate, conn, ing, interval=15):
     # monotonic gate for the rollover-fee poll; first run held ~2min past boot so its
     # one-time history walk doesn't contend with the boot reconcile on the private API.
     fees_next = _t.monotonic() + 120
+    kr_pos = {}   # last-good Kraken per-pair open-P/L truth (display-only; survives blips)
+    krpos_next = _t.monotonic()   # throttle gate for the per-pair OpenPositions(docalcs) poll
     while True:
         try:
             mode = config.EXEC_MODE
@@ -232,6 +234,23 @@ async def _exec_state_refresh(appstate, conn, ing, interval=15):
                 if rsecs > 0 and _t.monotonic() >= fees_next:
                     fees_next = _t.monotonic() + rsecs
                     await asyncio.to_thread(_poll_rollover_fees_threaded)
+                # Per-pair open-P/L ground truth: Kraken's own mark-to-market per open lot,
+                # so the dashboard's PER-PAIR pnl/avg show what Kraken shows instead of a
+                # ledger recompute off the single collapsed entry row. THROTTLED on its own
+                # cadence (not the ~8s exec loop) — this is an extra OpenPositions(docalcs)
+                # call and the account is rate-limit-strained (the hourly Ledgers walk
+                # already burns the counter); a display value does not need 8s granularity.
+                # The HEADER total is unaffected — it rides TradeBalance `n`, fetched free
+                # above every cycle. Best-effort; a blip keeps the last-good map.
+                ksecs = float(getattr(config, "KRPOS_POLL_SECS", 45) or 0)
+                if ksecs > 0 and _t.monotonic() >= krpos_next:
+                    krpos_next = _t.monotonic() + ksecs
+                    try:
+                        pc = await asyncio.to_thread(broker.open_positions_calc)
+                        if pc is not None:
+                            kr_pos = _agg_kraken_positions(pc)
+                    except Exception:
+                        log.exception("open_positions_calc failed (display value only)")
             else:
                 equity = config.PAPER_PORTFOLIO_USD
                 free_margin, margin_used = equity, 0.0
@@ -311,6 +330,10 @@ async def _exec_state_refresh(appstate, conn, ing, interval=15):
                 "last_recon": store.meta_get(conn, "last_recon"),
                 "stops_total": scov[0], "stops_covered": scov[1],
                 "defense": defense_blob,
+                # Kraken ground-truth open P/L (display-only): total from TradeBalance `n`
+                # (unrealized net of open positions), per-pair from OpenPositions(docalcs).
+                "open_pnl": _bf("n") if mode == "live" else None,
+                "kr_pos": kr_pos,
             }
             for sym, ps in list(appstate.pairs.items()):
                 card = ps.confirmed
@@ -406,6 +429,44 @@ def _run_defense(conn, balance, equity, margin_used, now):
         return None
 
 
+_KRAKEN_PAIR_TO_SYM = {v: k for k, v in config.MARGIN_PAIR.items()}
+
+
+def _agg_kraken_positions(positions_calc):
+    """Aggregate an OpenPositions(docalcs) map into per-symbol GROUND TRUTH for the
+    dashboard: {sym: {"net": unrealized$, "vol": open_volume, "avg": blended_cost}}.
+
+    Kraken's per-lot `net`/`value` already reflect only the OPEN remainder (vol_closed
+    excluded) and are net of fees/rollover — so summing `net` across a pair's lots is
+    exactly what Kraken reports, and always beats recomputing (blob_price − db_entry)×vol
+    off the ledger's single collapsed `entry` row. Returns {} on None/empty (caller keeps
+    the DB-derived fallback). Display-only — never sizes or gates an order."""
+    if not positions_calc:
+        return {}
+    agg = {}
+    for p in positions_calc.values():
+        sym = _KRAKEN_PAIR_TO_SYM.get(p.get("pair"))
+        if not sym:
+            continue
+        try:
+            vol = float(p.get("vol", 0)) - float(p.get("vol_closed", 0) or 0)
+            net = float(p.get("net", 0))
+            value = float(p.get("value", 0) or 0)
+        except (TypeError, ValueError):
+            continue
+        a = agg.setdefault(sym, {"net": 0.0, "vol": 0.0, "value": 0.0})
+        a["net"] += net
+        a["vol"] += vol
+        a["value"] += value
+    out = {}
+    for sym, a in agg.items():
+        # blended cost basis of the OPEN remainder: cost = value − net (both from Kraken),
+        # so avg = cost / open_vol. None when vol rounds to 0 (fully-closed straggler).
+        avg = round((a["value"] - a["net"]) / a["vol"], 8) if a["vol"] else None
+        out[sym] = {"net": round(a["net"], 2), "vol": round(a["vol"], 8), "avg": avg}
+    return out
+
+
 def _persist_web_live(conn, appstate, equity, margin_used, free_margin, balance):
     """Write the read-only `web_live` meta blob for deepfield.web.server. Broker-
     only fields (equity/margin/level/links/tick prices) that a DB reader can't see."""
@@ -460,6 +521,10 @@ def _persist_web_live(conn, appstate, equity, margin_used, free_margin, balance)
         "buffer_call_pct": _finite(dfn.get("buffer_call_pct")),
         "eff_leverage": _finite(dfn.get("eff_leverage")),
         "defense_tier": dfn.get("tier"),
+        # Kraken ground-truth open P/L (see _agg_kraken_positions): total header number +
+        # per-pair map so the dashboard shows what Kraken shows, not a ledger recompute.
+        "open_pnl": _finite(appstate.exec.get("open_pnl")),
+        "kr_pos": appstate.exec.get("kr_pos") or {},
     }
     store.meta_set(conn, "web_live", _json.dumps(blob))
     if equity is not None:

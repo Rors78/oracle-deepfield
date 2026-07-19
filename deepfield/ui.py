@@ -250,6 +250,13 @@ def _pair_view(appstate, sym, now):
     pnl = None
     if has_fills and price is not None:
         pnl = sum((price - (f["entry"] or 0.0)) * (f["vol"] or 0.0) for f in fills)
+    # Prefer Kraken's own mark when the loop has it (live): `net` is the true unrealized
+    # (blended cost basis, net of fees/rollover), where the recompute above uses each
+    # fill's stored entry against a possibly-stale tick. Falls back when absent (paper /
+    # pre-first-poll). The per-FILL breakdowns stay recomputed — Kraken only nets per pair.
+    krp = (appstate.exec.get("kr_pos") or {}).get(sym)
+    if has_fills and krp is not None and krp.get("net") is not None:
+        pnl = krp["net"]
     return {
         "ps": ps, "card": card, "tick": tick, "price": price, "age": age,
         "stale": stale, "fills": fills, "pendings": pendings, "vol_sum": vol_sum,
@@ -373,7 +380,12 @@ def render_exec_line(appstate):
     # 'open' = unrealized mark-to-market of live positions (lifetime, not today);
     # 'day'  = realized P&L closed since day0 (only moves on a CLOSE -> $0 until a stop);
     # 'swing' = live mark-to-market MOVE since UTC midnight (how the book did today).
-    upnl = _open_pnl(appstate)
+    # open P/L = Kraken's TradeBalance `n` (net unrealized) when the loop has it — the one
+    # number that always agrees with Kraken — else the per-position recompute (paper / pre-
+    # first-poll). Matches the web console (server.py) and the per-pair rows above.
+    upnl = ex.get("open_pnl")
+    if upnl is None:
+        upnl = _open_pnl(appstate)
     rpnl = ex.get("realized_day", 0.0) or 0.0
     t.append(" · open ", style=INK)
     t.append(_fmt_usd(upnl), style=GAIN if upnl >= 0 else LOSS)

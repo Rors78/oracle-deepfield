@@ -207,6 +207,15 @@ def open_positions():
     return private("/0/private/OpenPositions")
 
 
+def open_positions_calc():
+    """OpenPositions WITH docalcs=true so each lot carries the mark-to-market `net`
+    (unrealized P/L of the OPEN remainder, net of fees/rollover — vol_closed already
+    excluded) and `value` fields. Without docalcs those come back "0". Used for the
+    ground-truth open P/L shown on the dashboard, so it can never disagree with what
+    Kraken itself reports. {} if flat, None on API failure. DISPLAY-ONLY caller."""
+    return private("/0/private/OpenPositions", {"docalcs": "true"})
+
+
 def open_orders():
     """All currently-resting orders as {txid: order_info}, {} if none, or None on API
     FAILURE. Kraken returns {'open': {txid: {...}}}; we hand back the inner map so a

@@ -169,6 +169,10 @@ def _assemble(conn):
     # Ages were captured at blob-write time; add the blob's own age on top.
     tick_ages = live.get("tick_ages") or {}
     ladder = _ladder(conn)
+    # Kraken ground-truth open P/L (written by the bot loop): per-pair `net`/`avg` marked
+    # by Kraken itself. Freshness-gated like prices — a stale blob falls back to the
+    # ledger recompute below. DISPLAY[sym]-keyed by our own sym, same as PAIR_LIST.
+    kr_pos = (live.get("kr_pos") or {}) if fresh else {}
 
     pairs = []
     open_pnl = 0.0
@@ -210,6 +214,15 @@ def _assemble(conn):
             if price is not None:
                 pnl = sum((price - (f["entry"] or 0)) * (f["vol"] or 0) for f in lad["fills"])
                 open_pnl += pnl
+            # Prefer Kraken's own mark: `net` is the true unrealized (blended cost basis,
+            # net of fees/rollover) — the ledger recompute above uses one collapsed entry
+            # row and a tick price, so it drifts. Only override when the pair is present.
+            krp = kr_pos.get(sym)
+            if krp is not None:
+                if krp.get("net") is not None:
+                    pnl = krp["net"]
+                if krp.get("avg"):
+                    avg = krp["avg"]
 
         # W7: per-pair tick staleness (only when the blob carries tick_ages)
         t_age = tick_ages.get(sym)
@@ -326,7 +339,12 @@ def _assemble(conn):
         "links": live.get("links", [True, True]) if live.get("_fresh") else None,
         "uptime_s": int(time.time() - live["started"]) if live.get("started") else None,
         "equity": equity, "equity_live": bool(live.get("_fresh") and equity is not None),
-        "peak": peak, "open_pnl": round(open_pnl, 2),
+        # header open P/L: Kraken's TradeBalance `n` (net unrealized) when the blob is
+        # fresh — the one number that always agrees with Kraken — else the ledger sum.
+        "peak": peak,
+        "open_pnl": (round(live["open_pnl"], 2)
+                     if fresh and live.get("open_pnl") is not None
+                     else round(open_pnl, 2)),
         "realized_day": round(rday, 2), "realized_week": round(rweek, 2),
         "swing_day": swing_day,
         "pos_count": scov[0], "bid_count": bid_count,
