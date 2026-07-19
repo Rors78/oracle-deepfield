@@ -286,15 +286,42 @@ def find_order_by_userref(userref):
     return None, None
 
 
+# Seconds to wait between paginated Ledgers pages. Ledgers costs 2 counter points
+# against a limit shared by EVERY private call the bot makes (a 55s sample on
+# 2026-07-19 caught 273 of them — QueryOrders/TradeBalance/OpenPositions), so an
+# unpaced walk is rejected almost immediately. Pacing keeps a SHORT walk alive; it
+# is not enough to carry a long one, which is why callers must never start one.
+LEDGERS_PAGE_PACE_SECS = 4.0
+
+# Hard page ceiling for any single walk. 50 entries/page, so this bounds a walk to
+# ~10 pages regardless of how much history matches — the counter is shared and a
+# runaway walk starves the money path.
+LEDGERS_MAX_PAGES = 10
+
+
 def rollover_fees_since(start_ts):
     """Sum of margin rollover fees paid since `start_ts` (unix), from the Ledgers
     API (entry type 'rollover'; the charge is in the 'fee' field, asset ZUSD).
-    Paginates via ofs (50/page, capped at 20 pages — a month of 4h rollovers on
-    ~20 pairs). Returns (total_fee_usd, entry_count, newest_entry_ts) or None on
-    API failure. Display/accounting only — never gates an order."""
+    Paginates via ofs (50/page, bounded by LEDGERS_MAX_PAGES). Returns
+    (total_fee_usd, entry_count, newest_entry_ts, complete) or None on API failure.
+    `complete` is False when the page ceiling cut the walk short, meaning the total
+    is a floor, not the true sum — callers must not treat it as exact.
+    Display/accounting only — never gates an order.
+
+    Keep walks SHORT (fix 2026-07-19). This was called with start_ts=0 to seed an
+    all-time total, on the assumption that ~20 pairs of 4h rollovers fit in a page
+    budget. They do not: Kraken held 6011 matching entries (121 pages) and the walk
+    died on the rate limit every single time, so the caller never banked its cursor
+    and re-walked from 0 the next hour — fees_total sat at None from the day the
+    feature was wired. The limit is shared with the bot's own private-API traffic,
+    so no pacing rescues a walk that long. Pacing + the ceiling here bound the
+    damage; the caller anchors its cursor forward so a long walk never starts."""
     total, count, newest = 0.0, 0, float(start_ts or 0)
     ofs = 0
-    for _ in range(20):
+    complete = True
+    for page in range(LEDGERS_MAX_PAGES):
+        if page:                       # pace only BETWEEN pages, never before the first
+            time.sleep(LEDGERS_PAGE_PACE_SECS)
         r = private("/0/private/Ledgers",
                     {"type": "rollover", "start": str(start_ts or 0), "ofs": str(ofs)})
         if r is None:
@@ -313,7 +340,10 @@ def rollover_fees_since(start_ts):
         ofs += got
         if got < 50:
             break
-    return total, count, newest
+    else:
+        # Fell out of the loop still on a full page: more matched than we read.
+        complete = False
+    return total, count, newest, complete
 
 
 def trade_balance_full():

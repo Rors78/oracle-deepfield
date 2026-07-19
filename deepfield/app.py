@@ -90,14 +90,24 @@ def _poll_rollover_fees_threaded():
     2026-07-15). Two bounded Ledgers reads:
       - fees_day: exact re-sum since UTC midnight (a day's rollovers stay well under
         the broker's 1000-entry page cap), so it resets naturally each UTC day.
-      - fees_total: running all-time sum. Each poll sums only the window
-        [fees_cursor, now] and banks it: fees_banked += window, cursor -> the poll
-        instant. So every steady-state read is just the last hour (~a handful of
-        entries, one page) — never a re-walk of all history — and because the cursor
-        lands on an arbitrary poll second while rollovers post only on 4h UTC marks,
-        the bank neither drops nor double-counts a boundary entry. Only the very first
-        poll (cursor 0) walks history once to seed the baseline. Blocking Kraken I/O +
-        display-only writes; never gates an order, never raises into the loop."""
+      - fees_total: running sum SINCE ACCOUNTING BEGAN (fees_epoch), not all-time.
+        Each poll sums only the window [fees_cursor, now] and banks it:
+        fees_banked += window, cursor -> the poll instant. So every steady-state
+        read is just the last hour (~a handful of entries, one page) — never a
+        re-walk of history — and because the cursor lands on an arbitrary poll
+        second while rollovers post only on 4h UTC marks, the bank neither drops
+        nor double-counts a boundary entry.
+
+    The first poll ANCHORS the cursor at now instead of seeding from history
+    (fix 2026-07-19). It used to walk back to 0, which was never survivable: Kraken
+    held 6011 rollover entries (~121 pages) against a rate limit shared with the
+    bot's own private traffic, so the seed failed every hour, the cursor was never
+    banked, and the next poll re-walked from 0 — fees_total read None from the day
+    this was wired until the fix. The cost is that rollover paid before the epoch is
+    not counted; fees_day remains exact for the current UTC day either way.
+
+    Blocking Kraken I/O + display-only writes; never gates an order, never raises
+    into the loop."""
     from . import broker
     import datetime as _dt
     c = store.connect(config.DB_PATH)
@@ -114,12 +124,34 @@ def _poll_rollover_fees_threaded():
             except (TypeError, ValueError):
                 return 0.0
         banked, cursor = _mf("fees_banked"), _mf("fees_cursor")
+        if not cursor:
+            # First poll ever: ANCHOR here rather than walking history back to 0.
+            # That walk was the bug (fix 2026-07-19) — Kraken holds 6011 rollover
+            # entries, ~121 pages, against a rate limit shared with the bot's own
+            # private traffic. It failed every hour, never banked a cursor, and so
+            # re-walked from 0 the next hour forever; fees_total was None the whole
+            # time. Anchoring makes the total mean "rollover paid since accounting
+            # began" (fees_epoch records when) and costs exactly one page from here
+            # on. fees_day is unaffected and still exact for the current UTC day.
+            store.meta_set(c, "fees_total", 0.0)
+            store.meta_set(c, "fees_banked", 0.0)
+            store.meta_set(c, "fees_cursor", now.timestamp())
+            store.meta_set(c, "fees_epoch", now.timestamp())
+            log.info("rollover accounting anchored at %s — fees_total accrues from now "
+                     "(prior history not summed: %d pages exceeds the shared rate limit)",
+                     now.isoformat(timespec="seconds"), 121)
+            return
         win = broker.rollover_fees_since(cursor)
         if win is not None:                          # None == API failure: bank nothing, retry
             new_total = round(banked + win[0], 4)
             store.meta_set(c, "fees_total", new_total)
             store.meta_set(c, "fees_banked", new_total)
             store.meta_set(c, "fees_cursor", now.timestamp())
+            if not win[3]:
+                # Truncated: we summed a floor, not the true window. Advance anyway —
+                # holding the cursor back is exactly the deadlock this fix removes.
+                log.warning("rollover window truncated at the page ceiling — fees_total "
+                            "under-counts this window; cursor advanced to stay converged")
     except Exception:
         log.exception("rollover fee poll failed (display only)")
     finally:
