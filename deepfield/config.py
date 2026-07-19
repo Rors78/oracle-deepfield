@@ -62,6 +62,18 @@ MIN_RATIO = 5 / 7          # F3: required = max(2, round(MIN_RATIO * achievable)
 STRICT_SEVEN = False       # True -> fixed 5-of-7 regardless of achievable
 DOWN_WEEKS = 3             # F1: consecutive lower closes required before an up close
 PIVOT_MIN_DEPTH = 0.015    # F2: divergence pivot prominence (1.5%)
+# F3: bars sig3 needs before the weekly MACD histogram is evidence at all. calc_macd
+# seeds macd_line at slow-1 (25) but the signal line only at slow-1 + signal-1 (33),
+# while histogram = macd_line - sig_line spans the WHOLE array — so below the seam
+# the histogram is just macd_line, a large bogus negative. sig3 reads an 8-bar
+# window, so the whole window must clear the seam, not merely the last bar: at 34
+# bars the signal line is seeded yet w_hist[-8:] still covers indices 26-33 and the
+# jump from artifact to first real value reads as a crossup. Hence + lookback - 1,
+# which is why the observed spurious-fire zone was 26-41.
+# Matches the engine's hardcoded calc_macd(wc, 12, 26, 9).
+MACD_SEED_BARS = 34        # = (26 - 1) + (9 - 1) + 1: first bar with a real signal line
+MACD_LOOKBACK = 8          # sig3's crossup window (w_hist[-MACD_LOOKBACK:])
+MACD_MIN_BARS = MACD_SEED_BARS + MACD_LOOKBACK - 1      # 41
 
 # --- Freshness / regime ---
 STALE_SECS = 180           # F5: tick_age beyond this -> STALE, alerts suppressed

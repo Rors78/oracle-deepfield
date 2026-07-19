@@ -142,7 +142,13 @@ def _state(card, slot):
 
 def _attribute(slot, cstate, fstate):
     """Map a FULL-vs-COMPAT slot diff to its F-item. UNATTRIBUTED = a stop."""
-    if slot == 1 and fstate == NA and cstate != NA:
+    # F3 IS "insufficient data -> N/A under FULL, counted as NOT in compat", and
+    # every signal carries that branch — the rule was just written for slot 1
+    # because slot 1 was the only one that reached it on the live universe. sig3
+    # joined when its guard was tightened to require a seeded MACD signal line
+    # (2026-07-19), and sig2/4/5/6/7 would have tripped the same latent gap on a
+    # young enough pair. Attribute the shape, not the one slot that showed it.
+    if fstate == NA and cstate != NA:
         return "F3"
     if slot == 5 and cstate != fstate:
         return "F1"

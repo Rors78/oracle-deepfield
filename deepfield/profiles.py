@@ -8,7 +8,9 @@ isolates each fix by construction.
 Only fixes that alter a pair scorecard or the regime need a branch:
   f1 sig5 tighten · f2 sig4 pivot quality · f3 young-listing N/A + dynamic
   required · f4 monthly-RSI end-anchor (M-RSI only) · f9 regime 4-bar/no-NEUTRAL.
-sig2/sig3/sig6/sig7 are verbatim (compat == full).
+sig2/sig6/sig7 are verbatim (compat == full). sig3's FIRE LOGIC is verbatim too,
+but its data guard is f3-gated: FULL needs a seeded MACD signal line
+(config.MACD_MIN_BARS) where compat keeps v4.4's 4-bar guard.
 """
 from dataclasses import dataclass
 

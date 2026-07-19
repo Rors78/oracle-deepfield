@@ -11,7 +11,7 @@ the engine and passed in, matching v4.4's single inline computation.
 """
 from dataclasses import dataclass
 
-from .config import DOWN_WEEKS, PIVOT_MIN_DEPTH
+from .config import DOWN_WEEKS, PIVOT_MIN_DEPTH, MACD_MIN_BARS, MACD_LOOKBACK
 
 FIRED = "fired"
 NOT = "not"
@@ -69,14 +69,24 @@ def sig2_wrsi_turning_up(w_rsi, profile):
     return _mk(2, profile, (w_rsi[-1] < 40.0) and (w_rsi[-1] > ref))
 
 
-# ── sig3: weekly MACD hist positive, was negative within 8 bars (verbatim) ──
+# ── sig3: weekly MACD hist positive, was negative within 8 bars ─────────────
+# Fire logic is verbatim v4.4; only the DATA GUARD differs under F3 (2026-07-19).
 def sig3_macd_crossup(w_hist, profile):
-    if len(w_hist) < 4:
+    # v4.4 asks only for 4 bars, but the histogram is not evidence until the MACD
+    # signal line is seeded: before that sig_line is 0.0 while macd_line is real, so
+    # histogram = macd_line — a large bogus negative. The whole lookback window must
+    # clear that seam, not just the last bar, or the jump from artifact to first real
+    # value reads as a crossup and sig3 fires on nothing (observed at 26-41 bars).
+    # Under F3 (young-listing N/A) that is N/A; compat keeps v4.4's guard verbatim
+    # so the parity gate still reproduces it with zero diffs.
+    need = MACD_MIN_BARS if profile.f3 else 4
+    if len(w_hist) < need:
         if profile.f3:
-            return _mk(3, profile, False, na=True, reason="needs 4 weekly MACD bars")
+            return _mk(3, profile, False, na=True,
+                       reason=f"needs {need} weekly bars (MACD signal line unseeded)")
         return _mk(3, profile, False)
     now_pos = w_hist[-1] > 0
-    lookback = w_hist[-8:] if len(w_hist) >= 8 else w_hist
+    lookback = w_hist[-MACD_LOOKBACK:] if len(w_hist) >= MACD_LOOKBACK else w_hist
     had_neg = any(h < 0 for h in lookback[:-1])
     return _mk(3, profile, had_neg and now_pos)
 
@@ -91,7 +101,14 @@ def _pivots(vals, min_depth, min_spacing):
         v, a, b = vals[i], vals[i - 1], vals[i + 1]
         if not (v < a and v < b):
             continue
-        if min_depth is not None and v > 0:
+        if min_depth is not None:
+            # A non-positive value is a cleaned gap (clean() maps non-finite -> 0.0),
+            # not a price. It used to skip the prominence test entirely — `v > 0` was
+            # part of the guard — so it was admitted as a pivot, became the lowest
+            # low, and made the price lower-low leg of a divergence trivially true.
+            # Reject it instead: an unpriced bar is never a valid pivot.
+            if v <= 0:
+                continue
             if (a - v) / v < min_depth or (b - v) / v < min_depth:
                 continue
         if min_spacing is not None and last_i is not None and (i - last_i) < min_spacing:
