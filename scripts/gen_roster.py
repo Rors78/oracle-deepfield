@@ -154,8 +154,12 @@ def splice(src, header_re, block, what):
 
 
 def splice_seed(src, block):
-    """SEED_PAIRS is a multi-line tuple with no bare closing line — replace the
-    whole `SEED_PAIRS = (...)` expression (non-greedy through the first `)`)."""
+    """SEED_PAIRS: replace a literal `SEED_PAIRS = (...)` tuple (no bare closing
+    line, so non-greedy through the first `)`). Once it's the derived
+    `tuple(p["ws"] for p in PAIRS)` form, it tracks PAIRS automatically — leave
+    it (and its comment block) untouched so re-runs are idempotent."""
+    if 'SEED_PAIRS = tuple(p["ws"] for p in PAIRS)' in src:
+        return src
     m = re.search(r"^SEED_PAIRS = \(.*?\)", src, re.M | re.S)
     if not m:
         raise SystemExit("cannot find SEED_PAIRS block in config")
