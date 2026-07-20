@@ -51,7 +51,8 @@ def _round_price(x, decimals):
 # ':SUFFIX' (margin). Normalize all three to the canonical `rest` key so ledger rows,
 # OpenPositions, and OpenOrders compare on ONE identity. (Hydra field-verified map.)
 _ALT_TO_KEY = {"XBTUSD": "XXBTZUSD", "ETHUSD": "XETHZUSD",
-               "XRPUSD": "XXRPZUSD", "LTCUSD": "XLTCZUSD"}
+               "XRPUSD": "XXRPZUSD", "LTCUSD": "XLTCZUSD",
+               "XLMUSD": "XXLMZUSD", "ZECUSD": "XZECZUSD"}
 
 
 def _norm_pair_key(pr):
