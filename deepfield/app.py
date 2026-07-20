@@ -5,6 +5,7 @@ writer -> clock-close watchdog -> hourly reconciler -> UI (rich or --simple)
 import asyncio
 import json
 import logging
+import os
 import datetime
 import math
 import statistics
@@ -911,9 +912,18 @@ def run_once(debug=False):
 
 
 def run_exec_probe(debug=False):
-    """--exec-probe: send validate=true orders for all 15 pairs against real
-    Kraken — proves pair name, leverage, precision, and minimums are accepted
-    WITHOUT executing. The proof gate before EXEC_MODE goes live."""
+    """--exec-probe: send validate=true orders for EVERY config.PAIRS pair against
+    real Kraken — proves pair name, leverage, precision, and minimums are accepted
+    WITHOUT executing. The proof gate before EXEC_MODE goes live, and the ROSTER
+    AUTHORITY (operator dispatch 2026-07-19): a pair only trades if it validates.
+
+    Per pair: price = confirmed card when present, else the newest DB close (new
+    pairs have no card at probe time — backfill above guarantees candles). On an
+    Invalid-price reject the probe COARSENS config.MARGIN_TICK_DECIMALS one digit
+    and retries (the :BTNL book is coarser than spot for some pairs — CRV/SHIB
+    precedent); on Unknown-asset-pair it marks the pair DROP (no :BTNL book on
+    this account). Everything is journaled machine-readably to
+    logs/exec_probe_journal.json for scripts/gen_roster.py --probe to consume."""
     from . import broker, executor
     setup_logging(debug=debug)
     broker.setup_raw_log(config.LOG_DIR)
@@ -928,22 +938,64 @@ def run_exec_probe(debug=False):
     ing.startup_sweep()
     ex = executor.Executor(conn)
     ex.mode = "validate"
-    print("VALIDATE PROBE — real Kraken order-check, nothing executes:\n")
+    journal = {"probed": [], "dropped": [], "ticks": {}}
+    print(f"VALIDATE PROBE — real Kraken order-check on {len(config.PAIRS)} pairs, nothing executes:\n")
     for p in config.PAIRS:
         sym = p["ws"]
         ps = appstate.pair(sym)
         card = ps.confirmed
         price = card.price if card else None
         if not price:
-            print(f"  {sym:9s} skip (no price)")
+            row = conn.execute(
+                "SELECT c FROM candles WHERE pair=? AND closed=1 ORDER BY ts DESC LIMIT 1",
+                (sym,)).fetchone()
+            price = row[0] if row else None
+        if not price or price <= 0:
+            print(f"  {sym:13s} ❌ NOPRICE — no card and no DB close (backfill failed?)")
+            journal["dropped"].append({"pair": sym, "why": "no price after backfill"})
             continue
-        oid = ex.place_entry(sym, price, card)
-        row = conn.execute("SELECT status, entry, stop, volume, leverage, error FROM orders WHERE id=?",
-                           (oid,)).fetchone() if oid else None
-        if row:
+        # Retry loop: coarsen tick decimals on precision rejects, floor 0.
+        start_tick = config.MARGIN_TICK_DECIMALS.get(sym, 2)
+        verdict = None
+        while True:
+            oid = ex.place_entry(sym, price, card)
+            row = conn.execute(
+                "SELECT status, entry, stop, volume, leverage, error FROM orders WHERE id=?",
+                (oid,)).fetchone() if oid else None
+            if row is None:
+                verdict = ("reject", "no order row (see log)")
+                break
             st, entry, stop, vol, lev, err = row
-            mark = "✅" if st == "validated" else "❌"
-            print(f"  {sym:9s} {mark} {st:9s} vol={vol:g} x{lev} @ {entry} stop={stop}" + (f"  {err}" if err else ""))
-        else:
-            print(f"  {sym:9s} ❌ no order row")
+            if st == "validated":
+                tick = config.MARGIN_TICK_DECIMALS.get(sym, 2)
+                note = f" (tick {start_tick}->{tick})" if tick != start_tick else ""
+                print(f"  {sym:13s} ✅ validated vol={vol:g} x{lev} @ {entry} stop={stop}{note}")
+                journal["probed"].append({
+                    "pair": sym, "lev": lev, "tick": tick, "volume": vol,
+                    "entry": entry, "stop": stop, "notional": vol * entry,
+                    "margin": vol * entry / lev})
+                journal["ticks"][sym] = tick
+                verdict = ("ok", None)
+                break
+            es = err or ""
+            tick = config.MARGIN_TICK_DECIMALS.get(sym, 2)
+            if ("Invalid price" in es or "decimal" in es.lower()) and tick > 0:
+                config.MARGIN_TICK_DECIMALS[sym] = tick - 1
+                print(f"  {sym:13s} …  price precision reject at {tick} decimals — retrying at {tick - 1}")
+                continue
+            if "Unknown asset pair" in es:
+                verdict = ("drop", es)
+            else:
+                verdict = ("reject", es)
+            break
+        if verdict[0] in ("drop", "reject"):
+            mark = "🗑" if verdict[0] == "drop" else "❌"
+            print(f"  {sym:13s} {mark} {verdict[0].upper()}  {verdict[1]}")
+            journal["dropped"].append({"pair": sym, "why": verdict[1]})
+        time.sleep(0.3)   # be gentle on the AddOrder counter — probe is 130+ calls
+    jpath = os.path.join(config.LOG_DIR, "exec_probe_journal.json")
+    with open(jpath, "w") as f:
+        json.dump(journal, f, indent=1)
+    ok, dr = len(journal["probed"]), len(journal["dropped"])
+    print(f"\n{ok} validated · {dr} dropped/rejected · journal -> {jpath}")
     conn.close()

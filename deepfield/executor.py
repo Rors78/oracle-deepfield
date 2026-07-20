@@ -499,9 +499,12 @@ class Executor:
 
         if self.mode == "validate":
             params["validate"] = "true"
-            res = broker.private("/0/private/AddOrder", params)
+            vmeta = {}
+            res = broker.private("/0/private/AddOrder", params, meta=vmeta)
             row["status"] = "validated" if res is not None else "rejected"
-            row["error"] = None if res is not None else "validate returned None"
+            # keep Kraken's verbatim reject so the probe can triage (precision
+            # coarsening vs no-:BTNL-book drop) instead of a blind None
+            row["error"] = None if res is not None else vmeta.get("error", "validate returned None")
             if res is not None:
                 row["txid"] = str((res.get("descr") or {}).get("order", "validated"))
             return store.insert_order(self.conn, row)
@@ -555,6 +558,13 @@ class Executor:
         rows = self.conn.execute(
             "SELECT id, symbol, margin_pair, volume, leverage, stop, txid, ts, entry, score, required "
             "FROM orders WHERE status='pending' AND mode=?", (self.mode,)).fetchall()
+        # ONE batched QueryOrders sweep for every pending txid (50/call). On the
+        # full-universe roster (2026-07-19) a healthy book RESTS 130+ seed bids —
+        # per-row lookups would be 130+ private calls per poll cycle, the exact
+        # per-account-budget failure the 2026-07-17 rate-limit storm proved out.
+        # A txid ABSENT from the map is UNKNOWN (== query_order None): skip and
+        # converge next cycle, never treat as gone.
+        known = broker.query_orders([r[6] for r in rows if r[6]])
         for oid, sym, mpair, vol, lev, stop, txid, ts, entry, score, required in rows:
             if not txid:
                 # Ambiguous-AddOrder recovery (audit C3): this row was born from an
@@ -564,7 +574,9 @@ class Executor:
                 txid = self._resolve_ambiguous_entry(oid, sym, ts)
                 if not txid:
                     continue
-            o = broker.query_order(txid)
+                o = broker.query_order(txid)    # just adopted — not in the batch sweep
+            else:
+                o = known.get(txid)
             if o is None:
                 continue                        # transient query failure — retry next cycle
             status = o.get("status")

@@ -137,7 +137,13 @@ class WSClient:
         log.info("[%s] ws client stopped", self.name)
 
     async def _subscribe(self, ws):
-        reqs = [{"method": "subscribe", "params": dict(spec, symbol=self.symbols)} for spec in self.subs]
+        # Chunk symbol lists to <=50 per subscribe request: 21 symbols in one
+        # message was proven live, but the 132-pair full universe (2026-07-19)
+        # rides an unverified payload bound — chunking costs a few extra frames
+        # and removes the risk of one oversized request silently part-failing.
+        chunks = [self.symbols[i:i + 50] for i in range(0, len(self.symbols), 50)] or [[]]
+        reqs = [{"method": "subscribe", "params": dict(spec, symbol=chunk)}
+                for spec in self.subs for chunk in chunks]
         for r in reqs:
             await ws.send(json.dumps(r))
         log.info("[%s] sent %d subscribe requests (%s) for %d symbols",

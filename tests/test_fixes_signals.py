@@ -49,7 +49,7 @@ def test_F4_monthly_end_anchored():
 
 # ── F13: provisional sig6 pace-adjust + <15% floor (RULINGS Q4) ─────────────
 def _prov_weekly(forming_green=True):
-    n = 24
+    n = 34    # >=30: clears the v4.4 whole-pair data gate (engine.evaluate)
     wo = [100.0] * n
     wc = [101.0] * n            # green: close>open
     if not forming_green:

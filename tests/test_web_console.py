@@ -225,12 +225,14 @@ def test_stale_without_position_keeps_tier(tmp_path, monkeypatch):
 
 def test_ghost_pairs_surface_in_state_and_health(tmp_path, monkeypatch):
     now = time.time()
+    # NB: use a pair that can never be in the roster — XMR rejoined it in the
+    # 2026-07-19 full-universe expansion, which un-ghosted the old fixture.
     st = _state(tmp_path, monkeypatch, blob=_blob(now), candles=_candles_ada(now),
-                orders=[_order("XMR/USD", 150.0, 120.0, "TX")])   # dropped pair, open row
-    assert st["health"]["ghost_pairs"] == ["XMR/USD"]
+                orders=[_order("GHOST/USD", 150.0, 120.0, "TX")])   # non-roster pair, open row
+    assert st["health"]["ghost_pairs"] == ["GHOST/USD"]
     assert st["health"]["pos_count"] == 1            # counted — and now also NAMED
     h = server.build_health()
-    assert h["ghost_pairs"] == ["XMR/USD"]
+    assert h["ghost_pairs"] == ["GHOST/USD"]
 
 
 # ── W5: recon per_pair + dated stamp ──────────────────────────────────────────

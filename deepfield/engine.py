@@ -70,15 +70,27 @@ def evaluate(symbol, weekly, daily, profile=FULL, provisional=False, elapsed_fra
     low_52w = min(w52) if w52 else None
     high_52w = max(w52) if w52 else None
 
-    results = [
-        sg.sig1_below_wema200(wc, w_ema200, profile),
-        sg.sig2_wrsi_turning_up(w_rsi, profile),
-        sg.sig3_macd_crossup(w_hist, profile),
-        sg.sig4_drsi_divergence(dc, d_rsi, profile),
-        sg.sig5_first_up_close(wc, profile),
-        _sig6(wo, wh, wl, wc, wvol, w_vol_sma, profile, provisional, elapsed_fraction),
-        sg.sig7_near_52w_low(price, low_52w, profile),
-    ]
+    # v4.4 whole-pair data gate (docs/reference/oracle_dca_v44.py ~L532/L545):
+    # below 30 closed weekly OR 30 closed daily bars v4.4 refuses the pair
+    # outright ("too few weekly bars") — NO slot is evaluated. Reproduce that
+    # under EVERY profile, or a young listing (full-universe roster 2026-07-19)
+    # fires the low-bar-count signals (sig5 needs ~5 bars) that v4.4 would never
+    # score — the HYPE parity trip. Price/52w fields below stay populated for
+    # display; the card is all-NA, score 0, so it can never confirm a BUY.
+    if len(wc) < 30 or len(dc) < 30:
+        why = (f"too few weekly bars ({len(wc)}<30)" if len(wc) < 30
+               else f"too few daily bars ({len(dc)}<30)")
+        results = [sg.SignalResult(s, sg._name(s, profile), NA, why) for s in range(1, 8)]
+    else:
+        results = [
+            sg.sig1_below_wema200(wc, w_ema200, profile),
+            sg.sig2_wrsi_turning_up(w_rsi, profile),
+            sg.sig3_macd_crossup(w_hist, profile),
+            sg.sig4_drsi_divergence(dc, d_rsi, profile),
+            sg.sig5_first_up_close(wc, profile),
+            _sig6(wo, wh, wl, wc, wvol, w_vol_sma, profile, provisional, elapsed_fraction),
+            sg.sig7_near_52w_low(price, low_52w, profile),
+        ]
 
     score = sum(1 for r in results if r.state == FIRED)
     denom = sum(1 for r in results if r.state != NA)

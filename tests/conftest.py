@@ -29,3 +29,27 @@ def _isolate_operator_stack_knobs(monkeypatch):
     # behavior to poll_fills; default it inert so legacy tests test exactly what they
     # tested. The dedicated test_reverse_gear.py monkeypatches it on.
     monkeypatch.setattr(config, "REVERSE_GEAR_ENABLED", False)
+
+
+@pytest.fixture(autouse=True)
+def _bridge_query_orders_to_query_order(monkeypatch):
+    """poll_fills batches its pending-order lookups through broker.query_orders
+    (one 50-txid sweep per cycle — full-universe roster, 2026-07-19). The legacy
+    tests fake per-txid broker.query_order; bridge the batch through it here so
+    every existing fake keeps its exact intent ("any txid returns X"). Reads
+    query_order DYNAMICALLY, so a test's own monkeypatch wins. Tests that fake
+    query_orders itself simply override this (their setattr runs later). Absent
+    result contract preserved: None from query_order -> key omitted -> unknown."""
+    from deepfield import broker
+
+    def _batched(txids):
+        out = {}
+        for t in txids or []:
+            if not t:
+                continue
+            o = broker.query_order(t)
+            if o is not None:
+                out[t] = o
+        return out
+
+    monkeypatch.setattr(broker, "query_orders", _batched)

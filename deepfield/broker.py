@@ -160,6 +160,7 @@ def private(endpoint, params=None, idempotent=True, meta=None):
                         log.error("private API error %s: %s", endpoint, es)
                         if meta is not None:
                             meta["definite"] = True   # Kraken responded: a real reject
+                            meta["error"] = es        # verbatim reject text (probe triage)
                         return None
                 else:
                     if meta is not None:

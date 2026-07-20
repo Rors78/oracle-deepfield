@@ -741,7 +741,7 @@ def test_validate_mode_builds_order_without_executing(tmp_path, monkeypatch):
     conn = _conn(tmp_path)
     captured = {}
 
-    def fake_private(endpoint, params=None):
+    def fake_private(endpoint, params=None, **kw):
         captured["endpoint"] = endpoint
         captured["params"] = params
         return {"descr": {"order": "buy 2.0 XBTUSD:BTNL @ limit 100 with 10:1 leverage"}}

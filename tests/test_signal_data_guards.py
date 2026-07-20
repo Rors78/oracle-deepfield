@@ -112,3 +112,32 @@ def test_parity_attributes_a_newly_na_sig3_to_F3():
     assert parity._attribute(1, NOT, NA) == "F3"      # original case still holds
     # A non-N/A disagreement on a verbatim slot is still a hard stop.
     assert parity._attribute(3, NOT, FIRED) == "UNATTRIBUTED"
+
+
+def test_whole_pair_gate_young_series_all_na_both_profiles():
+    """v4.4 refuses a pair outright below 30 weekly or 30 daily closed bars
+    ("too few weekly bars") — engine.evaluate must reproduce that under EVERY
+    profile, or a young listing fires low-bar signals v4.4 would never score
+    (the HYPE sig5 parity trip, full-universe roster 2026-07-19)."""
+    from deepfield import engine
+    from deepfield.profiles import COMPAT, FULL
+
+    n = 24                                     # < 30 weekly bars
+    weekly = ([100.0] * n, [102.0] * n, [98.0] * n,
+              [20.0, 14.0, 12.0, 10.0, 8.0, 9.0] * 4,   # sig5 would fire un-gated
+              [100.0] * n)
+    daily = ([float(i) for i in range(1, 40)],)
+    for prof in (COMPAT, FULL):
+        card = engine.evaluate("YOUNG/USD", weekly, daily, prof)
+        assert all(r.state == NA for r in card.results), card.results
+        assert card.score == 0 and card.denom == 0 and card.status == "---"
+        assert "too few weekly bars" in card.results[0].reason
+    # price/52w display fields survive the gate (UI + probe read them)
+    assert card.price == 39.0
+
+    # daily-side gate too: enough weekly, too few daily
+    card = engine.evaluate("YOUNG/USD", ([100.0] * 40, [102.0] * 40, [98.0] * 40,
+                                         [100.0] * 40, [100.0] * 40),
+                           ([1.0] * 10,), FULL)
+    assert all(r.state == NA for r in card.results)
+    assert "too few daily bars" in card.results[0].reason

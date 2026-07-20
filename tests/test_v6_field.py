@@ -196,13 +196,22 @@ def test_band_edges_and_proximity_top_tier():
 # ── #3 all-idle compression ──────────────────────────────────────────────────
 
 def test_all_idle_one_row_each():
+    # Full-universe law (2026-07-19): the field can no longer show every pair on
+    # one screen — each RENDERED pair gets exactly one idle row, and the rest are
+    # DECLARED by the fold line (rendered + folded == whole roster, no silent cap).
     st = AppState()
     txt = ui.export_frame_text(st, width=229, height=54)
     lines = txt.split("\n")
+    rendered = 0
     for sym in ui.PAIR_LIST:
         disp = ui.DISPLAY.get(sym, sym)
-        hits = [ln for ln in lines if ln.strip().startswith(disp)]
-        assert len(hits) == 1, f"{disp} should render exactly one idle row"
+        hits = [ln for ln in lines if ln.strip().startswith(disp + " ")]
+        assert len(hits) <= 1, f"{disp} should render at most one idle row"
+        rendered += len(hits)
+    assert rendered > 0
+    if rendered < len(ui.PAIR_LIST):
+        folded = len(ui.PAIR_LIST) - rendered
+        assert f"+{folded} more idle" in txt, "truncation must be declared, never silent"
     assert "1 field · 2 book" in txt                 # keybar pinned to the fixed floor
     assert _height(txt) <= 54                          # fills to the floor, no overflow
 

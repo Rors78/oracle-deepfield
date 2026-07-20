@@ -754,7 +754,11 @@ def render_field(appstate, w, height):
     # between strips and a journal tail that ABSORBS whatever the strips don't use —
     # dead space becomes live narrative (15 lines quiet, shrinks to 1 on a busy field).
     avail = max(4, height - 7)
-    body, used = [], 0
+    body, used, rendered = [], 0, 0
+    # Budget avail-2: 1 row is the journal's guaranteed floor, 1 is reserved for
+    # the fold line — on the 132-pair universe a terminal can't show every strip,
+    # and a silent cap would read as "that's the whole field" (the XRP-below-the-
+    # fold trap). If nothing folds, the reserve just feeds the journal tail.
     for sym, tier, v in ordered:
         selected = (sym == appstate.focus_symbol)
         strip = _field_strip(appstate, sym, tier, v, w, selected, now)
@@ -763,12 +767,20 @@ def render_field(appstate, w, height):
         if sym == appstate.expanded_symbol:
             exp_block = _expansion(appstate, sym, v, w)
             cost += _expansion_rows(appstate, v)
-        if used + cost > avail - 1 and body:     # always leave >=1 row for the journal
+        if used + cost > avail - 2 and body:
             break
         body.extend(strip)
         if exp_block is not None:
             body.append(exp_block)
         used += cost
+        rendered += 1
+    folded = len(ordered) - rendered
+    if folded > 0:
+        # Truncation is DECLARED, never silent: the fold line names the count and
+        # the recovery path (attention sorting floats any waking pair above it).
+        body.append(Text(f"  ⌄ +{folded} more idle pair{'s' if folded != 1 else ''} "
+                         f"below the fold — attention floats them up", style=INK))
+        used += 1
     jlines = max(1, avail - used)
     return Group(header, Group(*body), _sep(w), _margin_line(appstate, w),
                  _journal_tail_block(appstate, jlines), _keybar())

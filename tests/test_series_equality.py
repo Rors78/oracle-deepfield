@@ -17,5 +17,10 @@ def test_series_equality_all_pairs():
     assert len(report) == len(config.PAIRS) * 2   # N pairs x 2 intervals (daily+weekly)
     for row in report:
         assert row["ok"], row
-        assert row["v44_len"] == row["db_closed"]
-        assert row["last_ts_match"]
+        if "reason" in row:
+            # vacuous row: legitimate ONLY when the DB truly has <20 closed
+            # candles (young listing) — never a mask for a backfill hole
+            assert row["db_closed"] < 20, row
+        else:
+            assert row["v44_len"] == row["db_closed"]
+            assert row["last_ts_match"]
