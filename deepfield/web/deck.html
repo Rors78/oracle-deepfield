@@ -484,13 +484,16 @@ function renderMast(h){
 /* ═══ capital ═══ */
 function equityChart(h){
   const ser=(h.equity_series||[]).filter(p=>p&&p[1]>0);
-  const W=560,H=132,PL=6,PR=52,PT=10,PB=16;
+  const W=560,H=170,PL=6,PR=52,PT=14,PB=22;
   if(ser.length<2) return "";
   let lo=Math.min(...ser.map(p=>p[1])), hi=Math.max(...ser.map(p=>p[1]));
   const base=h.tp_baseline, tgt=h.tp_target;
   if(base&&base>lo*0.8&&base<hi*1.2){ lo=Math.min(lo,base); hi=Math.max(hi,base); }
   const pad=(hi-lo)*0.09||1; lo-=pad; hi+=pad;
-  if(tgt&&tgt<hi*1.35) hi=Math.max(hi,tgt+pad*0.5);
+  // the target only joins the domain when it is CLOSE — force-including a +20%
+  // away line squashed the day's actual movement into the bottom third
+  const tgtNear=tgt&&tgt<=hi+(hi-lo)*0.6;
+  if(tgtNear) hi=Math.max(hi,tgt+pad*0.5);
   const t0=ser[0][0], t1=ser[ser.length-1][0]||t0+1;
   const X=t=>PL+(t-t0)/(t1-t0)*(W-PL-PR), Y=v=>PT+(1-(v-lo)/(hi-lo))*(H-PT-PB);
   const pts=ser.map(p=>`${X(p[0]).toFixed(1)},${Y(p[1]).toFixed(1)}`).join(" ");
@@ -504,13 +507,17 @@ function equityChart(h){
   const ref=(v,color,label)=> (v==null||v<lo||v>hi)?"":
     `<line x1="${PL}" x2="${W-PR}" y1="${Y(v).toFixed(1)}" y2="${Y(v).toFixed(1)}" stroke="${color}" stroke-width="1" stroke-dasharray="3 4" opacity=".55"/>
      <text x="${W-PR+7}" y="${(Y(v)+3).toFixed(1)}" fill="${color}" font-size="9" font-family="var(--mono)">${label}</text>`;
+  const tticks=[0,.33,.66,1].map(f=>{ const t=t0+(t1-t0)*f;
+    const d=new Date(t*1000), lab=d.toLocaleTimeString("en-US",{hour12:false,hour:"2-digit",minute:"2-digit",timeZone:"America/Denver"});
+    return `<text x="${X(t).toFixed(1)}" y="${H-6}" fill="var(--ink4)" font-size="9" font-family="var(--mono)" text-anchor="${f===0?"start":f===1?"end":"middle"}">${lab}</text>`; }).join("");
   return `<svg viewBox="0 0 ${W} ${H}" id="eqsvg" aria-label="equity, last 24 hours">
     <defs><linearGradient id="eqfill" x1="0" y1="0" x2="0" y2="1">
       <stop offset="0" stop-color="#4E8FD0" stop-opacity=".28"/>
       <stop offset="1" stop-color="#4E8FD0" stop-opacity="0"/></linearGradient></defs>
-    ${ticks}
+    ${ticks}${tticks}
     ${ref(base,"var(--brass)","base")}
-    ${ref(tgt,"var(--gain)","t/p")}
+    ${tgtNear?ref(tgt,"var(--gain)","t/p")
+      :tgt?`<text x="${W-PR}" y="${PT-4}" fill="var(--gain-ink)" font-size="9" font-family="var(--mono)" text-anchor="end">t/p ${fmt$(tgt)} ↑</text>`:""}
     <polygon points="${area}" fill="url(#eqfill)"/>
     <polyline points="${pts}" fill="none" stroke="var(--ice-hi)" stroke-width="2" stroke-linejoin="round"/>
     <circle cx="${X(t1).toFixed(1)}" cy="${Y(last).toFixed(1)}" r="3" fill="var(--ice-hi)" stroke="var(--panel)" stroke-width="2"/>
@@ -582,14 +589,15 @@ function renderHarvest(h){
     <circle cx="${(CX+R*Math.cos(prog)).toFixed(1)}" cy="${(CY+R*Math.sin(prog)).toFixed(1)}" r="5"
       fill="var(--brass-hi)" stroke="var(--panel)" stroke-width="2.5"/>
     <text class="gauge-center" x="${CX}" y="${CY-8}" fill="var(--ink)" font-family="var(--mono)" font-weight="600" font-size="27">${pct==null?"—":(pct>=0?"+":"")+pct.toFixed(1)+"%"}</text>
-    <text class="gauge-center" x="${CX}" y="${CY+13}" fill="var(--ink3)" font-size="9.5" letter-spacing="2" font-family="var(--disp)">OF +20.0% TARGET</text>
+    <text class="gauge-center" x="${CX}" y="${CY+13}" fill="var(--ink3)" font-size="9.5" letter-spacing="2" font-family="var(--disp)">GAINED ON BASE</text>
     <text class="gauge-center" x="${CX}" y="${CY+34}" fill="var(--ink2)" font-family="var(--mono)" font-size="11">${span?fmtSigned(eq-base)+" this cycle":""}</text>
   </svg>`;
   $("hv-nums").innerHTML=`<span>base <b>${fmt$(base)}</b></span><span>equity <b>${fmt$(eq)}</b></span><span>target <b>${fmt$(tgt)}</b></span>`;
   const tot=TPC.reduce((a,c)=>a+(c.profit||0),0);
   const bk=$("hv-banked"); bk.textContent=fmtSigned(tot); bk.className="v num "+cls(tot);
-  $("hv-mini").innerHTML=TPC.slice(0,3).map(c=>
-    `<div class="mlrow"><span class="d">${c.label}</span><span class="arc">$${c.baseline.toFixed(0)} → $${c.settled.toFixed(0)}</span>
+  // one line only — the full history lives in the HARVEST LEDGER card, no duplication
+  $("hv-mini").innerHTML=TPC.slice(0,1).map(c=>
+    `<div class="mlrow"><span class="d">last cycle</span><span class="arc">${c.label} · $${c.baseline.toFixed(0)} → $${c.settled.toFixed(0)}</span>
      <span class="p ${cls(c.profit)}">${fmtSigned(c.profit)}</span>
      ${c.flows==null?'<span class="fl">flows?</span>':Math.abs(c.flows)>=0.01?`<span class="fl">${c.flows>0?"+":"−"}$${Math.abs(c.flows).toFixed(0)} dep</span>`:""}</div>`).join("");
 }
@@ -653,7 +661,8 @@ function renderDefense(h){
    greedy beeswarm so same-distance positions stack instead of occluding. */
 function renderField(){
   const held=PAIRS.filter(p=>p.fills>0);
-  $("field-aux").textContent=`${held.length} held · ${PAIRS.filter(p=>p.bid&&!p.fills).length} bids resting · dot area = notional`;
+  $("field-aux").innerHTML=`${held.length} held · ${PAIRS.filter(p=>p.bid&&!p.fills).length} scouting bids · `
+    +`<span style="color:var(--gain-ink)">●</span> in profit <span style="color:var(--loss-ink)">●</span> underwater · dot area = notional`;
   const W=1360, H=168, PT=30, PB=28;
   const midY=PT+(H-PT-PB)/2;
   if(!held.length){
@@ -705,18 +714,32 @@ function renderField(){
       <text x="${X(t)+(t===BREAK&&lb>BREAK?-3:0)}" y="${H-PB+17}" fill="var(--ink4)" font-size="9" text-anchor="${t===BREAK&&lb>BREAK?"end":"middle"}" font-family="var(--mono)">${t>0?"+"+t:t}%</text>`).join("")}
     <line x1="0" x2="${W}" y1="${H-PB}" y2="${H-PB}" stroke="var(--line)" stroke-width="1"/>
     ${lb>BREAK?`<path d="M ${BX+5} ${H-PB-5} l 5 10 M ${BX+11} ${H-PB-5} l 5 10" stroke="var(--ink3)" stroke-width="1.5" fill="none"/>`:""}`;
-  // labels: sweep left→right, keep whenever 30px clear of the previous label at that row
-  let lastLab={};
+  // dots first, labels in a SECOND pass on top (a later circle must never paint
+  // over an earlier label), each label collision-checked against every dot and
+  // every placed label — above, below, then farther out; give up to the tooltip
   objs.forEach(o=>{
     const fill=(o.p.pnl||0)>=0?"var(--gain)":"var(--loss)";
-    const danger=o.d<3;
     svg+=`<circle class="fdot" data-sym="${o.p.sym}" cx="${o.x.toFixed(1)}" cy="${o.y.toFixed(1)}" r="${o.r.toFixed(1)}"
       fill="${fill}" fill-opacity=".85" stroke="var(--panel)" stroke-width="2" style="cursor:pointer"/>`;
-    const above=o.y<=midY, ly=above?o.y-o.r-5:o.y+o.r+11, row=above?"a":"b";
-    if(danger || lastLab[row]===undefined || o.x-lastLab[row]>34){
-      svg+=`<text x="${o.x.toFixed(1)}" y="${ly.toFixed(1)}" text-anchor="middle" fill="${danger?"var(--loss-ink)":"var(--ink3)"}"
-        font-size="8.5" font-family="var(--disp)" font-weight="600" letter-spacing=".07em">${o.p.sym}</text>`;
-      lastLab[row]=o.x;
+  });
+  const labRects=[];
+  const clear=(x,y,w,h)=>{
+    if(y-h<PT-14 || y>H-PB-2) return false;
+    if(labRects.some(rc=>x-w/2<rc.x+rc.w/2+3 && x+w/2>rc.x-rc.w/2-3 && y>rc.y-rc.h-3 && y-h<rc.y+3)) return false;
+    return !placed.some(q=>{
+      const nx=Math.max(x-w/2,Math.min(q.x,x+w/2)), ny=Math.max(y-h,Math.min(q.y,y));
+      return (q.x-nx)**2+(q.y-ny)**2 < (q.r+1.5)**2; });
+  };
+  [...objs].sort((a,b)=>(a.d<3?0:1)-(b.d<3?0:1) || b.r-a.r).forEach(o=>{   // danger, then biggest, label first
+    const w=o.p.sym.length*6.4+4, h=9, danger=o.d<3;
+    const spots=[o.y-o.r-5, o.y+o.r+12, o.y-o.r-16, o.y+o.r+23];
+    for(const ly of spots){
+      if(clear(o.x,ly,w,h)){
+        svg+=`<text x="${o.x.toFixed(1)}" y="${ly.toFixed(1)}" text-anchor="middle" fill="${danger?"var(--loss-ink)":"var(--ink3)"}"
+          font-size="8.5" font-family="var(--disp)" font-weight="600" letter-spacing=".07em">${o.p.sym}</text>`;
+        labRects.push({x:o.x,y:ly,w,h});
+        break;
+      }
     }
   });
   svg+="</svg>";
@@ -757,15 +780,20 @@ function sortVal(p,k){
 }
 function renderBook(){
   const held=PAIRS.filter(p=>p.fills>0), scout=PAIRS.filter(p=>!p.fills);
-  $("book-aux").textContent=`${held.length} positions · ${S.health.bid_count??"—"} bids resting`;
+  $("book-aux").textContent=`${held.length} positions · ${S.health.bid_count??"—"} entry bids working (rungs + scouts)`;
   held.sort((a,b)=>{ const va=sortVal(a,sortKey), vb=sortVal(b,sortKey);
     return (va<vb?-1:va>vb?1:0)*sortDir; });
+  // bar domain zooms to the book's own span (same lesson as THE FIELD) — with a
+  // fixed 0–20% scale a 10.7% and an 11.6% bar were pixel-identical
+  const dists=held.map(p=>(p.price&&p.stop)?(p.price-p.stop)/p.stop*100:null).filter(v=>v!=null);
+  const dLo=dists.length?Math.max(0,Math.min(...dists)*0.92):0;
+  const dHi=dists.length?Math.max(...dists)*1.04+0.1:20;
   const head=`<thead><tr>${COLS.map(([k,lab,l])=>
     `<th class="${l||""} ${sortKey===k?"on":""}" data-k="${k}">${lab} ${sortKey===k?`<span class="dir">${sortDir>0?"▲":"▼"}</span>`:""}</th>`).join("")}</tr></thead>`;
   const rows=held.map(p=>{
     const d=(p.price&&p.stop)?((p.price-p.stop)/p.stop*100):null;
     const dCol=d==null?"var(--ink4)":d<3?"var(--loss)":d<6?"var(--warn)":"var(--gain)";
-    const dW=d==null?0:Math.min(100,d/20*100);
+    const dW=d==null?0:Math.max(4,Math.min(100,(d-dLo)/(dHi-dLo)*100));
     const prot=p.stops>=p.fills?`<span class="protlamp gain" title="all fills protected">●</span>`
       :p.stops>0?`<span class="protlamp warn" title="${p.stops}/${p.fills} protected">◐</span>`
       :`<span class="protlamp loss" title="NO RESTING STOP">○</span>`;
