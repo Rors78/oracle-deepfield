@@ -380,7 +380,7 @@ def _assemble(conn):
         "label": reg.get("label"), "note": reg.get("note"), "daily_rsi": reg.get("drsi"),
     }
     return {"health": health, "regime": regime, "pairs": pairs,
-            "journal": _journal(conn), "v": VERSION,
+            "journal": _journal(conn), "tp_cycles": _tp_cycles(conn), "v": VERSION,
             # W1: the client must KNOW when market data is frozen. data_age_s is
             # always sent (null only when no blob has ever been written).
             "data_stale": not fresh,
@@ -400,6 +400,30 @@ def _regime(conn):
              "RECOVERY": "above, ema flattening", "NEUTRAL": "ema flat"}
     return {"label": (r.label or "?").lower(), "note": notes.get(r.label, ""),
             "drsi": round(r.daily_rsi) if r.daily_rsi else None}
+
+
+def _tp_cycles(conn, n=30):
+    """Completed T/P cycles for the ledger card (newest first). `profit` is TRUE
+    trading profit (deposit-shifted baseline); flows null = pre-tracking backfill.
+    Table appears with the first post-upgrade bot start — absent is fine."""
+    try:
+        rows = store.tp_cycles_list(conn, n)
+    except sqlite3.OperationalError:
+        return []
+    out = []
+    for ts, baseline, settled, flows, profit, note in rows:
+        try:
+            dt = datetime.datetime.fromisoformat(ts)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=UTC)
+            label = dt.astimezone(DENVER).strftime("%b %d · %H:%M")
+        except Exception:
+            label = (ts or "")[:16]
+        out.append({"ts": ts, "label": label,
+                    "baseline": round(baseline, 2), "settled": round(settled, 2),
+                    "flows": (round(flows, 2) if flows is not None else None),
+                    "profit": round(profit, 2), "note": note})
+    return out
 
 
 def _journal(conn, n=60):

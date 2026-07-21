@@ -128,6 +128,15 @@ CREATE TABLE IF NOT EXISTS equity_history(
     ts INTEGER PRIMARY KEY,                      -- unix, sampled ~5min by the bot loop
     equity REAL                                  -- display-only (web sparkline)
 );
+CREATE TABLE IF NOT EXISTS tp_cycles(
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts TEXT NOT NULL,                            -- completion time, UTC iso
+    baseline REAL NOT NULL,                      -- baseline at completion (deposit-shifted)
+    settled REAL NOT NULL,                       -- post-flatten equity (= next baseline)
+    flows REAL,                                  -- net external USD flow in-cycle (NULL = untracked era)
+    profit REAL NOT NULL,                        -- true trading profit banked this cycle
+    note TEXT
+);
 """
 
 
@@ -170,8 +179,12 @@ def connect(db_path):
         # userref (audit 2026-07-13): our client id sent on every live AddOrder so an
         # order whose transport failed AMBIGUOUSLY (may or may not have landed) can be
         # re-identified on Kraken instead of becoming an untracked naked position.
+        # close_txid (limit flatten, operator 2026-07-21): txid of the pair's resting
+        # post-only T/P close order. A row carrying one is OWNED by the flatten —
+        # reprotect/reconcile must not re-arm a stop beside it (stop + resting sell
+        # would double the sell volume -> short on fill+trigger).
         _ensure_columns(conn, "orders", [("score", "INTEGER"), ("required", "INTEGER"),
-                                         ("userref", "INTEGER")])
+                                         ("userref", "INTEGER"), ("close_txid", "TEXT")])
         conn.commit()
     except Exception:
         conn.close()   # _WriterConn.close() frees the write lock the schema writes took
@@ -386,6 +399,25 @@ def recent_alerts(conn, n=5):
         "SELECT ts, symbol, price, score, denom, signals, kind FROM alerts ORDER BY id DESC LIMIT ?",
         (n,),
     ).fetchall()
+
+
+def tp_cycle_add(conn, ts, baseline, settled, flows, profit, note=None):
+    """Record one completed T/P cycle in the ledger (operator 2026-07-21: 'a t/p
+    ledger somewhere'). `profit` is TRUE trading profit: settled - baseline where
+    the baseline was deposit-shifted along the way, so external money never reads
+    as trading gain. flows is informational (net USD in/out during the cycle);
+    NULL flows marks a backfilled pre-tracking row."""
+    conn.execute(
+        "INSERT INTO tp_cycles(ts, baseline, settled, flows, profit, note) VALUES(?,?,?,?,?,?)",
+        (ts, baseline, settled, flows, profit, note))
+    conn.commit()
+
+
+def tp_cycles_list(conn, n=50):
+    """Newest-first completed T/P cycles for the console ledger card."""
+    return conn.execute(
+        "SELECT ts, baseline, settled, flows, profit, note FROM tp_cycles "
+        "ORDER BY id DESC LIMIT ?", (n,)).fetchall()
 
 
 def journal(conn, kind, symbol, text):

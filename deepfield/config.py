@@ -260,11 +260,16 @@ SEED_PAIRS = tuple(p["ws"] for p in PAIRS)
 
 # Equity take-profit (operator 2026-07-13 "t/p out at +20%, then go again"): when
 # live equity >= tp_baseline * (1 + TP_PCT), flatten the WHOLE book — cancel every
-# resting bid and protective stop, market-close each pair's live open volume —
-# then reset the baseline to post-flatten equity and let the seeder restack: a
-# compounding stack->harvest->restack cycle. The closes are EVENT-TRIGGERED
-# market orders sized to Kraken's OpenPositions volume at that instant — never a
-# resting sell, so the no-resting-sell / net-short rule below stands intact.
+# resting bid and protective stop, close each pair's live open volume — then reset
+# the baseline to post-flatten equity and let the seeder restack: a compounding
+# stack->harvest->restack cycle, recorded per-cycle in the tp_cycles ledger.
+# Closes are POST-ONLY LIMIT sells pegged a tick over best bid, re-pegged each
+# poll pass until flat (operator 2026-07-21 — market closes paid taker fees +
+# spread; the long-only rule is amended again: a T/P close may REST until filled,
+# tracked in orders.close_txid and owned exclusively by the flatten). The
+# tp_baseline is DEPOSIT-SHIFTED (app._poll_external_flows): net USD deposits/
+# withdrawals detected on the Ledgers API move the baseline the same amount, so
+# +TP_PCT always measures TRADING profit, never money walking in the door.
 TP_ENABLED = True
 TP_PCT = 0.20
 

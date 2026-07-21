@@ -354,6 +354,14 @@ class Executor:
         no-blockers stance). Reads the margin level the app loop persisted to
         meta['web_live'] ≤15s ago — no extra API call. FAILS OPEN: a stale (>120s),
         missing, or unparseable level never pauses anything. Returns (ok, reason)."""
+        try:
+            # A T/P flatten in progress (limit closes resting/chasing) owns the book:
+            # seeds/rungs placed now would be canceled by the very next flatten pass —
+            # a placement/cancel war. Restack resumes the cycle after completion.
+            if str(store.meta_get(self.conn, "tp_flatten_active", "") or "") == "1":
+                return False, "T/P flatten in progress"
+        except Exception:
+            pass                                   # fail open, same as the floor read
         floor = float(getattr(config, "MARGIN_LEVEL_STACK_FLOOR_PCT", 0) or 0)
         if floor <= 0:
             return True, ""
@@ -701,9 +709,13 @@ class Executor:
         if self.mode != "live" or not config.PROTECTIVE_STOP:
             return
         try:
+            # close_txid rows are excluded: the T/P flatten owns them — a resting
+            # limit close IS the pair's exit, and re-arming a stop beside it would
+            # double the sell volume (stop fires + close fills -> short).
             naked = self.conn.execute(
                 "SELECT id, symbol, margin_pair, volume, leverage, stop FROM orders "
-                "WHERE status='open' AND stop_txid IS NULL AND mode=?", (self.mode,)).fetchall()
+                "WHERE status='open' AND stop_txid IS NULL AND close_txid IS NULL "
+                "AND mode=?", (self.mode,)).fetchall()
             if not naked:
                 return
             kr_open_orders = broker.open_orders()
@@ -1048,42 +1060,71 @@ class Executor:
         if self.mode != "live" or not getattr(config, "TP_ENABLED", False):
             return False
         try:
+            # A started flatten OWNS the book until every pair is confirmed flat
+            # (limit closes rest/chase across polls now — operator 2026-07-21). The
+            # flag decouples the retry from the equity target: without it, a price
+            # drop below target mid-chase would strand half-flattened pairs with
+            # sells resting and stops canceled, forever.
+            flatten_active = str(store.meta_get(self.conn, "tp_flatten_active", "") or "") == "1"
             eq = self.portfolio_value()
-            if eq is None:
+            if eq is None and not flatten_active:
                 return False
             try:
                 baseline = float(store.meta_get(self.conn, "tp_baseline", 0) or 0)
             except (TypeError, ValueError):
                 baseline = 0.0
-            if baseline <= 0:
-                store.meta_set(self.conn, "tp_baseline", eq)
-                log.warning("T/P ARMED: baseline $%.2f — flatten-everything target $%.2f (+%.0f%%)",
-                            eq, eq * (1 + config.TP_PCT), config.TP_PCT * 100)
-                self._journal("tp", "*", f"T/P armed: baseline ${eq:.2f}, "
-                                         f"target ${eq * (1 + config.TP_PCT):.2f}")
-                return False
-            target = baseline * (1 + config.TP_PCT)
-            if eq < target:
-                return False
-            log.warning("T/P HIT: equity $%.2f >= target $%.2f (baseline $%.2f) — "
-                        "FLATTENING THE BOOK", eq, target, baseline)
-            self._journal("tp", "*", f"T/P HIT: ${eq:.2f} >= ${target:.2f} — flattening")
+            if not flatten_active:
+                if baseline <= 0:
+                    if eq is None:
+                        return False
+                    store.meta_set(self.conn, "tp_baseline", eq)
+                    store.meta_set(self.conn, "tp_cycle_flows", 0.0)
+                    log.warning("T/P ARMED: baseline $%.2f — flatten-everything target $%.2f (+%.0f%%)",
+                                eq, eq * (1 + config.TP_PCT), config.TP_PCT * 100)
+                    self._journal("tp", "*", f"T/P armed: baseline ${eq:.2f}, "
+                                             f"target ${eq * (1 + config.TP_PCT):.2f}")
+                    return False
+                target = baseline * (1 + config.TP_PCT)
+                if eq < target:
+                    return False
+                log.warning("T/P HIT: equity $%.2f >= target $%.2f (baseline $%.2f) — "
+                            "FLATTENING THE BOOK (post-only limit closes)", eq, target, baseline)
+                self._journal("tp", "*", f"T/P HIT: ${eq:.2f} >= ${target:.2f} — flattening")
+                store.meta_set(self.conn, "tp_flatten_active", "1")
             ran, complete = self._flatten_all()
             if not ran:
                 return False        # exchange state unavailable — re-trigger next poll
             if not complete:
-                # Baseline NOT reset: while equity holds over target the trigger
-                # re-fires every poll and the flatten retries just what's left.
-                # (Resetting here would strand the unclosed pairs until +TP_PCT
-                # over the NEW baseline — they'd never flatten.)
-                log.warning("T/P: flatten INCOMPLETE — baseline kept, retrying next poll")
-                self._journal("tp", "*", "flatten incomplete — retrying next poll")
+                # Limit closes are resting/chasing. The flag keeps this pass re-firing
+                # every poll regardless of where equity sits, until all-flat.
+                log.info("T/P: flatten in progress — limit closes resting/chasing, "
+                         "next pass on the next poll")
                 return True
-            new_eq = self.portfolio_value() or eq
+            new_eq = self.portfolio_value()
+            if new_eq is None:
+                # All-flat but the settle read failed — retry next poll rather than
+                # booking a cycle row off a guess; the flatten pass is a no-op now.
+                log.warning("T/P: book flat but equity read failed — settling next poll")
+                return True
+            try:
+                flows = float(store.meta_get(self.conn, "tp_cycle_flows", 0) or 0)
+            except (TypeError, ValueError):
+                flows = 0.0
+            profit = new_eq - baseline
+            try:
+                store.tp_cycle_add(
+                    self.conn, datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                    baseline, new_eq, flows, profit, note="limit flatten")
+            except Exception:
+                log.exception("T/P ledger write failed (cycle still completes)")
             store.meta_set(self.conn, "tp_baseline", new_eq)
-            log.warning("T/P CYCLE COMPLETE: banked vs baseline $%.2f -> new baseline $%.2f — "
-                        "seeder restacks next cycle", baseline, new_eq)
-            self._journal("tp", "*", f"cycle complete: new baseline ${new_eq:.2f} — restacking")
+            store.meta_set(self.conn, "tp_cycle_flows", 0.0)
+            store.meta_set(self.conn, "tp_flatten_active", "0")
+            log.warning("T/P CYCLE COMPLETE: baseline $%.2f -> settled $%.2f · trading "
+                        "profit $%+.2f (external flows $%+.2f rode along) — seeder "
+                        "restacks next cycle", baseline, new_eq, profit, flows)
+            self._journal("tp", "*", f"cycle complete: banked ${profit:+.2f} trading profit "
+                                     f"(flows ${flows:+.2f}) — new baseline ${new_eq:.2f}, restacking")
             return True
         except Exception:
             log.exception("take-profit check failed (poll_fills continues)")
@@ -1099,11 +1140,16 @@ class Executor:
              the book just gets its ledger reference cleared. Cleared/canceled
              stop_txids are NULLed + committed immediately, so a crash mid-flatten
              leaves rows that _reprotect_naked_open re-arms — protected, never naked.
-          2. OpenPositions FRESH (after stop-cancels — with no sells resting, per-
-             pair long volume can no longer shrink): market-close each unblocked
-             pair's volume, rounded DOWN to the lot grid (an error leaves dust-LONG,
-             never short). Sized from the EXCHANGE's volume, not the ledger's.
-          3. Rows of a successfully-closed pair -> status='closed'.
+          2. OpenPositions FRESH (after stop-cancels — with no OTHER sells resting,
+             per-pair long volume can only shrink via our own close order): rest a
+             POST-ONLY LIMIT close (operator 2026-07-21 — market closes paid taker
+             fees + spread) one tick over best bid for each unblocked pair's live
+             volume, rounded DOWN to the lot grid (an error leaves dust-LONG, never
+             short). Sized from the EXCHANGE's volume, not the ledger's. Later
+             passes manage the resting close: filled -> retire rows; market fell
+             away -> cancel and re-peg (a maker-only chase). Rows carry the close's
+             txid in close_txid — reprotect and the reconciler leave those alone.
+          3. Rows of a pair confirmed FLAT -> status='closed'.
         Returns (ran, complete): ran=False means exchange state was unavailable and
         nothing was recorded (retry next poll; a CancelAll may already have landed,
         in which case the stops-gone window lasts until a pass completes —
@@ -1132,14 +1178,16 @@ class Executor:
             return False, False
         by_sym = {}
         rows = self.conn.execute(
-            "SELECT id, symbol, margin_pair, leverage, stop_txid FROM orders "
+            "SELECT id, symbol, margin_pair, leverage, stop_txid, close_txid FROM orders "
             "WHERE status='open' AND mode=? ORDER BY symbol, id", (self.mode,)).fetchall()
-        for oid, sym, mpair, lev, stop_txid in rows:
+        for oid, sym, mpair, lev, stop_txid, close_txid in rows:
             d = by_sym.setdefault(sym, {"mpair": mpair, "lev": lev, "rows": [],
-                                        "stops": set(), "blocked": False})
+                                        "stops": set(), "closes": set(), "blocked": False})
             d["rows"].append(oid)
             if stop_txid:
                 d["stops"].add(stop_txid)
+            if close_txid:
+                d["closes"].add(close_txid)
         # 1a) entry bids: resolve each to its TERMINAL state (batch query). A bid
         # that PARTIALLY filled before the sweep is a real long — promote it so its
         # pair's close (sized from live volume) retires it with the rest; leave
@@ -1156,7 +1204,8 @@ class Executor:
                 log.warning("T/P %s: bid %s not confirmed terminal — leaving pending, "
                             "blocking its pair this pass", sym, txid)
                 by_sym.setdefault(sym, {"mpair": mpair, "lev": lev, "rows": [],
-                                        "stops": set(), "blocked": False})["blocked"] = True
+                                        "stops": set(), "closes": set(),
+                                        "blocked": False})["blocked"] = True
                 continue
             try:
                 vol_exec = float(o.get("vol_exec", 0) or 0)
@@ -1166,7 +1215,8 @@ class Executor:
                 self.conn.execute("UPDATE orders SET status='open', volume=? WHERE id=?",
                                   (vol_exec, oid))
                 by_sym.setdefault(sym, {"mpair": mpair, "lev": lev, "rows": [],
-                                        "stops": set(), "blocked": False})["rows"].append(oid)
+                                        "stops": set(), "closes": set(),
+                                        "blocked": False})["rows"].append(oid)
                 log.info("T/P %s: bid partially filled %.6g before sweep — closing with the book",
                          sym, vol_exec)
             else:
@@ -1213,6 +1263,32 @@ class Executor:
                         "volume — unexpected shape, aborting closes", len(kr))
             return False, False
 
+        # 2b) close orders are LIMIT + post-only now (operator 2026-07-21: market
+        # closes paid taker fees + spread every cycle). Each pass pegs a maker sell
+        # one tick above best bid; an unfilled sell whose price the market fell away
+        # from is canceled and re-pegged next pass (a slow chase that follows the
+        # bid down, never crossing). The pass completes only when every pair's live
+        # volume is gone, and tp_flatten_active keeps the caller re-firing until
+        # then — so a resting close is never stranded by equity dipping under the
+        # target mid-chase. One batched status query + one batched Ticker call.
+        close_info = broker.query_orders(
+            [t for d in by_sym.values() for t in d["closes"]])
+        need_quote = [rest_by_ws.get(s, "") for s, d in by_sym.items()
+                      if not d["blocked"] and rest_by_ws.get(s)]
+        quotes = rest_client.fetch_ticker(sorted(set(need_quote))) if need_quote else {}
+        quotes = quotes or {}
+
+        def _quote(sym):
+            """(bid, ask) for sym from the batched Ticker response, or None."""
+            q = quotes.get(rest_by_ws.get(sym, ""))
+            if q is None:       # response key can differ from the requested id
+                key = rest_by_ws.get(sym, "")
+                q = next((v for k, v in quotes.items() if _norm_pair_key(k) == key), None)
+            try:
+                return (float(q["b"][0]), float(q["a"][0])) if q else None
+            except (TypeError, ValueError, KeyError, IndexError):
+                return None
+
         complete = True
         for sym, d in by_sym.items():
             if d["blocked"]:
@@ -1226,28 +1302,88 @@ class Executor:
             if lot_dec is not None:
                 vol = _round_down(vol, lot_dec)
             if vol <= 0:
-                # exchange already flat for this pair (stops swept earlier) — retire rows
+                # exchange already flat (close filled / stop swept earlier) — retire
+                # rows; any close order for this pair is done or self-cancels with
+                # zero volume left, but cancel a still-resting one to be tidy.
+                for t in d["closes"]:
+                    if (close_info.get(t) or {}).get("status") in ("open", "pending"):
+                        broker.cancel_order(t)
                 for oid in d["rows"]:
-                    self.conn.execute("UPDATE orders SET status='closed', "
-                                      "error='tp-flatten (no live volume)' WHERE id=?", (oid,))
+                    self.conn.execute("UPDATE orders SET status='closed', close_txid=NULL, "
+                                      "error='tp-flatten' WHERE id=?", (oid,))
                 self.conn.commit()
-                log.info("T/P %s: no live volume — rows retired without a close", sym)
+                log.warning("T/P %s: flat — rows retired (limit close filled or no volume)", sym)
+                self._journal("tp", sym, "flatten: pair flat — rows retired")
                 continue
+            complete = False                       # live volume remains — keep working
+            # Existing close order: leave a well-placed one resting; clear refs of
+            # terminal ones; chase (cancel) one the market fell away from; never act
+            # beside an UNKNOWN status (could double the sell volume).
+            resting = None
+            unknown = False
+            for t in d["closes"]:
+                o = close_info.get(t)
+                status = (o or {}).get("status")
+                if o is None:
+                    unknown = True
+                    log.warning("T/P %s: close %s status UNKNOWN — leaving pair alone "
+                                "this pass (never risk a doubled sell)", sym, t)
+                elif status in ("open", "pending"):
+                    resting = (t, o)
+                else:                              # closed/canceled/expired — spent ref
+                    self.conn.execute("UPDATE orders SET close_txid=NULL WHERE close_txid=?", (t,))
+                    self.conn.commit()
+            if unknown:
+                continue
+            q = _quote(sym)
+            if resting is not None:
+                t, o = resting
+                if q is None:
+                    continue                       # can't judge the peg — leave it resting
+                bid, ask = q
+                tick_dec = config.MARGIN_TICK_DECIMALS.get(sym, 2)
+                tick = 10 ** -tick_dec
+                try:
+                    opx = float((o.get("descr") or {}).get("price") or 0)
+                except (TypeError, ValueError):
+                    opx = 0.0
+                if opx and opx > ask + tick / 2:
+                    # market fell away below our sell — re-peg next pass
+                    if broker.cancel_order(t) is None:
+                        log.warning("T/P %s: chase cancel of %s FAILED — retry next pass", sym, t)
+                        continue
+                    self.conn.execute("UPDATE orders SET close_txid=NULL WHERE close_txid=?", (t,))
+                    self.conn.commit()
+                    log.info("T/P %s: close %s @ %s above ask %s — canceled to re-peg", sym, t, opx, ask)
+                continue                           # resting at/near the touch — let it work
+            # No close resting — place one: maker sell one tick above best bid
+            # (clamped to the ask so a sub-tick spread still rests, never crosses).
+            if q is None:
+                log.warning("T/P %s: no quote — cannot peg a close this pass "
+                            "(reprotect re-arms a stop until the next pass)", sym)
+                continue
+            bid, ask = q
+            tick_dec = config.MARGIN_TICK_DECIMALS.get(sym, 2)
+            tick = 10 ** -tick_dec
+            px = min(_round_price(bid + tick, tick_dec), ask)
+            if px <= bid:
+                px = ask                           # degenerate book — join the ask
+            pxstr = f"{px:.{tick_dec}f}"
             volstr = f"{vol:.{lot_dec}f}" if lot_dec is not None else f"{vol:.8f}"
-            params = {"pair": d["mpair"], "type": "sell", "ordertype": "market",
-                      "volume": volstr, "leverage": str(d["lev"])}
+            params = {"pair": d["mpair"], "type": "sell", "ordertype": "limit",
+                      "price": pxstr, "volume": volstr, "leverage": str(d["lev"]),
+                      "oflags": "post"}
             res = broker.private("/0/private/AddOrder", params, idempotent=False)
             if res and res.get("txid"):
+                txid = res["txid"][0]
                 for oid in d["rows"]:
-                    self.conn.execute("UPDATE orders SET status='closed', error='tp-flatten' "
-                                      "WHERE id=?", (oid,))
+                    self.conn.execute("UPDATE orders SET close_txid=? WHERE id=?", (txid, oid))
                 self.conn.commit()
-                log.warning("T/P %s: market-closed %s (%s)", sym, volstr, res["txid"][0])
-                self._journal("tp", sym, f"flatten: market-closed {volstr}")
+                log.warning("T/P %s: post-only close resting %s @ %s (%s)", sym, volstr, pxstr, txid)
+                self._journal("tp", sym, f"flatten: close resting {volstr} @ {pxstr}")
             else:
-                complete = False
-                log.error("T/P %s: market close FAILED — rows stay open with stops cleared; "
-                          "reprotect re-arms them next cycle, T/P re-fires while over target", sym)
+                log.error("T/P %s: close placement FAILED — rows stay open with stops "
+                          "cleared; reprotect re-arms them, next pass retries", sym)
         return True, complete
 
     def _place_ladder_rung(self, symbol, margin_pair, leverage, stop, filled_price,
@@ -1481,7 +1617,7 @@ class Executor:
         # Oldest-first: when part of a pair's stack has closed out, surviving open
         # volume is allocated to the earliest rows; the newest (now-unbacked) rows retire.
         rows = self.conn.execute(
-            "SELECT id, symbol, margin_pair, volume, leverage, stop, stop_txid, txid "
+            "SELECT id, symbol, margin_pair, volume, leverage, stop, stop_txid, txid, close_txid "
             "FROM orders WHERE status='open' AND mode=? ORDER BY id", (self.mode,)).fetchall()
 
         # Batch every row's stop status into ONE QueryOrders sweep (50 txids/call)
@@ -1503,7 +1639,7 @@ class Executor:
         budget = {}
         backed = []
         recon = {}   # per-pair happy-path tally -> a positive evidence line at the end
-        for oid, sym, mpair, vol, lev, stop, stop_txid, entry_txid in rows:
+        for oid, sym, mpair, vol, lev, stop, stop_txid, entry_txid, close_txid in rows:
             key = (sym, mpair)
             if key not in budget:
                 budget[key] = _pair_open_volume(sym)
@@ -1562,7 +1698,7 @@ class Executor:
                 log.info("%s: %s order %d not backed by open volume — closed, no re-place", pfx, sym, oid)
                 continue
             budget[key] -= volf                            # row consumes real open volume
-            backed.append((oid, sym, mpair, vol, lev, stop, stop_txid))
+            backed.append((oid, sym, mpair, vol, lev, stop, stop_txid, close_txid))
 
         # Surplus check (audit 2026-07-13 M1): leftover pair budget after every row is
         # allocated = exchange volume NO ledger row tracks (an ambiguous AddOrder that
@@ -1600,7 +1736,13 @@ class Executor:
 
         # PASS 2 — ADDITIONS only, after every removal is done: ensure each backed row
         # has exactly one resting stop; re-place only a DEFINITELY-gone/missing one.
-        for oid, sym, mpair, vol, lev, stop, stop_txid in backed:
+        for oid, sym, mpair, vol, lev, stop, stop_txid, close_txid in backed:
+            if close_txid:
+                # The T/P flatten owns this row — its resting limit close is the
+                # exit. Re-placing a stop here would double the sell volume.
+                log.info("%s: %s order %d has a resting T/P close (%s) — flatten owns "
+                         "it, no stop re-place", pfx, sym, oid, close_txid)
+                continue
             o = stop_info.get(stop_txid) if stop_txid else None
             status = (o or {}).get("status")
             if status in ("open", "pending"):

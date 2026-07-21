@@ -129,55 +129,149 @@ def _poll_rollover_fees_threaded():
     not counted; fees_day remains exact for the current UTC day either way.
 
     Blocking Kraken I/O + display-only writes; never gates an order, never raises
-    into the loop."""
+    into the loop. Also hosts the external-flow poll (same thread, same cadence,
+    same Ledgers pacing budget) — see _poll_external_flows."""
     from . import broker
     import datetime as _dt
     c = store.connect(config.DB_PATH)
     try:
         now = _dt.datetime.now(_dt.timezone.utc)
-        midnight = now.replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
-        day = broker.rollover_fees_since(midnight)
-        if day is not None:                          # None == API failure: keep last value
-            store.meta_set(c, "fees_day", round(day[0], 4))
-
-        def _mf(key):
-            try:
-                return float(store.meta_get(c, key, 0) or 0)
-            except (TypeError, ValueError):
-                return 0.0
-        banked, cursor = _mf("fees_banked"), _mf("fees_cursor")
-        if not cursor:
-            # First poll ever: ANCHOR here rather than walking history back to 0.
-            # That walk was the bug (fix 2026-07-19) — Kraken holds 6011 rollover
-            # entries, ~121 pages, against a rate limit shared with the bot's own
-            # private traffic. It failed every hour, never banked a cursor, and so
-            # re-walked from 0 the next hour forever; fees_total was None the whole
-            # time. Anchoring makes the total mean "rollover paid since accounting
-            # began" (fees_epoch records when) and costs exactly one page from here
-            # on. fees_day is unaffected and still exact for the current UTC day.
-            store.meta_set(c, "fees_total", 0.0)
-            store.meta_set(c, "fees_banked", 0.0)
-            store.meta_set(c, "fees_cursor", now.timestamp())
-            store.meta_set(c, "fees_epoch", now.timestamp())
-            log.info("rollover accounting anchored at %s — fees_total accrues from now "
-                     "(prior history not summed: %d pages exceeds the shared rate limit)",
-                     now.isoformat(timespec="seconds"), 121)
-            return
-        win = broker.rollover_fees_since(cursor)
-        if win is not None:                          # None == API failure: bank nothing, retry
-            new_total = round(banked + win[0], 4)
-            store.meta_set(c, "fees_total", new_total)
-            store.meta_set(c, "fees_banked", new_total)
-            store.meta_set(c, "fees_cursor", now.timestamp())
-            if not win[3]:
-                # Truncated: we summed a floor, not the true window. Advance anyway —
-                # holding the cursor back is exactly the deadlock this fix removes.
-                log.warning("rollover window truncated at the page ceiling — fees_total "
-                            "under-counts this window; cursor advanced to stay converged")
-    except Exception:
-        log.exception("rollover fee poll failed (display only)")
+        try:
+            _poll_fees(c, broker, now)
+        except Exception:
+            log.exception("rollover fee poll failed (display only)")
+        try:
+            _poll_external_flows(c, broker, now)
+        except Exception:
+            log.exception("external-flow poll failed (baseline shift skipped)")
     finally:
         c.close()
+
+
+def _poll_fees(c, broker, now):
+    midnight = now.replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
+    day = broker.rollover_fees_since(midnight)
+    if day is not None:                          # None == API failure: keep last value
+        store.meta_set(c, "fees_day", round(day[0], 4))
+
+    def _mf(key):
+        try:
+            return float(store.meta_get(c, key, 0) or 0)
+        except (TypeError, ValueError):
+            return 0.0
+    banked, cursor = _mf("fees_banked"), _mf("fees_cursor")
+    if not cursor:
+        # First poll ever: ANCHOR here rather than walking history back to 0.
+        # That walk was the bug (fix 2026-07-19) — Kraken holds 6011 rollover
+        # entries, ~121 pages, against a rate limit shared with the bot's own
+        # private traffic. It failed every hour, never banked a cursor, and so
+        # re-walked from 0 the next hour forever; fees_total was None the whole
+        # time. Anchoring makes the total mean "rollover paid since accounting
+        # began" (fees_epoch records when) and costs exactly one page from here
+        # on. fees_day is unaffected and still exact for the current UTC day.
+        store.meta_set(c, "fees_total", 0.0)
+        store.meta_set(c, "fees_banked", 0.0)
+        store.meta_set(c, "fees_cursor", now.timestamp())
+        store.meta_set(c, "fees_epoch", now.timestamp())
+        log.info("rollover accounting anchored at %s — fees_total accrues from now "
+                 "(prior history not summed: %d pages exceeds the shared rate limit)",
+                 now.isoformat(timespec="seconds"), 121)
+        return
+    win = broker.rollover_fees_since(cursor)
+    if win is not None:                          # None == API failure: bank nothing, retry
+        new_total = round(banked + win[0], 4)
+        store.meta_set(c, "fees_total", new_total)
+        store.meta_set(c, "fees_banked", new_total)
+        store.meta_set(c, "fees_cursor", now.timestamp())
+        if not win[3]:
+            # Truncated: we summed a floor, not the true window. Advance anyway —
+            # holding the cursor back is exactly the deadlock this fix removes.
+            log.warning("rollover window truncated at the page ceiling — fees_total "
+                        "under-counts this window; cursor advanced to stay converged")
+
+
+def _poll_external_flows(c, broker, now):
+    """Deposit/withdrawal awareness for the equity T/P (operator 2026-07-21).
+
+    The +TP_PCT trigger measures equity against meta['tp_baseline'], but equity
+    also moves when money walks in or out of the account: the 2026-07-19 $20
+    deposit shrank the effective profit target by $20 and the next flatten fired
+    at ~+9% real trading gain instead of +20%. Poll Ledgers for deposit/withdrawal
+    entries past a cursor and SHIFT the baseline by the net USD flow, so the
+    target always measures TRADING profit only. The same net is accumulated into
+    meta['tp_cycle_flows'] so the completed cycle's ledger row can show how much
+    external money moved during the cycle.
+
+    Cursor discipline is rollover's (fix 2026-07-19): the first poll ANCHORS at
+    now — correct here beyond rate safety, because the current baseline was armed
+    against equity that already contained every historical flow. The baseline
+    write is a guarded compare-and-swap on the exact string we read: if the
+    executor completed a T/P cycle in between (its new baseline = post-flatten
+    equity, which already CONTAINS the deposit), applying our shift on top would
+    double-count it — CAS failure skips the shift, correctly. A withdrawal that
+    would push the baseline to zero or below clears it to 0 instead; the executor
+    re-arms at its next live equity read (its baseline<=0 path). Never gates an
+    order, never raises into the loop."""
+    def _mf(key):
+        try:
+            return float(store.meta_get(c, key, 0) or 0)
+        except (TypeError, ValueError):
+            return 0.0
+    cursor = _mf("flows_cursor")
+    if not cursor:
+        store.meta_set(c, "flows_cursor", now.timestamp())
+        log.info("external-flow accounting anchored at %s — deposits/withdrawals "
+                 "shift the T/P baseline from here on",
+                 now.isoformat(timespec="seconds"))
+        return
+    r = broker.external_flows_since(cursor)
+    if r is None:                        # API failure: keep the cursor, retry next poll
+        return
+    net, count, complete = r
+    store.meta_set(c, "flows_cursor", now.timestamp())
+    if not complete:
+        log.warning("external-flow window truncated at the page ceiling — net flow is "
+                    "a partial sum; the missed remainder shifts nothing (baseline may "
+                    "lag until the operator reconciles)")
+    if count == 0 or abs(net) < 0.01:
+        return
+    raw_baseline = store.meta_get(c, "tp_baseline", None)
+    baseline = 0.0
+    try:
+        baseline = float(raw_baseline or 0)
+    except (TypeError, ValueError):
+        pass
+    if baseline <= 0:
+        # Not armed — the executor will arm against post-flow equity anyway.
+        log.info("external flow $%+.2f seen with no armed T/P baseline — nothing to shift", net)
+        return
+    new = baseline + net
+    if new <= 0:
+        target_note = "cleared (executor re-arms at live equity)"
+        cur = c.execute("UPDATE meta SET value=? WHERE key='tp_baseline' AND value=?",
+                        ("0.0", raw_baseline))
+    else:
+        target_note = f"${new * (1 + config.TP_PCT):.2f}"
+        cur = c.execute("UPDATE meta SET value=? WHERE key='tp_baseline' AND value=?",
+                        (str(round(new, 4)), raw_baseline))
+    if cur.rowcount == 0:
+        c.commit()
+        log.warning("external flow $%+.2f NOT applied — tp_baseline changed underneath "
+                    "(T/P cycle completed concurrently; its post-flatten baseline already "
+                    "contains the flow)", net)
+        return
+    c.commit()
+    store.meta_set(c, "tp_cycle_flows", round(_mf("tp_cycle_flows") + net, 4))
+    log.warning("T/P BASELINE SHIFTED by external flow $%+.2f (%d ledger entr%s): "
+                "$%.2f -> $%.2f, target %s — trading-profit-only trigger",
+                net, count, "y" if count == 1 else "ies", baseline, max(new, 0.0),
+                target_note)
+    try:
+        store.journal(c, "tp", "*",
+                      f"external flow ${net:+.2f}: baseline ${baseline:.2f} -> "
+                      f"${max(new, 0.0):.2f}, target {target_note}")
+    except Exception:
+        log.exception("journal write failed (baseline shift already applied)")
 
 
 def _stress_weights(conn):

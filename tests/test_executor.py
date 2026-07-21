@@ -1136,8 +1136,9 @@ def test_seed_chains_skips_working_chain(tmp_path, monkeypatch):
 
 
 def _wire_tp(monkeypatch, *, equity, positions, open_orders, terminal, sent,
-             addorder_ok=True, cancel_ok=True):
-    """Endpoint-routed broker mock for the T/P flatten path."""
+             addorder_ok=True, cancel_ok=True, bid=64990.0, ask=65000.0):
+    """Endpoint-routed broker mock for the T/P flatten path (limit closes need a
+    Ticker quote — served for every requested pair)."""
     monkeypatch.setattr(config, "TP_ENABLED", True)
     monkeypatch.setattr(ex_mod.broker, "trade_balance", lambda: equity)
     monkeypatch.setattr(ex_mod.broker, "open_positions", lambda: positions)
@@ -1146,6 +1147,9 @@ def _wire_tp(monkeypatch, *, equity, positions, open_orders, terminal, sent,
                         lambda txids: {t: terminal[t] for t in txids if t in terminal})
     monkeypatch.setattr(ex_mod.broker, "cancel_order",
                         lambda t: (sent.append(("cancel", t)) or ({} if cancel_ok else None)))
+    monkeypatch.setattr(ex_mod.rest_client, "fetch_ticker",
+                        lambda pairs: {p: {"b": [str(bid), "1", "1"],
+                                           "a": [str(ask), "1", "1"]} for p in pairs})
 
     def fp(ep, p=None, **kw):
         sent.append((ep, p))
@@ -1178,10 +1182,13 @@ def test_tp_below_target_does_nothing(tmp_path, monkeypatch):
     conn.close()
 
 
-def test_tp_trigger_flattens_book_and_resets_baseline(tmp_path, monkeypatch):
-    """+20% hit: bids canceled, stops cleared, ONE market sell sized to Kraken's
-    live volume (never the ledger's), rows closed, baseline re-armed at the new
-    equity — the compounding cycle."""
+def test_tp_trigger_rests_limit_close_then_completes(tmp_path, monkeypatch):
+    """+20% hit, limit-flatten contract (operator 2026-07-21). PASS 1: bids
+    canceled, stops cleared, ONE post-only LIMIT sell pegged a tick over best bid,
+    sized to Kraken's live volume (never the ledger's) — rows stay open carrying
+    close_txid, baseline kept, tp_flatten_active armed. PASS 2 (close filled on
+    the exchange): rows retired, baseline re-armed at the new equity, cycle row
+    written to the tp_cycles ledger with true trading profit."""
     conn = _conn(tmp_path)
     store.meta_set(conn, "tp_baseline", 100.0)
     a = _seed_open(conn, "OSTOP-A", vol=0.4)                   # ledger says 0.4
@@ -1189,26 +1196,42 @@ def test_tp_trigger_flattens_book_and_resets_baseline(tmp_path, monkeypatch):
     sent = []
     _wire_tp(monkeypatch, equity=120.0,
              positions={"P": _pos(0.5)},                       # exchange says 0.5 — truth
-             open_orders={},                                   # CancelAll swept everything
+             open_orders={},                                   # batch sweep took the rest
              terminal={"OENTRY-9": {"status": "canceled", "vol_exec": "0"}},
-             sent=sent)
+             sent=sent, bid=64990.0, ask=65000.0)
     e = _exec(conn, mode="live")
     assert e._check_take_profit() is True
     assert conn.execute("SELECT status FROM orders WHERE id=?", (b,)).fetchone()[0] == "canceled"
-    assert conn.execute("SELECT status, stop_txid FROM orders WHERE id=?", (a,)).fetchone() \
-        == ("closed", None)
+    # pass 1: row OPEN, owned by the resting close; stop cleared
+    assert conn.execute("SELECT status, stop_txid, close_txid FROM orders WHERE id=?",
+                        (a,)).fetchone() == ("open", None, "OCLOSE-1")
     closes = [p for ep, p in sent if isinstance(ep, str) and ep.endswith("AddOrder")]
     assert len(closes) == 1
-    assert closes[0]["type"] == "sell" and closes[0]["ordertype"] == "market"
+    assert closes[0]["type"] == "sell" and closes[0]["ordertype"] == "limit"
+    assert closes[0]["oflags"] == "post"
+    assert closes[0]["price"] == "64990.1"                     # bid + one tick (BTC dec=1)
     assert closes[0]["volume"] == "0.50000000"                 # LIVE volume, lot-gridded
     assert closes[0]["pair"] == "XBTUSD:BTNL" and closes[0]["leverage"] == "10"
-    assert float(store.meta_get(conn, "tp_baseline", 0)) == 120.0
+    assert float(store.meta_get(conn, "tp_baseline", 0)) == 100.0   # NOT reset yet
+    assert store.meta_get(conn, "tp_flatten_active") == "1"
+    # PASS 2 — the close filled: exchange flat, order terminal
+    _wire_tp(monkeypatch, equity=119.5, positions={},
+             open_orders={}, terminal={"OCLOSE-1": {"status": "closed"}}, sent=sent)
+    assert e._check_take_profit() is True
+    assert conn.execute("SELECT status, close_txid FROM orders WHERE id=?", (a,)).fetchone() \
+        == ("closed", None)
+    assert float(store.meta_get(conn, "tp_baseline", 0)) == 119.5
+    assert store.meta_get(conn, "tp_flatten_active") == "0"
+    ts, base, settled, flows, profit, note = store.tp_cycles_list(conn, 1)[0]
+    assert (base, settled, flows, note) == (100.0, 119.5, 0.0, "limit flatten")
+    assert abs(profit - 19.5) < 1e-9
     conn.close()
 
 
 def test_tp_partial_filled_bid_joins_the_close(tmp_path, monkeypatch):
     """A bid that PARTIALLY filled before the sweep is a real long: promoted, then
-    retired by its pair's close — never stranded as a canceled row with live volume."""
+    covered by its pair's limit close — never stranded as a canceled row with live
+    volume."""
     conn = _conn(tmp_path)
     store.meta_set(conn, "tp_baseline", 100.0)
     b = _seed_pending(conn, "OENTRY-9")
@@ -1220,10 +1243,86 @@ def test_tp_partial_filled_bid_joins_the_close(tmp_path, monkeypatch):
              sent=sent)
     e = _exec(conn, mode="live")
     assert e._check_take_profit() is True
-    assert conn.execute("SELECT status, volume FROM orders WHERE id=?", (b,)).fetchone() \
-        == ("closed", 0.2)
+    assert conn.execute("SELECT status, volume, close_txid FROM orders WHERE id=?",
+                        (b,)).fetchone() == ("open", 0.2, "OCLOSE-1")
     closes = [p for ep, p in sent if isinstance(ep, str) and ep.endswith("AddOrder")]
     assert len(closes) == 1 and closes[0]["volume"] == "0.20000000"
+    assert closes[0]["ordertype"] == "limit" and closes[0]["oflags"] == "post"
+    conn.close()
+
+
+def test_tp_chase_repegs_when_market_falls_away(tmp_path, monkeypatch):
+    """A resting close the market fell away from (our price above the ask) is
+    canceled so the next pass re-pegs at the new touch; one at/near the touch is
+    left to work untouched."""
+    conn = _conn(tmp_path)
+    store.meta_set(conn, "tp_baseline", 100.0)
+    store.meta_set(conn, "tp_flatten_active", "1")
+    a = _seed_open(conn, "OSTOP-A", vol=0.4)
+    conn.execute("UPDATE orders SET stop_txid=NULL, close_txid='OCLOSE-9' WHERE id=?", (a,))
+    conn.commit()
+    sent = []
+    # our sell rests at 66000 but the book is now 64990/65000 — price fell away
+    _wire_tp(monkeypatch, equity=110.0, positions={"P": _pos(0.4)}, open_orders={},
+             terminal={"OCLOSE-9": {"status": "open",
+                                    "descr": {"price": "66000.0"}}},
+             sent=sent, bid=64990.0, ask=65000.0)
+    e = _exec(conn, mode="live")
+    assert e._check_take_profit() is True                      # flag drives the pass
+    assert ("cancel", "OCLOSE-9") in sent
+    assert conn.execute("SELECT close_txid FROM orders WHERE id=?", (a,)).fetchone()[0] is None
+    # well-pegged close: left alone (no cancel, no new AddOrder)
+    conn.execute("UPDATE orders SET close_txid='OCLOSE-9' WHERE id=?", (a,))
+    conn.commit()
+    sent2 = []
+    _wire_tp(monkeypatch, equity=110.0, positions={"P": _pos(0.4)}, open_orders={},
+             terminal={"OCLOSE-9": {"status": "open",
+                                    "descr": {"price": "65000.0"}}},
+             sent=sent2, bid=64990.0, ask=65000.0)
+    assert e._check_take_profit() is True
+    assert ("cancel", "OCLOSE-9") not in sent2
+    assert not any(isinstance(ep, str) and ep.endswith("AddOrder") for ep, _ in sent2)
+    conn.close()
+
+
+def test_tp_close_unknown_status_blocks_pair(tmp_path, monkeypatch):
+    """Close order status UNKNOWN (query dark): never place a second sell beside a
+    possibly-live one — the pair is skipped this pass and the flatten stays
+    incomplete."""
+    conn = _conn(tmp_path)
+    store.meta_set(conn, "tp_baseline", 100.0)
+    store.meta_set(conn, "tp_flatten_active", "1")
+    a = _seed_open(conn, "OSTOP-A", vol=0.4)
+    conn.execute("UPDATE orders SET stop_txid=NULL, close_txid='OCLOSE-9' WHERE id=?", (a,))
+    conn.commit()
+    sent = []
+    _wire_tp(monkeypatch, equity=110.0, positions={"P": _pos(0.4)}, open_orders={},
+             terminal={}, sent=sent)                           # OCLOSE-9 absent -> unknown
+    e = _exec(conn, mode="live")
+    assert e._check_take_profit() is True
+    assert not any(isinstance(ep, str) and ep.endswith("AddOrder") for ep, _ in sent)
+    assert conn.execute("SELECT status, close_txid FROM orders WHERE id=?", (a,)).fetchone() \
+        == ("open", "OCLOSE-9")
+    assert store.meta_get(conn, "tp_flatten_active") == "1"
+    conn.close()
+
+
+def test_reprotect_skips_rows_owned_by_a_resting_close(tmp_path, monkeypatch):
+    """A row carrying close_txid is the flatten's — reprotect must NOT re-arm a
+    stop beside the resting limit sell (stop fires + close fills -> short)."""
+    conn = _conn(tmp_path)
+    a = _seed_open(conn, "OSTOP-A", vol=0.4)
+    conn.execute("UPDATE orders SET stop_txid=NULL, close_txid='OCLOSE-9' WHERE id=?", (a,))
+    conn.commit()
+    sent = []
+    monkeypatch.setattr(ex_mod.broker, "open_orders", lambda: {})
+    monkeypatch.setattr(ex_mod.broker, "open_positions", lambda: {"P": _pos(0.4)})
+    monkeypatch.setattr(ex_mod.broker, "private",
+                        lambda ep, p=None, **kw: sent.append((ep, p)) or {"txid": ["OSTOP-NEW"]})
+    e = _exec(conn, mode="live")
+    e._reprotect_naked_open()
+    assert sent == []                                          # early-return: nothing naked
+    assert conn.execute("SELECT stop_txid FROM orders WHERE id=?", (a,)).fetchone()[0] is None
     conn.close()
 
 
@@ -1259,4 +1358,68 @@ def test_tp_failed_close_keeps_baseline_and_reprotectable_rows(tmp_path, monkeyp
     assert conn.execute("SELECT status, stop_txid FROM orders WHERE id=?", (a,)).fetchone() \
         == ("open", None)
     assert float(store.meta_get(conn, "tp_baseline", 0)) == 100.0
+    conn.close()
+
+
+# ── deposit-aware T/P baseline (app._poll_external_flows, 2026-07-21) ────────
+
+def _flows_stub(net, count=1, complete=True):
+    import types as _t
+    return _t.SimpleNamespace(external_flows_since=lambda ts: (net, count, complete))
+
+
+def test_external_flow_first_poll_anchors_only(tmp_path):
+    from deepfield import app as app_mod
+    import datetime as _dt
+    conn = _conn(tmp_path)
+    store.meta_set(conn, "tp_baseline", 100.0)
+    now = _dt.datetime.now(_dt.timezone.utc)
+    app_mod._poll_external_flows(conn, _flows_stub(999.0), now)
+    assert float(store.meta_get(conn, "tp_baseline")) == 100.0     # untouched
+    assert abs(float(store.meta_get(conn, "flows_cursor")) - now.timestamp()) < 1
+    conn.close()
+
+
+def test_external_deposit_shifts_baseline_and_accumulates(tmp_path):
+    """A $20 deposit moves the baseline $20 so the +20% target measures TRADING
+    profit only (the 2026-07-19 deposit fired the flatten at ~+9% real gain)."""
+    from deepfield import app as app_mod
+    import datetime as _dt
+    conn = _conn(tmp_path)
+    store.meta_set(conn, "tp_baseline", 100.0)
+    store.meta_set(conn, "flows_cursor", 123.0)
+    now = _dt.datetime.now(_dt.timezone.utc)
+    app_mod._poll_external_flows(conn, _flows_stub(20.0), now)
+    assert float(store.meta_get(conn, "tp_baseline")) == 120.0
+    assert float(store.meta_get(conn, "tp_cycle_flows")) == 20.0
+    app_mod._poll_external_flows(conn, _flows_stub(-5.0), now)     # partial withdrawal
+    assert float(store.meta_get(conn, "tp_baseline")) == 115.0
+    assert float(store.meta_get(conn, "tp_cycle_flows")) == 15.0
+    conn.close()
+
+
+def test_external_withdrawal_wiping_baseline_clears_it(tmp_path):
+    """A withdrawal >= baseline clears it to 0 — the executor re-arms at the next
+    live equity read instead of chasing a negative target."""
+    from deepfield import app as app_mod
+    import datetime as _dt
+    conn = _conn(tmp_path)
+    store.meta_set(conn, "tp_baseline", 100.0)
+    store.meta_set(conn, "flows_cursor", 123.0)
+    app_mod._poll_external_flows(conn, _flows_stub(-150.0),
+                                 _dt.datetime.now(_dt.timezone.utc))
+    assert float(store.meta_get(conn, "tp_baseline")) == 0.0
+    conn.close()
+
+
+def test_external_flow_api_failure_keeps_cursor(tmp_path):
+    from deepfield import app as app_mod
+    import types as _t, datetime as _dt
+    conn = _conn(tmp_path)
+    store.meta_set(conn, "tp_baseline", 100.0)
+    store.meta_set(conn, "flows_cursor", 123.0)
+    stub = _t.SimpleNamespace(external_flows_since=lambda ts: None)
+    app_mod._poll_external_flows(conn, stub, _dt.datetime.now(_dt.timezone.utc))
+    assert float(store.meta_get(conn, "flows_cursor")) == 123.0    # retry same window
+    assert float(store.meta_get(conn, "tp_baseline")) == 100.0
     conn.close()

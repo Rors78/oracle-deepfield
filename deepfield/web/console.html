@@ -240,6 +240,15 @@ button{ font-family:inherit; color:inherit; }
 .jfilter button{ background:transparent; border:1px solid var(--line-2); border-radius:5px; padding:2px 7px; font-size:10px; color:var(--ink-dim); cursor:pointer; font-family:var(--mono); }
 .jfilter button.on{ color:var(--ink); background:var(--sky-3); }
 .jfeed{ overflow-y:auto; padding:6px 9px 10px; scrollbar-width:thin; }
+.tpledger{ border-bottom:1px solid var(--line); padding:8px 14px 9px; }
+.tpledger:empty{ display:none; }
+.tphead{ display:flex; justify-content:space-between; align-items:baseline; font-size:10px;
+  letter-spacing:.16em; text-transform:uppercase; color:var(--ink-2); margin-bottom:5px; }
+.tprow{ display:flex; gap:9px; align-items:baseline; font-size:11px; padding:2px 0;
+  font-family:var(--mono); font-variant-numeric:tabular-nums; }
+.tprow .arc{ color:var(--ink-dim); }
+.tprow .pl{ margin-left:auto; }
+.tprow .fl{ font-size:9.5px; color:var(--ink-dim); }
 .jrow{ display:grid; grid-template-columns:60px 54px 1fr; gap:8px; align-items:baseline; padding:3.5px 5px; border-radius:5px; font-family:var(--mono); font-size:11px; }
 .jrow:hover{ background:var(--sky-2); }
 .jrow.newest{ animation:land 1.1s ease; }
@@ -410,6 +419,7 @@ svg .axt2{ fill:var(--ink-faint); font-size:9.5px; font-family:var(--mono); }
             <button data-jf="tp">tp</button>
           </div>
         </div>
+        <div class="tpledger" id="tpledger"></div>
         <div class="jfeed" id="jfeed"></div>
       </aside>
     </div>
@@ -542,7 +552,7 @@ const SIGNALS = [
   {code:"LOW", name:"Near 52-week low (<20%)"},
 ];
 const F=1,Q=0,NA=-1;
-let PAIRS=[], PMAP={}, JOURNAL=[], HEALTH={}, REGIME={};
+let PAIRS=[], PMAP={}, JOURNAL=[], HEALTH={}, REGIME={}, TPCYCLES=[];
 let DATA_STALE=false, DATA_AGE=null;
 let FLASH={};                 // W8: syms whose price really changed → flash dir
 let SORT="attention";
@@ -721,7 +731,8 @@ function renderHero(h){
       ? `<span class="mtrack"><span class="mfill" style="width:${(mtot?Math.min(100,h.margin_used/mtot*100):0).toFixed(0)}%"></span></span> <span class="violet">$${h.margin_used.toFixed(2)}</span> <span class="dim">used</span> · <span class="violet">$${(h.free_margin||0).toFixed(2)}</span> <span class="dim">free</span>`
       : `<span class="dim">populates on next bot cycle</span>`}</span></div>
     <div class="hs"><span class="k">Level</span><span class="v"><b class="${lvlCls}" style="font-size:17px">${lvl!=null?lvl+'%':'—'}</b> <span class="dim">· floor 200 · capacity ≈</span> <span class="violet">${h.capacity!=null?h.capacity:'—'}</span> <span class="dim">min-fills</span></span></div>
-    ${(h.fees_day!=null||h.fees_total!=null)?`<div class="hs"><span class="k">Fees</span><span class="v"><span class="loss">−$${Math.abs(h.fees_day||0).toFixed(2)}</span> <span class="dim">today /</span> <span class="loss">−$${Math.abs(h.fees_total||0).toFixed(2)}</span> <span class="dim">total</span></span></div>`:""}`;
+    ${(h.fees_day!=null||h.fees_total!=null)?`<div class="hs"><span class="k">Fees</span><span class="v"><span class="loss">−$${Math.abs(h.fees_day||0).toFixed(2)}</span> <span class="dim">today /</span> <span class="loss">−$${Math.abs(h.fees_total||0).toFixed(2)}</span> <span class="dim">total</span></span></div>`:""}
+    ${TPCYCLES.length?(()=>{const t=TPCYCLES.reduce((a,c)=>a+(c.profit||0),0);return `<div class="hs"><span class="k">Banked</span><span class="v"><span class="${pnlClass(t)}">${fmtUsd(t)}</span> <span class="dim">true trading profit · ${TPCYCLES.length} T/P cycles</span></span></div>`;})():""}`;
 }
 
 /* ── DEFENSE HORIZON — the signature instrument ────────────────────────── */
@@ -960,6 +971,24 @@ function renderJournal(){
       <span class="jtext">${symHtml}${text}</span></div>`;
   });
   feed.innerHTML = html;
+}
+
+/* ── T/P ledger — one row per completed harvest cycle, TRUE trading profit
+      (deposit-shifted baseline); green banked it, red gave it back ───────── */
+function renderTpLedger(){
+  const el=document.getElementById("tpledger"); if(!el) return;
+  if(!TPCYCLES.length){ el.innerHTML=""; return; }
+  const tot=TPCYCLES.reduce((a,c)=>a+(c.profit||0),0);
+  const rows=TPCYCLES.slice(0,10).map(c=>{
+    const fl = c.flows==null ? `<span class="fl" title="cycle predates deposit tracking — profit may include untracked deposits">flows?</span>`
+             : Math.abs(c.flows)>=0.01 ? `<span class="fl" title="external money moved during this cycle (already excluded from profit)">${fmtUsd(c.flows).replace(".00","")} dep</span>` : "";
+    return `<div class="tprow">
+      <span class="jts">${c.label}</span>
+      <span class="arc">$${c.baseline.toFixed(0)}→$${c.settled.toFixed(0)}</span>
+      <span class="pl ${pnlClass(c.profit)}">${fmtUsd(c.profit)}</span>${fl}</div>`;
+  }).join("");
+  el.innerHTML=`<div class="tphead"><span>T/P ledger · ${TPCYCLES.length} cycles</span>
+    <span class="${pnlClass(tot)}" style="letter-spacing:0">${fmtUsd(tot)} banked</span></div>${rows}`;
 }
 
 /* ── detail: campaign console (carried from v6, reskinned) ─────────────── */
@@ -1472,6 +1501,7 @@ async function fetchState(){
     const prevPx=Object.fromEntries(PAIRS.map(p=>[p.sym,p.price]));
     PAIRS=st.pairs||[]; PMAP=Object.fromEntries(PAIRS.map(p=>[p.sym,p]));
     JOURNAL=st.journal||[]; HEALTH=st.health||{}; REGIME=st.regime||{};
+    TPCYCLES=st.tp_cycles||[];
     DATA_STALE=!!st.data_stale; DATA_AGE=st.data_age_s;
     const bv=document.getElementById("brandv");
     if(bv && st.v) bv.textContent=`flight deck · v${st.v} · web console — live`;
@@ -1490,7 +1520,7 @@ async function fetchState(){
     const onBook=document.querySelector('#fieldmode button.on')?.dataset.fm==='book';
     onBook ? renderBook() : renderField();
     applyFlash();
-    renderJournal();
+    renderJournal(); renderTpLedger();
     if(document.getElementById("view-detail").classList.contains("active"))
       fetchPair(curSym).then(()=>{ if(document.getElementById("view-detail").classList.contains("active")) renderDetail(PMAP[curSym]); });
     if(!SPEC_DONE){ renderSpec(); SPEC_DONE=true; }

@@ -347,6 +347,55 @@ def rollover_fees_since(start_ts):
     return total, count, newest, complete
 
 
+def external_flows_since(start_ts):
+    """Net external USD moved in/out of the account since `start_ts` (unix), from
+    the Ledgers API (entry types 'deposit' and 'withdrawal' — two typed walks).
+    Returns (net_usd, entry_count, complete) or None when EITHER walk fails (a
+    half-summed window must not advance a cursor). Net per entry is amount - fee,
+    so a withdrawal (amount<0, fee>0) contributes its full equity impact.
+    Non-USD entries count toward entry_count but contribute $0 — converting them
+    needs a price, and this feeds the T/P baseline shift, not accounting; they are
+    logged loudly so the operator knows the shift is missing them.
+    Same discipline as rollover_fees_since (fix 2026-07-19): paced pages, hard
+    ceiling, callers keep walks SHORT by anchoring their cursor forward."""
+    net, count = 0.0, 0
+    complete = True
+    paced = False
+    for typ in ("deposit", "withdrawal"):
+        ofs = 0
+        for page in range(LEDGERS_MAX_PAGES):
+            if paced:                  # pace between every request after the first
+                time.sleep(LEDGERS_PAGE_PACE_SECS)
+            paced = True
+            r = private("/0/private/Ledgers",
+                        {"type": typ, "start": str(start_ts or 0), "ofs": str(ofs)})
+            if r is None:
+                return None
+            entries = r.get("ledger") or {}
+            if not entries:
+                break
+            for e in entries.values():
+                try:
+                    asset = str(e.get("asset", ""))
+                    amt = float(e.get("amount", 0) or 0)
+                    fee = abs(float(e.get("fee", 0) or 0))
+                except (TypeError, ValueError):
+                    continue
+                count += 1
+                if asset not in ("ZUSD", "USD"):
+                    log.warning("external %s of %.8g %s IGNORED for the T/P baseline "
+                                "shift (non-USD asset — no conversion here)", typ, amt, asset)
+                    continue
+                net += amt - fee
+            got = len(entries)
+            ofs += got
+            if got < 50:
+                break
+        else:
+            complete = False
+    return net, count, complete
+
+
 def trade_balance_full():
     """Full TradeBalance result dict (e=equity, m=margin used, mf=free margin,
     ml=margin level) or None."""
