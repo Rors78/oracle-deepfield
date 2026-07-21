@@ -25,7 +25,8 @@ from .. import store, engine
 from ..profiles import FULL
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-CONSOLE_HTML = os.path.join(HERE, "console.html")
+CONSOLE_HTML = os.path.join(HERE, "console.html")   # v7 flight deck (kept at /v7)
+DECK_HTML = os.path.join(HERE, "deck.html")         # v8 observatory deck (default)
 UTC = datetime.timezone.utc
 DENVER = None
 try:
@@ -576,6 +577,9 @@ class Handler(BaseHTTPRequestHandler):
         path = self.path.split("?", 1)[0]
         try:
             if path in ("/", "/index.html"):
+                with open(DECK_HTML, "rb") as f:
+                    self._send(200, f.read(), "text/html; charset=utf-8")
+            elif path == "/v7":
                 with open(CONSOLE_HTML, "rb") as f:
                     self._send(200, f.read(), "text/html; charset=utf-8")
             elif path == "/api/state":

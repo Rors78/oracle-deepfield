@@ -1,0 +1,1006 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ORACLE DEEPFIELD</title>
+<style>
+/* ════════════════════════════════════════════════════════════════════════
+   ORACLE DEEPFIELD · observatory deck (v8)
+   An instrument, not a terminal. Deep-sky indigo, engraved hairlines,
+   telescope brass. Every number tabular. One signature: THE FIELD —
+   stop-proximity orbits. Palette machine-validated (OKLCH dark band,
+   CVD-separated): ice #4E8FD0 · brass #D9A45B · gain #2FA97C · loss #D8506B
+   ════════════════════════════════════════════════════════════════════════ */
+@import url('https://fonts.googleapis.com/css2?family=Archivo:ital,wdth,wght@0,62..125,200..900&family=Spline+Sans+Mono:wght@300..700&display=swap');
+
+:root{
+  --sky:#070A12; --panel:#0D1220; --panel2:#111828; --inset:#0A0F1B;
+  --line:#1C2434; --line2:#28324A;
+  --ink:#EAF0FA; --ink2:#93A0B8; --ink3:#54607A; --ink4:#39435C;
+  --brass:#D9A45B; --brass-hi:#EFC98A; --brass-dim:#8A6A3B;
+  --ice:#4E8FD0; --ice-hi:#7FB3E8;
+  --gain:#2FA97C; --gain-ink:#4CC996;
+  --loss:#D8506B; --loss-ink:#EF6D88;
+  --warn:#BA8B32; --warn-ink:#E0B15F;
+  --disp:'Archivo',system-ui,sans-serif;
+  --mono:'Spline Sans Mono',ui-monospace,'SF Mono',Menlo,monospace;
+  --r:10px;
+}
+*{box-sizing:border-box; margin:0; padding:0}
+html{scrollbar-color:var(--line2) transparent}
+body{
+  background:var(--sky); color:var(--ink);
+  font:400 13.5px/1.45 var(--disp);
+  -webkit-font-smoothing:antialiased; min-height:100vh;
+}
+::selection{background:rgba(217,164,91,.25)}
+a{color:var(--ice-hi)}
+button{font:inherit; color:inherit; background:none; border:none; cursor:pointer}
+:focus-visible{outline:2px solid var(--brass); outline-offset:2px; border-radius:4px}
+::-webkit-scrollbar{width:8px;height:8px}
+::-webkit-scrollbar-thumb{background:var(--line2);border-radius:4px}
+::-webkit-scrollbar-track{background:transparent}
+
+.mono, .num{font-family:var(--mono); font-variant-numeric:tabular-nums}
+.gain{color:var(--gain-ink)} .loss{color:var(--loss-ink)}
+.warn{color:var(--warn-ink)} .dim{color:var(--ink3)} .sec{color:var(--ink2)}
+
+/* ── masthead ─────────────────────────────────────────────────────────── */
+.mast{
+  position:relative; display:flex; align-items:center; gap:22px;
+  padding:14px 26px 13px; border-bottom:1px solid var(--line);
+  background:
+    radial-gradient(1px 1px at 12% 30%, rgba(234,240,250,.20) 50%, transparent 51%),
+    radial-gradient(1px 1px at 28% 72%, rgba(234,240,250,.13) 50%, transparent 51%),
+    radial-gradient(1.5px 1.5px at 45% 25%, rgba(239,201,138,.16) 50%, transparent 51%),
+    radial-gradient(1px 1px at 61% 60%, rgba(234,240,250,.11) 50%, transparent 51%),
+    radial-gradient(1px 1px at 76% 35%, rgba(127,179,232,.14) 50%, transparent 51%),
+    radial-gradient(1.5px 1.5px at 90% 65%, rgba(234,240,250,.09) 50%, transparent 51%),
+    linear-gradient(180deg,#0B101D 0%, #080C16 100%);
+}
+.brand{display:flex; align-items:center; gap:13px}
+.aperture{width:30px; height:30px; flex:none}
+.aperture .ring{stroke:var(--brass); fill:none}
+.aperture .blade{fill:var(--brass-dim)}
+.wordmark{
+  font-family:var(--disp); font-variation-settings:'wdth' 125; font-weight:750;
+  font-size:16.5px; letter-spacing:.34em; color:var(--ink);
+}
+.wordmark b{color:var(--brass); font-weight:750}
+.brand .role{
+  font-size:9.5px; letter-spacing:.22em; text-transform:uppercase;
+  color:var(--ink3); margin-top:2px;
+}
+.mast .grow{flex:1}
+.lamps{display:flex; gap:7px; align-items:center}
+.lamp{width:7px; height:7px; border-radius:50%; background:var(--ink4);
+  box-shadow:0 0 0 1px var(--line2) inset}
+.lamp.on{background:var(--gain); box-shadow:0 0 6px rgba(47,169,124,.55)}
+.lamp.off{background:var(--loss); box-shadow:0 0 6px rgba(216,80,107,.55)}
+.lamps .lab{font-size:9px; letter-spacing:.18em; color:var(--ink3); margin-right:3px}
+.modepill{
+  font-family:var(--mono); font-size:10.5px; letter-spacing:.22em; padding:4px 12px 3px;
+  border:1px solid var(--brass-dim); border-radius:99px; color:var(--brass-hi);
+}
+.modepill.halt{border-color:var(--loss); color:var(--loss-ink); animation:breathe 2.2s ease-in-out infinite}
+@keyframes breathe{50%{opacity:.55}}
+.clockset{display:flex; gap:18px; align-items:baseline}
+.clockset .cs{text-align:right}
+.clockset .t{font-family:var(--mono); font-size:15px; color:var(--ink); letter-spacing:.04em}
+.clockset .z{font-size:8.5px; letter-spacing:.2em; color:var(--ink3); text-transform:uppercase}
+
+.stalebar{display:none; padding:7px 26px; font-size:12px; letter-spacing:.05em;
+  color:var(--warn-ink); background:rgba(186,139,50,.10); border-bottom:1px solid rgba(186,139,50,.35)}
+.stalebar.on{display:block}
+.errbar{display:none; padding:7px 26px; font-size:12px; color:var(--loss-ink);
+  background:rgba(216,80,107,.08); border-bottom:1px solid rgba(216,80,107,.4)}
+.errbar.on{display:block}
+
+/* ── frame ────────────────────────────────────────────────────────────── */
+main{max-width:1720px; margin:0 auto; padding:18px 26px 30px; display:grid; gap:16px}
+.card{
+  background:linear-gradient(180deg,var(--panel2) 0%, var(--panel) 55px);
+  border:1px solid var(--line); border-radius:var(--r);
+  padding:16px 18px 15px; position:relative;
+}
+.card.rise{animation:rise .5s cubic-bezier(.22,.9,.3,1) backwards}
+@keyframes rise{from{opacity:0; transform:translateY(9px)}}
+.eyebrow{
+  display:flex; align-items:baseline; gap:10px; margin-bottom:12px;
+  font-size:10px; font-weight:600; letter-spacing:.26em; text-transform:uppercase;
+  color:var(--brass);
+}
+.eyebrow::after{content:""; flex:1; height:1px; background:var(--line);
+  transform:translateY(-2px)}
+.eyebrow .aux{letter-spacing:.08em; color:var(--ink3); font-weight:400;
+  font-family:var(--mono); text-transform:none; font-size:10.5px}
+
+.row1{display:grid; grid-template-columns:minmax(430px,1.35fr) minmax(300px,.85fr) minmax(360px,1fr); gap:16px}
+.row3{display:grid; grid-template-columns:minmax(0,1fr) 380px; gap:16px; align-items:start}
+
+/* ── capital ──────────────────────────────────────────────────────────── */
+.eq-line{display:flex; align-items:baseline; gap:16px; flex-wrap:wrap}
+.eq-big{
+  font-family:var(--mono); font-weight:600; font-size:44px; letter-spacing:-.01em;
+  color:var(--ink); line-height:1;
+}
+.eq-big small{font-size:22px; color:var(--ink3); font-weight:400}
+.eq-peak{font-family:var(--mono); font-size:11.5px; color:var(--ink3)}
+.chiprow{display:flex; gap:8px; flex-wrap:wrap; margin:13px 0 10px}
+.chip{
+  border:1px solid var(--line); background:var(--inset); border-radius:7px;
+  padding:6px 11px 5px; min-width:96px;
+}
+.chip .k{font-size:8.5px; letter-spacing:.18em; text-transform:uppercase; color:var(--ink3)}
+.chip .v{font-family:var(--mono); font-size:14.5px; margin-top:2px}
+.chartwrap{position:relative; margin-top:4px}
+.chartwrap svg{display:block; width:100%}
+
+/* ── harvest ──────────────────────────────────────────────────────────── */
+.harvest .gaugewrap{display:flex; justify-content:center; padding:2px 0 0}
+.gauge-center{text-anchor:middle}
+.hv-nums{display:flex; justify-content:space-between; font-family:var(--mono);
+  font-size:11px; color:var(--ink3); margin:2px 6px 10px}
+.hv-nums b{color:var(--ink2); font-weight:500}
+.hv-banked{display:flex; align-items:baseline; justify-content:space-between;
+  border-top:1px solid var(--line); padding-top:10px; margin-top:2px}
+.hv-banked .k{font-size:9.5px; letter-spacing:.2em; text-transform:uppercase; color:var(--ink3)}
+.hv-banked .v{font-family:var(--mono); font-size:19px; font-weight:600}
+.miniledger{margin-top:9px; display:grid; gap:4px}
+.mlrow{display:flex; gap:9px; align-items:baseline; font-family:var(--mono); font-size:11px}
+.mlrow .d{color:var(--ink3); width:78px; flex:none}
+.mlrow .arc{color:var(--ink3); flex:1}
+.mlrow .p{font-weight:600}
+.mlrow .fl{font-size:9px; color:var(--ink4)}
+
+/* ── defense ──────────────────────────────────────────────────────────── */
+.tierline{display:flex; align-items:center; gap:10px; margin-bottom:10px}
+.tierbadge{
+  font-family:var(--mono); font-size:10.5px; letter-spacing:.24em; padding:4px 12px 3px;
+  border-radius:6px; border:1px solid;
+}
+.tier-NOMINAL{color:var(--gain-ink); border-color:rgba(47,169,124,.5); background:rgba(47,169,124,.07)}
+.tier-CAUTION{color:var(--warn-ink); border-color:rgba(186,139,50,.55); background:rgba(186,139,50,.08)}
+.tier-CRITICAL{color:var(--loss-ink); border-color:rgba(216,80,107,.6); background:rgba(216,80,107,.08); animation:breathe 1.6s infinite}
+.runway{margin:6px 0 12px}
+.defgrid{display:grid; grid-template-columns:repeat(3,1fr); gap:8px}
+.defcell{border:1px solid var(--line); background:var(--inset); border-radius:7px; padding:7px 10px 6px}
+.defcell .k{font-size:8.5px; letter-spacing:.16em; text-transform:uppercase; color:var(--ink3)}
+.defcell .v{font-family:var(--mono); font-size:14px; margin-top:2px; color:var(--ink)}
+.defcell .s{font-size:9.5px; color:var(--ink4); font-family:var(--mono)}
+.levbar{height:4px; background:var(--inset); border:1px solid var(--line); border-radius:2px;
+  margin-top:5px; overflow:hidden}
+.levbar i{display:block; height:100%; background:var(--ice)}
+
+/* ── the field (signature) ────────────────────────────────────────────── */
+.field-card{padding-bottom:10px; overflow:hidden}
+.field-card .eyebrow{color:var(--brass); margin-bottom:6px}
+.fieldwrap{overflow-x:auto}
+.fieldwrap svg{display:block; min-width:860px; width:100%}
+
+/* ── book ─────────────────────────────────────────────────────────────── */
+.book table{width:100%; border-collapse:collapse; font-family:var(--mono); font-size:12px}
+.book th{
+  font-family:var(--disp); font-size:9px; font-weight:600; letter-spacing:.18em;
+  text-transform:uppercase; color:var(--ink3); text-align:right;
+  padding:4px 8px 7px; border-bottom:1px solid var(--line2); white-space:nowrap;
+  cursor:pointer; user-select:none;
+}
+.book th.l{text-align:left}
+.book th.on{color:var(--brass)}
+.book th .dir{font-size:8px}
+.book td{padding:5.5px 8px; text-align:right; border-bottom:1px solid var(--line); white-space:nowrap}
+.book td.l{text-align:left}
+.book tbody tr{cursor:pointer; transition:background .12s}
+.book tbody tr:hover{background:rgba(78,143,208,.05)}
+.book .sym{font-family:var(--disp); font-weight:650; letter-spacing:.06em; font-size:12.5px}
+.book .fault .sym{color:var(--loss-ink)}
+.flash-up{animation:fup .8s} .flash-dn{animation:fdn .8s}
+@keyframes fup{15%{background:rgba(47,169,124,.14)}}
+@keyframes fdn{15%{background:rgba(216,80,107,.13)}}
+.distbar{display:inline-block; vertical-align:middle; width:52px; height:5px;
+  background:var(--inset); border:1px solid var(--line); border-radius:2.5px; overflow:hidden; margin-left:7px}
+.distbar i{display:block; height:100%}
+.protlamp{font-size:11px}
+.scout-head{
+  padding:12px 8px 6px; font-size:9px; font-weight:600; letter-spacing:.24em;
+  text-transform:uppercase; color:var(--ink3); font-family:var(--disp); text-align:left;
+}
+.scoutrow td{color:var(--ink3); font-size:11.5px; padding:4px 8px}
+.scoutrow .sym{color:var(--ink2); font-weight:500}
+.statuschip{font-size:9px; letter-spacing:.14em; padding:2px 7px 1px; border-radius:4px; border:1px solid var(--line2); color:var(--ink3)}
+.statuschip.buy{color:var(--gain-ink); border-color:rgba(47,169,124,.45)}
+.statuschip.near,.statuschip.fault{color:var(--loss-ink); border-color:rgba(216,80,107,.5)}
+.statuschip.stale{color:var(--warn-ink); border-color:rgba(186,139,50,.5)}
+
+/* ── side: ledger + journal ───────────────────────────────────────────── */
+.side{display:grid; gap:16px; position:sticky; top:14px}
+.ledgerlist{display:grid; gap:5px}
+.lgrow{display:flex; gap:10px; align-items:baseline; font-family:var(--mono); font-size:11.5px;
+  padding:4px 2px; border-bottom:1px solid var(--line)}
+.lgrow:last-child{border-bottom:none}
+.lgrow .d{color:var(--ink3); width:86px; flex:none; font-size:10.5px}
+.lgrow .arc{color:var(--ink3); flex:1; font-size:10.5px}
+.lgrow .p{font-weight:600; font-size:12px}
+.lgrow .fl{font-size:9px; color:var(--ink4)}
+.lg-total{display:flex; justify-content:space-between; align-items:baseline;
+  padding-top:9px; margin-top:4px; border-top:1px solid var(--line2)}
+.lg-total .k{font-size:9px; letter-spacing:.2em; text-transform:uppercase; color:var(--ink3)}
+.lg-total .v{font-family:var(--mono); font-size:16px; font-weight:600}
+
+.journal-card{display:flex; flex-direction:column; max-height:640px}
+.jfilters{display:flex; gap:4px; flex-wrap:wrap; margin-bottom:9px}
+.jfilters button{
+  font-size:9px; letter-spacing:.14em; text-transform:uppercase; color:var(--ink3);
+  border:1px solid var(--line); border-radius:5px; padding:3px 9px 2px;
+}
+.jfilters button.on{color:var(--brass-hi); border-color:var(--brass-dim); background:rgba(217,164,91,.06)}
+.jfeed{overflow-y:auto; display:grid; gap:2px; padding-right:4px}
+.jday{font-size:9px; letter-spacing:.2em; text-transform:uppercase; color:var(--ink4);
+  padding:8px 0 3px; border-bottom:1px solid var(--line); margin-bottom:3px}
+.jrow{display:grid; grid-template-columns:52px 46px 1fr; gap:8px; align-items:baseline;
+  font-size:11.5px; padding:2.5px 0}
+.jrow .ts{font-family:var(--mono); font-size:10px; color:var(--ink4)}
+.jrow .kind{font-family:var(--mono); font-size:8.5px; letter-spacing:.1em; text-align:center;
+  border-radius:3px; padding:1.5px 0 .5px; border:1px solid var(--line2); color:var(--ink3)}
+.k-fill .kind{color:var(--gain-ink); border-color:rgba(47,169,124,.4)}
+.k-stop .kind{color:var(--loss-ink); border-color:rgba(216,80,107,.45)}
+.k-tp .kind{color:var(--brass-hi); border-color:var(--brass-dim)}
+.k-defense .kind,.k-safety .kind{color:var(--warn-ink); border-color:rgba(186,139,50,.5)}
+.jrow .tx{color:var(--ink2)}
+.jrow .tx b{color:var(--ink); font-weight:600; font-family:var(--mono); font-size:11px}
+
+/* ── overlay (pair detail) ────────────────────────────────────────────── */
+.scrim{position:fixed; inset:0; background:rgba(4,6,12,.62); backdrop-filter:blur(2px);
+  opacity:0; pointer-events:none; transition:opacity .22s; z-index:40}
+.scrim.on{opacity:1; pointer-events:auto}
+.sheet{
+  position:fixed; top:0; right:0; bottom:0; width:min(880px,94vw); z-index:41;
+  background:linear-gradient(180deg,#0E1424,#0B101D);
+  border-left:1px solid var(--line2); box-shadow:-30px 0 60px rgba(0,0,0,.5);
+  transform:translateX(103%); transition:transform .28s cubic-bezier(.22,.9,.3,1);
+  overflow-y:auto; padding:20px 26px 30px;
+}
+.sheet.on{transform:none}
+.sheet .mastline{display:flex; align-items:baseline; gap:16px; margin-bottom:14px}
+.sheet .psym{font-family:var(--disp); font-variation-settings:'wdth' 122; font-weight:750;
+  font-size:26px; letter-spacing:.14em}
+.sheet .pprice{font-family:var(--mono); font-size:22px}
+.sheet .closebtn{margin-left:auto; color:var(--ink3); font-size:20px; padding:2px 8px}
+.sheet .closebtn:hover{color:var(--ink)}
+.winrow{display:flex; gap:4px; margin:0 0 8px}
+.winrow button{font-family:var(--mono); font-size:10px; color:var(--ink3);
+  border:1px solid var(--line); border-radius:5px; padding:3px 10px 2px}
+.winrow button.on{color:var(--brass-hi); border-color:var(--brass-dim)}
+.sheet .subgrid{display:grid; grid-template-columns:1fr 1fr; gap:14px; margin-top:14px}
+.sheet h4{font-size:9.5px; font-weight:600; letter-spacing:.24em; text-transform:uppercase;
+  color:var(--brass); margin-bottom:8px}
+.sheet table{width:100%; border-collapse:collapse; font-family:var(--mono); font-size:11.5px}
+.sheet td,.sheet th{padding:4px 7px; text-align:right; border-bottom:1px solid var(--line)}
+.sheet th{font-family:var(--disp); font-size:8.5px; letter-spacing:.16em; color:var(--ink3);
+  text-transform:uppercase}
+.sheet td.l,.sheet th.l{text-align:left}
+
+/* ── footer ───────────────────────────────────────────────────────────── */
+footer{
+  max-width:1720px; margin:0 auto; padding:6px 26px 22px;
+  display:flex; gap:26px; align-items:center; flex-wrap:wrap;
+  font-family:var(--mono); font-size:11px; color:var(--ink3);
+}
+footer .reg{color:var(--ink2)}
+.cd{display:inline-flex; align-items:center; gap:7px}
+.cdbar{width:70px; height:3px; background:var(--inset); border:1px solid var(--line); border-radius:2px; overflow:hidden}
+.cdbar i{display:block; height:100%; background:var(--ink4)}
+
+/* ── shared tooltip ───────────────────────────────────────────────────── */
+.tip{
+  position:fixed; z-index:60; pointer-events:none; display:none;
+  background:#131A2C; border:1px solid var(--line2); border-radius:7px;
+  padding:8px 11px; font-family:var(--mono); font-size:11px; color:var(--ink2);
+  box-shadow:0 8px 24px rgba(0,0,0,.45); max-width:270px;
+}
+.tip b{color:var(--ink); font-weight:600}
+.tip .row{display:flex; justify-content:space-between; gap:16px}
+
+/* ── responsive ───────────────────────────────────────────────────────── */
+@media (max-width:1380px){ .row1{grid-template-columns:1fr 1fr} .row1 .defense{grid-column:1/-1} }
+@media (max-width:1120px){ .row3{grid-template-columns:1fr} .side{position:static} }
+@media (max-width:860px){
+  .row1{grid-template-columns:1fr}
+  .mast{flex-wrap:wrap; gap:12px} .clockset{margin-left:auto}
+  main{padding:14px 14px 24px}
+}
+@media (prefers-reduced-motion:reduce){
+  *,*::before,*::after{animation:none!important; transition:none!important}
+}
+</style>
+</head>
+<body>
+
+<header class="mast">
+  <div class="brand">
+    <svg class="aperture" viewBox="0 0 30 30" aria-hidden="true">
+      <circle class="ring" cx="15" cy="15" r="13.4" stroke-width="1.4"/>
+      <g class="blade">
+        <path d="M15 3.4 L18.4 12 L15 15 Z" opacity=".9"/>
+        <path d="M26.6 15 L18 18.4 L15 15 Z" opacity=".65"/>
+        <path d="M15 26.6 L11.6 18 L15 15 Z" opacity=".9"/>
+        <path d="M3.4 15 L12 11.6 L15 15 Z" opacity=".65"/>
+      </g>
+    </svg>
+    <div>
+      <div class="wordmark">ORACLE <b>DEEPFIELD</b></div>
+      <div class="role" id="roleline">accumulation engine · kraken margin</div>
+    </div>
+  </div>
+  <div class="grow"></div>
+  <div class="lamps" id="lamps" title="websocket lanes A(15m) B(1h) C(ticker) D(weekly)">
+    <span class="lab">LINKS</span>
+  </div>
+  <div class="modepill" id="modepill">·······</div>
+  <div class="clockset">
+    <div class="cs"><div class="t" id="clock-mt">--:--:--</div><div class="z">mountain</div></div>
+    <div class="cs"><div class="t" id="clock-utc">--:--</div><div class="z">utc</div></div>
+    <div class="cs"><div class="t" id="uptime">—</div><div class="z">uptime</div></div>
+  </div>
+</header>
+<div class="stalebar" id="stalebar" role="alert"></div>
+<div class="errbar" id="errbar" role="alert">● live API unreachable — retrying</div>
+
+<main>
+  <section class="row1">
+    <article class="card capital rise" style="animation-delay:.02s">
+      <div class="eyebrow">Capital <span class="aux" id="cap-aux"></span></div>
+      <div class="eq-line">
+        <div class="eq-big" id="eq-big">$—</div>
+        <div class="eq-peak" id="eq-peak"></div>
+      </div>
+      <div class="chiprow" id="cap-chips"></div>
+      <div class="chartwrap" id="eq-chart"></div>
+    </article>
+
+    <article class="card harvest rise" style="animation-delay:.07s">
+      <div class="eyebrow">Harvest cycle <span class="aux">+20% then flatten</span></div>
+      <div class="gaugewrap" id="hv-gauge"></div>
+      <div class="hv-nums" id="hv-nums"></div>
+      <div class="hv-banked"><span class="k">Banked · true trading profit</span><span class="v" id="hv-banked">—</span></div>
+      <div class="miniledger" id="hv-mini"></div>
+    </article>
+
+    <article class="card defense rise" style="animation-delay:.12s">
+      <div class="eyebrow">Defense <span class="aux" id="def-aux"></span></div>
+      <div class="tierline">
+        <span class="tierbadge tier-NOMINAL" id="tierbadge">—</span>
+        <span class="dim" style="font-size:11px" id="tiernote"></span>
+      </div>
+      <div class="runway" id="runway"></div>
+      <div class="defgrid" id="defgrid"></div>
+    </article>
+  </section>
+
+  <section class="card field-card rise" style="animation-delay:.17s">
+    <div class="eyebrow">The field · distance to stop
+      <span class="aux" id="field-aux"></span></div>
+    <div class="fieldwrap" id="field"></div>
+  </section>
+
+  <section class="row3">
+    <article class="card book rise" style="animation-delay:.22s">
+      <div class="eyebrow">The book <span class="aux" id="book-aux"></span></div>
+      <div style="overflow-x:auto"><table id="booktable"></table></div>
+    </article>
+    <aside class="side">
+      <article class="card rise" style="animation-delay:.26s">
+        <div class="eyebrow">Harvest ledger <span class="aux" id="lg-aux"></span></div>
+        <div class="ledgerlist" id="ledgerlist"></div>
+        <div class="lg-total"><span class="k">All cycles</span><span class="v" id="lg-total">—</span></div>
+      </article>
+      <article class="card journal-card rise" style="animation-delay:.3s">
+        <div class="eyebrow">Journal <span class="aux">live</span></div>
+        <div class="jfilters" id="jfilters">
+          <button data-f="all" class="on">all</button><button data-f="fill">fills</button>
+          <button data-f="stop">stops</button><button data-f="tp">harvest</button>
+          <button data-f="defense">defense</button><button data-f="recon">recon</button>
+        </div>
+        <div class="jfeed" id="jfeed"></div>
+      </article>
+    </aside>
+  </section>
+</main>
+
+<footer>
+  <span class="reg" id="ft-regime">—</span>
+  <span class="cd" id="ft-daily"></span>
+  <span class="cd" id="ft-weekly"></span>
+  <span id="ft-btc"></span>
+  <span class="grow" style="flex:1"></span>
+  <span id="ft-v"></span>
+</footer>
+
+<div class="scrim" id="scrim"></div>
+<aside class="sheet" id="sheet" aria-label="pair detail"></aside>
+<div class="tip" id="tip"></div>
+
+<script>
+"use strict";
+/* ═══ state ═══ */
+let S=null, PAIRS=[], PMAP={}, TPC=[], JOURNAL=[], jFilter="all";
+let sortKey="dist", sortDir=1, prevPx={}, DETAIL=null, detailSym=null, detailWin=90;
+const $=id=>document.getElementById(id);
+const esc=s=>String(s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const fmt$=(v,d=2)=>v==null?"—":"$"+Math.abs(v).toLocaleString("en-US",{minimumFractionDigits:d,maximumFractionDigits:d});
+const fmtSigned=(v,d=2)=>v==null?"—":(v>=0?"+$":"−$")+Math.abs(v).toFixed(d);
+const fmtPx=v=>{ if(v==null)return "—"; const a=Math.abs(v);
+  return a>=1000?v.toLocaleString("en-US",{maximumFractionDigits:1})
+    :a>=1?v.toFixed(Math.abs(v)>=100?2:4).replace(/\.?0+$/,"")
+    :v.toPrecision(4).replace(/\.?0+$/,""); };
+const fmtVol=v=>{ if(v==null)return "—"; const a=Math.abs(v);
+  return a>=1e6?(a/1e6).toFixed(2).replace(/\.?0+$/,"")+"M":a>=1e3?(a/1e3).toFixed(1).replace(/\.0$/,"")+"k":String(parseFloat(a.toFixed(6))); };
+const cls=v=>v>=0?"gain":"loss";
+const hms=s=>{ const h=s/3600|0,m=(s%3600)/60|0; return h>=48?`${(h/24)|0}d ${h%24}h`:`${h}h ${String(m).padStart(2,"0")}m`; };
+const cdown=s=>{ if(s==null)return "—"; const h=s/3600|0,m=(s%3600)/60|0;
+  return h>=24?`${(h/24)|0}d ${h%24}h`:h?`${h}h ${String(m).padStart(2,"0")}m`:`${m}m`; };
+
+/* number tween (respects reduced motion) */
+const RM=matchMedia("(prefers-reduced-motion: reduce)").matches;
+const tweens={};
+function tween(el, to, fmt){
+  if(!el) return;
+  if(RM || tweens[el.id]===undefined){ tweens[el.id]=to; el.textContent=fmt(to); return; }
+  const from=tweens[el.id]; tweens[el.id]=to;
+  if(from===to || !isFinite(from)){ el.textContent=fmt(to); return; }
+  const t0=performance.now(), D=420;
+  (function step(t){ const p=Math.min(1,(t-t0)/D), e=1-Math.pow(1-p,3);
+    el.textContent=fmt(from+(to-from)*e); if(p<1) requestAnimationFrame(step); })(t0);
+}
+
+/* shared tooltip */
+const tip=$("tip");
+function showTip(html,x,y){ tip.innerHTML=html; tip.style.display="block";
+  const r=tip.getBoundingClientRect();
+  tip.style.left=Math.min(innerWidth-r.width-12, x+14)+"px";
+  tip.style.top=Math.max(8, Math.min(innerHeight-r.height-10, y-r.height/2))+"px"; }
+function hideTip(){ tip.style.display="none"; }
+
+/* ═══ masthead ═══ */
+function renderMast(h){
+  const lamps=$("lamps");
+  const names=["A","B","C","D"];
+  lamps.querySelectorAll(".lamp").forEach(n=>n.remove());
+  (h.links||[null,null,null,null]).forEach((up,i)=>{
+    const d=document.createElement("span");
+    d.className="lamp "+(up===true?"on":up===false?"off":"");
+    d.setAttribute("aria-label",`link ${names[i]} ${up?"up":"down"}`);
+    lamps.appendChild(d);
+  });
+  const mp=$("modepill");
+  if(h.halt){ mp.textContent="HALTED"; mp.className="modepill halt"; }
+  else{ mp.textContent=(h.mode||"?").toUpperCase(); mp.className="modepill"; }
+  $("uptime").textContent=h.uptime_s!=null?hms(h.uptime_s):"—";
+  $("roleline").textContent=`accumulation engine · kraken margin · ${PAIRS.length} pairs`;
+}
+
+/* ═══ capital ═══ */
+function equityChart(h){
+  const ser=(h.equity_series||[]).filter(p=>p&&p[1]>0);
+  const W=560,H=132,PL=6,PR=52,PT=10,PB=16;
+  if(ser.length<2) return "";
+  let lo=Math.min(...ser.map(p=>p[1])), hi=Math.max(...ser.map(p=>p[1]));
+  const base=h.tp_baseline, tgt=h.tp_target;
+  if(base&&base>lo*0.8&&base<hi*1.2){ lo=Math.min(lo,base); hi=Math.max(hi,base); }
+  const pad=(hi-lo)*0.09||1; lo-=pad; hi+=pad;
+  if(tgt&&tgt<hi*1.35) hi=Math.max(hi,tgt+pad*0.5);
+  const t0=ser[0][0], t1=ser[ser.length-1][0]||t0+1;
+  const X=t=>PL+(t-t0)/(t1-t0)*(W-PL-PR), Y=v=>PT+(1-(v-lo)/(hi-lo))*(H-PT-PB);
+  const pts=ser.map(p=>`${X(p[0]).toFixed(1)},${Y(p[1]).toFixed(1)}`).join(" ");
+  const area=`${PL},${H-PB} ${pts} ${X(t1).toFixed(1)},${H-PB}`;
+  const last=ser[ser.length-1][1];
+  const refYs=[base,tgt].filter(v=>v!=null&&v>=lo&&v<=hi).map(Y);
+  const ticks=[lo+pad, (lo+hi)/2, hi-pad].map(v=>{
+    const y=Y(v), clash=refYs.some(ry=>Math.abs(ry-y)<11);
+    return `${clash?"":`<text x="${W-PR+7}" y="${(y+3).toFixed(1)}" fill="var(--ink4)" font-size="9" font-family="var(--mono)">${v.toFixed(0)}</text>`}
+     <line x1="${PL}" x2="${W-PR}" y1="${y.toFixed(1)}" y2="${y.toFixed(1)}" stroke="var(--line)" stroke-width="1"/>`; }).join("");
+  const ref=(v,color,label)=> (v==null||v<lo||v>hi)?"":
+    `<line x1="${PL}" x2="${W-PR}" y1="${Y(v).toFixed(1)}" y2="${Y(v).toFixed(1)}" stroke="${color}" stroke-width="1" stroke-dasharray="3 4" opacity=".55"/>
+     <text x="${W-PR+7}" y="${(Y(v)+3).toFixed(1)}" fill="${color}" font-size="9" font-family="var(--mono)">${label}</text>`;
+  return `<svg viewBox="0 0 ${W} ${H}" id="eqsvg" aria-label="equity, last 24 hours">
+    <defs><linearGradient id="eqfill" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#4E8FD0" stop-opacity=".28"/>
+      <stop offset="1" stop-color="#4E8FD0" stop-opacity="0"/></linearGradient></defs>
+    ${ticks}
+    ${ref(base,"var(--brass)","base")}
+    ${ref(tgt,"var(--gain)","t/p")}
+    <polygon points="${area}" fill="url(#eqfill)"/>
+    <polyline points="${pts}" fill="none" stroke="var(--ice-hi)" stroke-width="2" stroke-linejoin="round"/>
+    <circle cx="${X(t1).toFixed(1)}" cy="${Y(last).toFixed(1)}" r="3" fill="var(--ice-hi)" stroke="var(--panel)" stroke-width="2"/>
+    <line id="eqcx" y1="${PT}" y2="${H-PB}" stroke="var(--ink3)" stroke-width="1" opacity="0"/>
+    <rect id="eqhit" x="${PL}" y="0" width="${W-PL-PR}" height="${H}" fill="transparent"/>
+  </svg>`;
+}
+function wireEqHover(h){
+  const svg=$("eqsvg"); if(!svg) return;
+  const ser=(h.equity_series||[]).filter(p=>p&&p[1]>0); if(ser.length<2) return;
+  const hit=svg.querySelector("#eqhit"), cx=svg.querySelector("#eqcx");
+  const W=560,PL=6,PR=52; const t0=ser[0][0], t1=ser[ser.length-1][0];
+  hit.addEventListener("mousemove",e=>{
+    const r=svg.getBoundingClientRect(), fx=(e.clientX-r.left)/r.width*W;
+    const t=t0+(fx-PL)/(W-PL-PR)*(t1-t0);
+    let best=ser[0]; for(const p of ser) if(Math.abs(p[0]-t)<Math.abs(best[0]-t)) best=p;
+    const bx=PL+(best[0]-t0)/(t1-t0)*(W-PL-PR);
+    cx.setAttribute("x1",bx); cx.setAttribute("x2",bx); cx.setAttribute("opacity",".5");
+    const d=new Date(best[0]*1000);
+    showTip(`<b>${fmt$(best[1])}</b><br>${String(d.getHours()).padStart(2,"0")}:${String(d.getMinutes()).padStart(2,"0")} MT`, e.clientX, e.clientY);
+  });
+  hit.addEventListener("mouseleave",()=>{ cx.setAttribute("opacity","0"); hideTip(); });
+}
+function renderCapital(h){
+  const eqLive=h.equity!=null, eq=eqLive?h.equity:h.peak;
+  $("cap-aux").textContent=eqLive?"live · kraken tradebalance":"last known · populates next bot cycle";
+  tween($("eq-big"), eq||0, v=>{ const s=fmt$(v); const i=s.indexOf(".");
+    return i<0?s:s.slice(0,i)+"."+s.slice(i+1); });
+  $("eq-peak").innerHTML=`peak ${fmt$(h.peak)}<br><span class="dim">t/p at <span style="color:var(--gain-ink)">${fmt$(h.tp_target)}</span>${eqLive&&h.tp_target?` · ${((h.tp_target/eq-1)*100).toFixed(1)}% away`:""}</span>`;
+  const chips=[
+    ["open p&l", h.open_pnl, cls(h.open_pnl||0), fmtSigned(h.open_pnl)],
+    ["today · swing", h.swing_day, cls(h.swing_day||0), h.swing_day==null?"—":fmtSigned(h.swing_day)],
+    ["realized wk", h.realized_week, cls(h.realized_week||0), fmtSigned(h.realized_week)],
+    ["fees today", h.fees_day, "loss", h.fees_day==null?"—":"−"+fmt$(h.fees_day)],
+    ["margin free", h.free_margin, "sec", h.free_margin==null?"—":fmt$(h.free_margin,0)],
+  ];
+  $("cap-chips").innerHTML=chips.map(([k,_,c,txt])=>
+    `<div class="chip"><div class="k">${k}</div><div class="v num ${c}">${txt}</div></div>`).join("");
+  $("eq-chart").innerHTML=equityChart(h);
+  wireEqHover(h);
+}
+
+/* ═══ harvest ═══ */
+function arcPath(cx,cy,r,a0,a1){
+  const p=a=>[cx+r*Math.cos(a), cy+r*Math.sin(a)];
+  const [x0,y0]=p(a0),[x1,y1]=p(a1);
+  const large=(a1-a0)>Math.PI?1:0;
+  return `M ${x0.toFixed(2)} ${y0.toFixed(2)} A ${r} ${r} 0 ${large} 1 ${x1.toFixed(2)} ${y1.toFixed(2)}`;
+}
+function renderHarvest(h){
+  const base=h.tp_baseline, tgt=h.tp_target, eq=h.equity!=null?h.equity:h.peak;
+  const span=(tgt&&base)?tgt-base:null;
+  const p=span?Math.max(0,Math.min(1,(eq-base)/span)):0;
+  const A0=Math.PI*0.78, A1=Math.PI*2.22;         // 260° gauge
+  const W=250,H=170,CX=125,CY=118,R=88;
+  const prog=A0+(A1-A0)*p;
+  const pct=span?((eq-base)/base*100):null;
+  const marks=[0,.25,.5,.75,1].map(f=>{
+    const a=A0+(A1-A0)*f, x0=CX+(R-5)*Math.cos(a), y0=CY+(R-5)*Math.sin(a),
+          x1=CX+(R+5)*Math.cos(a), y1=CY+(R+5)*Math.sin(a);
+    return `<line x1="${x0}" y1="${y0}" x2="${x1}" y2="${y1}" stroke="var(--line2)" stroke-width="1.4"/>`;
+  }).join("");
+  $("hv-gauge").innerHTML=`<svg viewBox="0 0 ${W} ${H}" width="250" aria-label="progress to take-profit">
+    <path d="${arcPath(CX,CY,R,A0,A1)}" stroke="var(--line2)" stroke-width="7" fill="none" stroke-linecap="round"/>
+    ${p>0.004?`<path d="${arcPath(CX,CY,R,A0,prog)}" stroke="url(#hvgrad)" stroke-width="7" fill="none" stroke-linecap="round"/>`:""}
+    <defs><linearGradient id="hvgrad" x1="0" y1="1" x2="1" y2="0">
+      <stop offset="0" stop-color="#D9A45B"/><stop offset="1" stop-color="#2FA97C"/></linearGradient></defs>
+    ${marks}
+    <circle cx="${(CX+R*Math.cos(prog)).toFixed(1)}" cy="${(CY+R*Math.sin(prog)).toFixed(1)}" r="5"
+      fill="var(--brass-hi)" stroke="var(--panel)" stroke-width="2.5"/>
+    <text class="gauge-center" x="${CX}" y="${CY-8}" fill="var(--ink)" font-family="var(--mono)" font-weight="600" font-size="27">${pct==null?"—":(pct>=0?"+":"")+pct.toFixed(1)+"%"}</text>
+    <text class="gauge-center" x="${CX}" y="${CY+13}" fill="var(--ink3)" font-size="9.5" letter-spacing="2" font-family="var(--disp)">OF +20.0% TARGET</text>
+    <text class="gauge-center" x="${CX}" y="${CY+34}" fill="var(--ink2)" font-family="var(--mono)" font-size="11">${span?fmtSigned(eq-base)+" this cycle":""}</text>
+  </svg>`;
+  $("hv-nums").innerHTML=`<span>base <b>${fmt$(base)}</b></span><span>equity <b>${fmt$(eq)}</b></span><span>target <b>${fmt$(tgt)}</b></span>`;
+  const tot=TPC.reduce((a,c)=>a+(c.profit||0),0);
+  const bk=$("hv-banked"); bk.textContent=fmtSigned(tot); bk.className="v num "+cls(tot);
+  $("hv-mini").innerHTML=TPC.slice(0,3).map(c=>
+    `<div class="mlrow"><span class="d">${c.label}</span><span class="arc">$${c.baseline.toFixed(0)} → $${c.settled.toFixed(0)}</span>
+     <span class="p ${cls(c.profit)}">${fmtSigned(c.profit)}</span>
+     ${c.flows==null?'<span class="fl">flows?</span>':Math.abs(c.flows)>=0.01?`<span class="fl">${c.flows>0?"+":"−"}$${Math.abs(c.flows).toFixed(0)} dep</span>`:""}</div>`).join("");
+}
+
+/* ═══ defense ═══ */
+function mlX(v){ // piecewise: 40→4% · 80→16% · 150→34% · 200→50% · 400→76% · 800→100%
+  const a=[[0,0],[40,4],[80,16],[150,34],[200,50],[400,76],[800,100]];
+  if(v==null) return null; if(v>=800) return 100;
+  for(let i=1;i<a.length;i++) if(v<=a[i][0]){
+    const [x0,y0]=a[i-1],[x1,y1]=a[i]; return y0+(v-x0)/(x1-x0)*(y1-y0); }
+  return 100;
+}
+function renderDefense(h){
+  const tier=h.defense_tier||"—";
+  const tb=$("tierbadge"); tb.textContent=tier; tb.className="tierbadge tier-"+(tier||"NOMINAL");
+  $("tiernote").textContent=tier==="NOMINAL"?"all rails green":tier==="CAUTION"?"buffer thinning":tier==="CRITICAL"?"deleverage territory":"";
+  $("def-aux").textContent=h.recon_ok==null?"":(h.recon_ok?`recon ✓ ${h.recon_time||""}`:`recon MISMATCH ${h.recon_time||""}`);
+  const lvl=h.margin_level, x=mlX(lvl);
+  const W=420,H=64;
+  const zones=[[0,40,"rgba(216,80,107,.28)"],[40,80,"rgba(216,80,107,.14)"],[80,200,"rgba(186,139,50,.12)"],[200,800,"rgba(47,169,124,.08)"]];
+  const zx=v=>mlX(v)/100*W;
+  $("runway").innerHTML=`<svg viewBox="0 0 ${W} ${H}" style="width:100%" aria-label="margin level runway">
+    ${zones.map(([a,b,c])=>`<rect x="${zx(a)}" y="24" width="${zx(b)-zx(a)}" height="12" fill="${c}"/>`).join("")}
+    <rect x="0" y="24" width="${W}" height="12" fill="none" stroke="var(--line2)" rx="2"/>
+    ${[40,80,200,400].map(v=>`<line x1="${zx(v)}" x2="${zx(v)}" y1="21" y2="39" stroke="var(--line2)"/>
+      <text x="${zx(v)}" y="52" fill="var(--ink4)" font-size="8.5" text-anchor="middle" font-family="var(--mono)">${v}</text>`).join("")}
+    <text x="${zx(40)}" y="14" fill="var(--loss-ink)" font-size="8" text-anchor="middle" letter-spacing="1">LIQ</text>
+    <text x="${zx(80)}" y="14" fill="var(--loss-ink)" font-size="8" text-anchor="middle" letter-spacing="1" opacity=".7">CALL</text>
+    <text x="${zx(200)}" y="14" fill="var(--ink4)" font-size="8" text-anchor="middle" letter-spacing="1">STACK FLOOR</text>
+    ${x!=null?`<path d="M ${x/100*W} 22 l -5 -8 l 10 0 z" fill="${lvl>=200?"var(--gain)":lvl>=150?"var(--warn)":"var(--loss)"}"/>
+    <text x="${Math.min(W-30, Math.max(26, x/100*W))}" y="62" fill="var(--ink)" font-size="11" font-weight="600" text-anchor="middle" font-family="var(--mono)">${lvl}%</text>`
+    :`<text x="${W/2}" y="60" fill="var(--ink4)" font-size="9" text-anchor="middle">margin level populates on next bot cycle</text>`}
+  </svg>`;
+  const st=h.stress||{};
+  const lev=h.eff_leverage, levC=(st.lev_ceiling||4);
+  const cells=[
+    ["liq buffer", h.buffer_liq_pct!=null?h.buffer_liq_pct.toFixed(1)+"%":"—",
+      "price-space to forced liq", h.buffer_liq_pct==null?"":h.buffer_liq_pct>30?"gain":h.buffer_liq_pct>12?"warn":"loss"],
+    ["call buffer", h.buffer_call_pct!=null?h.buffer_call_pct.toFixed(1)+"%":"—",
+      "to margin call (ml 80)", h.buffer_call_pct==null?"":h.buffer_call_pct>25?"gain":h.buffer_call_pct>10?"warn":"loss"],
+    ["stops", `${h.stops_covered??"—"}/${h.stops_total??"—"}`,
+      "open lots protected", (h.stops_covered===h.stops_total)?"gain":"loss"],
+    ["worst day ref", st.ref_move_pct?("−"+(st.ref_move_pct["1"]||0).toFixed(1)+"%"):"—",
+      "1-day basket history", "sec"],
+    ["intraday dd", st.intraday_dd_pct!=null?("−"+st.intraday_dd_pct.toFixed(1)+"%"):"—",
+      "today's worst swing", "sec"],
+    ["capacity", h.capacity!=null?("≈"+h.capacity):"—", "min-fills of margin left", "sec"],
+  ];
+  $("defgrid").innerHTML=cells.map(([k,v,s,c])=>
+    `<div class="defcell"><div class="k">${k}</div><div class="v ${c||""}">${v}</div><div class="s">${s}</div></div>`).join("")
+    +`<div class="defcell" style="grid-column:1/-1"><div class="k">effective leverage</div>
+      <div style="display:flex;align-items:baseline;gap:10px">
+        <div class="v">${lev!=null?lev.toFixed(2)+"×":"—"}</div>
+        <div class="levbar" style="flex:1"><i style="width:${lev!=null?Math.min(100,lev/levC*100).toFixed(0):0}%;background:${lev!=null&&lev>levC*.85?"var(--loss)":lev>levC*.6?"var(--warn)":"var(--ice)"}"></i></div>
+        <div class="s">ceiling ${levC.toFixed(1)}×</div></div></div>`;
+}
+
+/* ═══ THE FIELD — stop-proximity orbits (signature) ═══
+   Adaptive domain: zoom to where the book actually sits (the stop line at 0
+   always stays in frame), asinh warp for resolution near the line, and a
+   greedy beeswarm so same-distance positions stack instead of occluding. */
+function renderField(){
+  const held=PAIRS.filter(p=>p.fills>0);
+  $("field-aux").textContent=`${held.length} held · ${PAIRS.filter(p=>p.bid&&!p.fills).length} bids resting · dot area = notional`;
+  const W=1360, H=168, PT=30, PB=28;
+  const midY=PT+(H-PT-PB)/2;
+  if(!held.length){
+    $("field").innerHTML=`<svg viewBox="0 0 ${W} ${H}"><text x="${W/2}" y="${H/2}" text-anchor="middle" fill="var(--ink4)" font-size="12">no open positions — ladders are resting, waiting for the dip</text></svg>`;
+    return;
+  }
+  const objs=held.map(p=>{
+    const d=(p.price&&p.stop)?((p.price-p.stop)/p.stop*100):null;
+    const notional=(p.size||0)*(p.price||0);
+    return {p, d, notional};
+  }).filter(o=>o.d!=null).sort((a,b)=>a.d-b.d);
+  const nearest=objs[0].d, dMax=objs[objs.length-1].d;
+  const lo=Math.min(-1.5, nearest-1), hi=Math.max(6.5, dMax*1.1+0.6);
+  // Instrument scale, not a math scale: the danger band [lo..3] holds a FIXED
+  // 24% of the width (the stop line never migrates, near-stop is always loud),
+  // the healthy region [3..hi] spreads linearly across the rest.
+  const L=8, R=W-22, BREAK=3, BX=L+(R-L)*0.24;
+  // healthy-region zoom: if everything sits far beyond the break, cut the dead
+  // span with a MARKED axis break and give the book the full stage
+  const lb=Math.max(BREAK, Math.min(Math.floor(nearest-0.8), hi-2));
+  const X=d=>{ d=Math.max(lo,Math.min(hi,d));
+    return d<=BREAK ? L+(d-lo)/(BREAK-lo)*(BX-L)
+         : BX+(Math.max(d,lb)-lb)/(hi-lb)*(R-BX-14)+14; };
+  const maxN=Math.max(...objs.map(o=>o.notional),1);
+  // greedy beeswarm: place each dot at the least |offset| row with no overlap
+  const placed=[];
+  objs.forEach(o=>{
+    o.x=X(o.d);
+    o.r=Math.max(5, Math.min(13, 3.5+Math.sqrt(o.notional/maxN)*9.5));
+    let y=midY;
+    for(let k=0;k<24;k++){
+      y=midY+(k%2?1:-1)*Math.ceil(k/2)*14;
+      if(!placed.some(q=>{ const dx=q.x-o.x, dy=q.y-y;
+        return dx*dx+dy*dy < (q.r+o.r+2.5)*(q.r+o.r+2.5); })) break;
+    }
+    o.y=Math.max(PT+10, Math.min(H-PB-10, y)); placed.push(o);
+  });
+  // ticks: dense in the danger band, sensible steps across the zoomed region
+  const span=hi-lb, step=span>24?10:span>12?5:span>6?2:span>3?1:0.5;
+  const ticks=[0,BREAK]; if(lo<-1) ticks.unshift(Math.ceil(lo));
+  for(let t=Math.ceil(lb/step)*step; t<=hi; t+=step) if(t>BREAK) ticks.push(+t.toFixed(1));
+  const zone=(a,b,c)=>{ a=Math.max(a,lo); b=Math.min(b,hi); if(b<=a) return "";
+    return `<rect x="${X(a)}" y="${PT}" width="${X(b)-X(a)}" height="${H-PT-PB}" fill="${c}" rx="3"/>`; };
+  let svg=`<svg viewBox="0 0 ${W} ${H}" aria-label="distance of each position above its stop">
+    ${zone(lo,0,"rgba(216,80,107,.12)")}${zone(0,3,"rgba(186,139,50,.07)")}
+    <line x1="${X(0)}" x2="${X(0)}" y1="${PT-9}" y2="${H-PB+8}" stroke="var(--loss)" stroke-width="1.5" opacity=".9"/>
+    <text x="${X(0)+6}" y="${PT-13}" fill="var(--loss-ink)" font-size="8.5" letter-spacing="1.5" font-family="var(--disp)">STOP LINE</text>
+    ${ticks.map(t=>`<line x1="${X(t)}" x2="${X(t)}" y1="${H-PB}" y2="${H-PB+5}" stroke="var(--line2)"/>
+      <text x="${X(t)+(t===BREAK&&lb>BREAK?-3:0)}" y="${H-PB+17}" fill="var(--ink4)" font-size="9" text-anchor="${t===BREAK&&lb>BREAK?"end":"middle"}" font-family="var(--mono)">${t>0?"+"+t:t}%</text>`).join("")}
+    <line x1="0" x2="${W}" y1="${H-PB}" y2="${H-PB}" stroke="var(--line)" stroke-width="1"/>
+    ${lb>BREAK?`<path d="M ${BX+5} ${H-PB-5} l 5 10 M ${BX+11} ${H-PB-5} l 5 10" stroke="var(--ink3)" stroke-width="1.5" fill="none"/>`:""}`;
+  // labels: sweep left→right, keep whenever 30px clear of the previous label at that row
+  let lastLab={};
+  objs.forEach(o=>{
+    const fill=(o.p.pnl||0)>=0?"var(--gain)":"var(--loss)";
+    const danger=o.d<3;
+    svg+=`<circle class="fdot" data-sym="${o.p.sym}" cx="${o.x.toFixed(1)}" cy="${o.y.toFixed(1)}" r="${o.r.toFixed(1)}"
+      fill="${fill}" fill-opacity=".85" stroke="var(--panel)" stroke-width="2" style="cursor:pointer"/>`;
+    const above=o.y<=midY, ly=above?o.y-o.r-5:o.y+o.r+11, row=above?"a":"b";
+    if(danger || lastLab[row]===undefined || o.x-lastLab[row]>34){
+      svg+=`<text x="${o.x.toFixed(1)}" y="${ly.toFixed(1)}" text-anchor="middle" fill="${danger?"var(--loss-ink)":"var(--ink3)"}"
+        font-size="8.5" font-family="var(--disp)" font-weight="600" letter-spacing=".07em">${o.p.sym}</text>`;
+      lastLab[row]=o.x;
+    }
+  });
+  svg+="</svg>";
+  $("field").innerHTML=svg;
+  document.querySelectorAll(".fdot").forEach(dot=>{
+    dot.addEventListener("mousemove",e=>{
+      const p=PMAP[dot.dataset.sym]; if(!p) return;
+      const d=((p.price-p.stop)/p.stop*100);
+      showTip(`<b>${p.sym}</b> · ${p.fills} fill${p.fills>1?"s":""}
+        <div class="row"><span>price</span><b>${fmtPx(p.price)}</b></div>
+        <div class="row"><span>stop</span><b>${fmtPx(p.stop)}</b></div>
+        <div class="row"><span>distance</span><b class="${d<3?"loss":"sec"}">${d.toFixed(1)}%</b></div>
+        <div class="row"><span>p&l</span><b class="${cls(p.pnl||0)}">${fmtSigned(p.pnl)}</b></div>
+        <div class="row"><span>notional</span><b>${fmt$(p.size*p.price)}</b></div>`, e.clientX, e.clientY);
+    });
+    dot.addEventListener("mouseleave",hideTip);
+    dot.addEventListener("click",()=>openDetail(dot.dataset.sym));
+  });
+}
+
+/* ═══ book ═══ */
+const COLS=[
+  ["sym","pair","l"],["price","price"],["chg","24h"],["pnl","p&l"],
+  ["dist","stop dist"],["fills","rungs"],["notional","notional"],["lev","lev"],["prot","prot"]
+];
+function sortVal(p,k){
+  switch(k){
+    case "sym": return p.sym;
+    case "price": return p.price||0;
+    case "chg": return p.chg||0;
+    case "pnl": return p.pnl||0;
+    case "dist": return (p.price&&p.stop)?(p.price-p.stop)/p.stop:9e9;
+    case "fills": return p.fills||0;
+    case "notional": return (p.size||0)*(p.price||0);
+    case "lev": return p.lev||0;
+    case "prot": return (p.stops||0)-(p.fills||0);
+  } return 0;
+}
+function renderBook(){
+  const held=PAIRS.filter(p=>p.fills>0), scout=PAIRS.filter(p=>!p.fills);
+  $("book-aux").textContent=`${held.length} positions · ${S.health.bid_count??"—"} bids resting`;
+  held.sort((a,b)=>{ const va=sortVal(a,sortKey), vb=sortVal(b,sortKey);
+    return (va<vb?-1:va>vb?1:0)*sortDir; });
+  const head=`<thead><tr>${COLS.map(([k,lab,l])=>
+    `<th class="${l||""} ${sortKey===k?"on":""}" data-k="${k}">${lab} ${sortKey===k?`<span class="dir">${sortDir>0?"▲":"▼"}</span>`:""}</th>`).join("")}</tr></thead>`;
+  const rows=held.map(p=>{
+    const d=(p.price&&p.stop)?((p.price-p.stop)/p.stop*100):null;
+    const dCol=d==null?"var(--ink4)":d<3?"var(--loss)":d<6?"var(--warn)":"var(--gain)";
+    const dW=d==null?0:Math.min(100,d/20*100);
+    const prot=p.stops>=p.fills?`<span class="protlamp gain" title="all fills protected">●</span>`
+      :p.stops>0?`<span class="protlamp warn" title="${p.stops}/${p.fills} protected">◐</span>`
+      :`<span class="protlamp loss" title="NO RESTING STOP">○</span>`;
+    const flash=prevPx[p.sym]!=null&&p.price!=null&&p.price!==prevPx[p.sym]
+      ?(p.price>prevPx[p.sym]?"flash-up":"flash-dn"):"";
+    return `<tr class="${p.fault?"fault":""} ${flash}" data-sym="${p.sym}">
+      <td class="l"><span class="sym">${p.sym}</span>${p.status!=="HOLD"?` <span class="statuschip ${p.stStyle}">${p.status}</span>`:""}</td>
+      <td>${fmtPx(p.price)}</td>
+      <td class="${cls(p.chg||0)}">${p.chg==null?"—":(p.chg>=0?"+":"")+p.chg.toFixed(1)+"%"}</td>
+      <td class="${cls(p.pnl||0)}">${fmtSigned(p.pnl)}</td>
+      <td>${d==null?"—":d.toFixed(1)+"%"}<span class="distbar"><i style="width:${dW}%;background:${dCol}"></i></span></td>
+      <td>${p.fills}${p.bid?` <span class="dim">+bid ${fmtPx(p.bid)}</span>`:""}</td>
+      <td>${fmt$(p.size*p.price,0)}</td>
+      <td class="dim">${p.lev}×</td>
+      <td>${prot}</td></tr>`;
+  }).join("");
+  const scoutRows=scout.length?`<tr><td colspan="9" class="scout-head">Scouting · ${scout.length} unheld ladders</td></tr>`+
+    scout.sort((a,b)=>(b.score/b.denom||0)-(a.score/a.denom||0)).map(p=>
+    `<tr class="scoutrow" data-sym="${p.sym}">
+      <td class="l"><span class="sym">${p.sym}</span> <span class="statuschip ${p.stStyle}">${p.status}</span></td>
+      <td>${fmtPx(p.price)}</td>
+      <td class="${cls(p.chg||0)}">${p.chg==null?"—":(p.chg>=0?"+":"")+p.chg.toFixed(1)+"%"}</td>
+      <td class="dim" colspan="2">${p.bid?`bid resting @ ${fmtPx(p.bid)}`:"no bid"}</td>
+      <td class="dim">score ${p.score}/${p.denom}</td>
+      <td class="dim" colspan="3">${p.pctLow!=null?p.pctLow+"% above 52w low":""}</td></tr>`).join(""):"";
+  $("booktable").innerHTML=head+`<tbody>${rows}${scoutRows}</tbody>`;
+  document.querySelectorAll("#booktable th").forEach(th=>th.addEventListener("click",()=>{
+    const k=th.dataset.k; if(!k) return;
+    if(sortKey===k) sortDir*=-1; else { sortKey=k; sortDir=k==="sym"?1:(k==="dist"?1:-1); }
+    renderBook();
+  }));
+  document.querySelectorAll("#booktable tbody tr[data-sym]").forEach(tr=>
+    tr.addEventListener("click",()=>openDetail(tr.dataset.sym)));
+}
+
+/* ═══ ledger + journal ═══ */
+function renderLedger(){
+  $("lg-aux").textContent=TPC.length?`${TPC.length} cycles`:"no cycles yet";
+  $("ledgerlist").innerHTML=TPC.map(c=>
+    `<div class="lgrow"><span class="d">${c.label}</span>
+     <span class="arc">$${c.baseline.toFixed(0)} → $${c.settled.toFixed(0)}</span>
+     <span class="p ${cls(c.profit)}">${fmtSigned(c.profit)}</span>
+     ${c.flows==null?'<span class="fl" title="predates deposit tracking">flows?</span>'
+       :Math.abs(c.flows)>=0.01?`<span class="fl" title="external money during cycle, excluded from profit">${c.flows>0?"+":"−"}$${Math.abs(c.flows).toFixed(0)}</span>`:""}
+    </div>`).join("")||`<div class="dim" style="font-size:11px">the first completed harvest lands here</div>`;
+  const tot=TPC.reduce((a,c)=>a+(c.profit||0),0);
+  const t=$("lg-total"); t.textContent=fmtSigned(tot); t.className="v num "+cls(tot);
+}
+function renderJournal(){
+  let lastDay=null, html="";
+  JOURNAL.filter(j=>jFilter==="all"||j[1]===jFilter).forEach(j=>{
+    const [ts,kind,sym,text,day]=j;
+    if(day!==lastDay){ html+=`<div class="jday">${esc(day||"")}</div>`; lastDay=day; }
+    html+=`<div class="jrow k-${esc(kind)}"><span class="ts">${esc(ts)}</span>
+      <span class="kind">${esc(kind).toUpperCase()}</span>
+      <span class="tx">${sym?`<b>${esc(String(sym).replace("/USD",""))}</b> `:""}${esc(text)}</span></div>`;
+  });
+  $("jfeed").innerHTML=html||`<div class="dim" style="font-size:11px;padding:8px 0">nothing yet under this filter</div>`;
+}
+$("jfilters").addEventListener("click",e=>{
+  const b=e.target.closest("button"); if(!b) return;
+  jFilter=b.dataset.f;
+  document.querySelectorAll("#jfilters button").forEach(x=>x.classList.toggle("on",x===b));
+  renderJournal();
+});
+
+/* ═══ footer ═══ */
+function renderFooter(r,h,v){
+  $("ft-regime").textContent=`regime ${r.label||"—"}${r.daily_rsi!=null?` · daily rsi ${Math.round(r.daily_rsi)}`:""}`;
+  $("ft-daily").innerHTML=`daily close <span class="cdbar"><i style="width:${(r.daily_pct||0)}%"></i></span> ${cdown(r.daily_left_s)}`;
+  $("ft-weekly").innerHTML=`weekly <span class="cdbar"><i style="width:${(r.weekly_pct||0)}%"></i></span> ${cdown(r.weekly_left_s)}`;
+  $("ft-btc").textContent=r.btc_price?`BTC ${fmt$(r.btc_price,0)} ${r.btc_chg!=null?(r.btc_chg>=0?"+":"")+r.btc_chg.toFixed(1)+"%":""}`:"";
+  $("ft-v").textContent=`deepfield v${v||"—"} · observatory deck`;
+}
+
+/* ═══ pair detail sheet ═══ */
+function candleChart(days, p){
+  if(!days||!days.length) return `<div class="dim" style="padding:30px 0">no candle history stored yet</div>`;
+  const win=days.slice(-detailWin);
+  const W=810,H=300,PL=8,PR=58,PT=12,PB=40,VH=34;
+  let lo=Math.min(...win.map(d=>d[3])), hi=Math.max(...win.map(d=>d[2]));
+  const marks=[];
+  if(p){
+    (p.rungs||[]).forEach((e,i)=>marks.push(["fill",e]));
+    (p.fstops||[]).forEach(s=>s&&marks.push(["stop",s]));
+    (p.bids||[]).forEach(b=>marks.push(["bid",b.price]));
+    if(p.avg) marks.push(["avg",p.avg]);
+  }
+  marks.forEach(([,v])=>{ if(v<lo)lo=v; if(v>hi)hi=v; });
+  const pad=(hi-lo)*0.06||1; lo-=pad; hi+=pad;
+  const vmax=Math.max(...win.map(d=>d[5]||0),1);
+  const N=win.length, slot=(W-PL-PR)/N, bw=Math.max(1.5,slot*0.58);
+  const Y=v=>PT+(1-(v-lo)/(hi-lo))*(H-PT-PB-VH);
+  let out=`<svg viewBox="0 0 ${W} ${H}" id="candlesvg">`;
+  // y grid (skip a tick label that would sit under a reference-line label)
+  const refLabelYs=marks.filter(([t])=>t!=="fill").map(([,v])=>Y(v));
+  for(let i=0;i<=4;i++){ const v=lo+(hi-lo)*i/4, y=Y(v);
+    out+=`<line x1="${PL}" x2="${W-PR}" y1="${y}" y2="${y}" stroke="var(--line)"/>
+      ${refLabelYs.some(ry=>Math.abs(ry-y)<11)?"":`<text x="${W-PR+6}" y="${y+3}" fill="var(--ink4)" font-size="9" font-family="var(--mono)">${fmtPx(v)}</text>`}`; }
+  // reference lines
+  const refline=(v,c,dash,lab)=>`<line x1="${PL}" x2="${W-PR}" y1="${Y(v)}" y2="${Y(v)}" stroke="${c}" stroke-width="1" stroke-dasharray="${dash}" opacity=".8"/>
+    <text x="${W-PR+6}" y="${Y(v)+3}" fill="${c}" font-size="8.5" font-family="var(--mono)">${lab}</text>`;
+  marks.forEach(([t,v])=>{
+    if(t==="avg") out+=refline(v,"var(--ice-hi)","5 4","avg");
+    else if(t==="stop") out+=refline(v,"var(--loss)","2 4","stop");
+    else if(t==="bid") out+=refline(v,"var(--ice)","1 5","bid");
+    else out+=`<line x1="${PL}" x2="${W-PR}" y1="${Y(v)}" y2="${Y(v)}" stroke="var(--brass)" stroke-width="1" opacity=".35"/>`;
+  });
+  // candles + volume
+  win.forEach((d,i)=>{
+    const [ts,o,h,l,c,v]=d, x=PL+i*slot+slot/2;
+    const up=c>=o, col=up?"var(--gain)":"var(--loss)";
+    out+=`<line x1="${x}" x2="${x}" y1="${Y(h)}" y2="${Y(l)}" stroke="${col}" stroke-width="1"/>
+      <rect x="${x-bw/2}" y="${Math.min(Y(o),Y(c))}" width="${bw}" height="${Math.max(1,Math.abs(Y(o)-Y(c)))}" fill="${col}" rx="1"/>
+      <rect x="${x-bw/2}" y="${H-PB-((v||0)/vmax)*VH}" width="${bw}" height="${((v||0)/vmax)*VH}" fill="var(--ink4)" opacity=".5"/>`;
+  });
+  // x labels
+  const step=Math.ceil(N/6);
+  win.forEach((d,i)=>{ if(i%step) return;
+    const dt=new Date(d[0]*1000);
+    out+=`<text x="${PL+i*slot+slot/2}" y="${H-8}" fill="var(--ink4)" font-size="9" text-anchor="middle" font-family="var(--mono)">${dt.toLocaleDateString("en-US",{month:"short",day:"numeric"}).toLowerCase()}</text>`; });
+  out+=`<rect id="candlehit" x="${PL}" y="0" width="${W-PL-PR}" height="${H}" fill="transparent"/></svg>`;
+  return out;
+}
+function wireCandleHover(days){
+  const svg=$("candlesvg"); if(!svg) return;
+  const win=days.slice(-detailWin), W=810,PL=8,PR=58, slot=(W-PL-PR)/win.length;
+  svg.querySelector("#candlehit").addEventListener("mousemove",e=>{
+    const r=svg.getBoundingClientRect(), fx=(e.clientX-r.left)/r.width*W;
+    const i=Math.max(0,Math.min(win.length-1,Math.floor((fx-PL)/slot)));
+    const [ts,o,h,l,c,v]=win[i], dt=new Date(ts*1000);
+    showTip(`<b>${dt.toLocaleDateString("en-US",{month:"short",day:"numeric"})}</b>
+      <div class="row"><span>open</span><b>${fmtPx(o)}</b></div>
+      <div class="row"><span>high</span><b>${fmtPx(h)}</b></div>
+      <div class="row"><span>low</span><b>${fmtPx(l)}</b></div>
+      <div class="row"><span>close</span><b class="${c>=o?"gain":"loss"}">${fmtPx(c)}</b></div>
+      <div class="row"><span>vol</span><b>${fmtVol(v)}</b></div>`, e.clientX, e.clientY);
+  });
+  svg.querySelector("#candlehit").addEventListener("mouseleave",hideTip);
+}
+function renderDetail(){
+  const p=PMAP[detailSym], d=DETAIL;
+  if(!p||!d){ return; }
+  const dPct=(p.price&&p.stop)?((p.price-p.stop)/p.stop*100):null;
+  const lo=d.days?.length?Math.min(...d.days.slice(-365).map(x=>x[3])):null;
+  const hi=d.days?.length?Math.max(...d.days.slice(-365).map(x=>x[2])):null;
+  $("sheet").innerHTML=`
+    <div class="mastline">
+      <span class="psym">${esc(detailSym)}<span style="color:var(--ink3)">/USD</span></span>
+      <span class="pprice num">${fmtPx(p.price)}</span>
+      <span class="num ${cls(p.chg||0)}">${p.chg==null?"":(p.chg>=0?"+":"")+p.chg.toFixed(1)+"% 24h"}</span>
+      ${p.status!=="HOLD"&&p.status!=="idle"?`<span class="statuschip ${p.stStyle}">${p.status}</span>`:""}
+      <button class="closebtn" id="sheetclose" aria-label="close">✕</button>
+    </div>
+    <div class="winrow" id="winrow">${[30,90,180,365].map(w=>
+      `<button data-w="${w}" class="${w===detailWin?"on":""}">${w}d</button>`).join("")}</div>
+    <div id="candlebox">${candleChart(d.days,p)}</div>
+    ${lo!=null?`<div class="dim num" style="font-size:10.5px;margin-top:4px">52-week ${fmtPx(lo)} — ${fmtPx(hi)}${p.pctLow!=null?` · now ${p.pctLow}% above the low`:""}</div>`:""}
+    <div class="subgrid">
+      <div><h4>Campaign · ${p.fills||0} fills ${p.size?`· ${fmtVol(p.size)} ${esc(detailSym)}`:""}</h4>
+        <table><thead><tr><th class="l">rung</th><th>entry</th><th>vol</th><th>stop</th><th>prot</th></tr></thead><tbody>
+        ${(d.fills||[]).map((f,i)=>`<tr><td class="l dim">#${i+1}</td><td>${fmtPx(f.entry)}</td>
+          <td>${fmtVol(f.vol)}</td><td class="loss">${fmtPx(f.stop)}</td>
+          <td>${f.stop_txid?'<span class="gain">●</span>':'<span class="loss" title="no resting stop">○</span>'}</td></tr>`).join("")
+          ||`<tr><td colspan="5" class="dim l">no open fills</td></tr>`}
+        ${(d.pendings||[]).map(f=>`<tr><td class="l dim">bid</td><td class="dim">${fmtPx(f.entry)}</td>
+          <td class="dim">${fmtVol(f.vol)}</td><td class="dim">${fmtPx(f.stop)}</td><td class="dim">resting</td></tr>`).join("")}
+        </tbody></table></div>
+      <div><h4>Risk</h4>
+        <table><tbody>
+        <tr><td class="l dim">notional</td><td>${fmt$((p.size||0)*(p.price||0))}</td></tr>
+        <tr><td class="l dim">avg entry</td><td>${fmtPx(p.avg)}</td></tr>
+        <tr><td class="l dim">unrealized</td><td class="${cls(p.pnl||0)}">${fmtSigned(p.pnl)}</td></tr>
+        <tr><td class="l dim">stop distance</td><td class="${dPct!=null&&dPct<3?"loss":""}">${dPct==null?"—":dPct.toFixed(1)+"%"}</td></tr>
+        <tr><td class="l dim">leverage</td><td>${p.lev}×</td></tr>
+        <tr><td class="l dim">protection</td><td>${p.stops}/${p.fills} lots stopped</td></tr>
+        <tr><td class="l dim">signal</td><td>${p.score}/${p.denom} <span class="dim">need ${p.req}</span></td></tr>
+        </tbody></table></div>
+    </div>`;
+  $("sheetclose").addEventListener("click",closeDetail);
+  $("winrow").addEventListener("click",e=>{
+    const b=e.target.closest("button"); if(!b) return;
+    detailWin=+b.dataset.w; renderDetail();
+  });
+  wireCandleHover(d.days||[]);
+}
+async function openDetail(sym){
+  detailSym=sym; DETAIL=null;
+  $("scrim").classList.add("on"); $("sheet").classList.add("on");
+  $("sheet").innerHTML=`<div class="mastline"><span class="psym">${esc(sym)}</span>
+    <button class="closebtn" id="sheetclose">✕</button></div><div class="dim">loading candles…</div>`;
+  $("sheetclose").addEventListener("click",closeDetail);
+  history.replaceState(null,"","#pair="+sym);
+  try{ const r=await fetch("/api/pair/"+encodeURIComponent(sym),{cache:"no-store"});
+    if(r.ok){ DETAIL=await r.json(); renderDetail(); } }catch(_){}
+}
+function closeDetail(){
+  detailSym=null;
+  $("scrim").classList.remove("on"); $("sheet").classList.remove("on");
+  history.replaceState(null,"","#");
+  hideTip();
+}
+$("scrim").addEventListener("click",closeDetail);
+addEventListener("keydown",e=>{ if(e.key==="Escape") closeDetail(); });
+
+/* ═══ clocks ═══ */
+setInterval(()=>{
+  const n=new Date();
+  $("clock-mt").textContent=n.toLocaleTimeString("en-US",{hour12:false,timeZone:"America/Denver"});
+  $("clock-utc").textContent=n.toLocaleTimeString("en-US",{hour12:false,timeZone:"UTC",hour:"2-digit",minute:"2-digit"});
+},1000);
+
+/* ═══ main loop ═══ */
+async function fetchState(){
+  try{
+    const r=await fetch("/api/state",{cache:"no-store"}); if(!r.ok) throw 0;
+    S=await r.json();
+    $("errbar").classList.remove("on");
+    const oldPx={}; PAIRS.forEach(p=>oldPx[p.sym]=p.price); prevPx=oldPx;
+    PAIRS=S.pairs||[]; PMAP=Object.fromEntries(PAIRS.map(p=>[p.sym,p]));
+    TPC=S.tp_cycles||[]; JOURNAL=S.journal||[];
+    const h=S.health||{};
+    const sb=$("stalebar");
+    if(S.data_stale){ sb.textContent=`⚠ market data frozen ${S.data_age_s!=null?`— last tick ${Math.round(S.data_age_s)}s ago`:""} · prices fall back to last close · stop proximity unverifiable`; sb.classList.add("on"); }
+    else sb.classList.remove("on");
+    renderMast(h); renderCapital(h); renderHarvest(h); renderDefense(h);
+    renderField(); renderBook(); renderLedger(); renderJournal();
+    renderFooter(S.regime||{},h,S.v);
+    if(detailSym&&PMAP[detailSym]&&DETAIL) renderDetail();
+  }catch(_){ $("errbar").classList.add("on"); }
+}
+fetchState(); setInterval(fetchState,4000);
+/* deep link */
+if(location.hash){ const m=location.hash.match(/pair=([A-Za-z]+)/);
+  if(m) setTimeout(()=>openDetail(m[1].toUpperCase()),600); }
+</script>
+</body>
+</html>
