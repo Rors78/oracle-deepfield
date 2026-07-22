@@ -322,10 +322,11 @@ found — both mean the ledger and the exchange disagree.
 | `REVERSE_GEAR_ENABLED` | `True` | Deleverage governor, armed by default |
 | `RAILS_ENABLED` | `False` | Automatic circuit breakers — **off by operator choice** |
 | `HALT_FILE` | `deepfield.HALT_ENTRIES` | Always honored, regardless of the above |
+| `MARGIN_LEVEL_ALERT_PCT` | `120` | Pages when Kraken's own margin level nears the seizure band |
 
-One stale entry to be aware of: `MARGIN_LEVEL_ALERT_PCT` is documented as an alert
-threshold but no code reads it — its role was superseded by the price-space defense tiers.
-The web console uses a hardcoded 150 for its amber band.
+`MARGIN_LEVEL_ALERT_PCT` (120) fires a throttled page when Kraken's own margin level
+approaches the seizure band. It is deliberately not derived from the liq-buffer tiers:
+the two measure different things and diverge widely at a mixed per-pair leverage.
 
 ---
 
