@@ -498,7 +498,7 @@ svg .axt2{ fill:var(--ink-faint); font-size:9.5px; font-family:var(--mono); }
       </div>
       <div class="specblock card">
         <h3>Defense horizon</h3>
-        <p class="note" style="margin-top:0">The v7 signature. Three aligned instruments: the <b>margin-level runway</b> (liquidation 100 → danger 150 → stack floor 200 → growth), the <b>liq-buffer runway</b> in price space (how far the basket can fall, marked against the worst 24h dip and the worst 1-day on record), and <b>effective leverage vs the survivable ceiling</b>. One glance = safety altitude. Populated from the same Wave-1 telemetry the rails read.</p>
+        <p class="note" style="margin-top:0">The v7 signature. Three aligned instruments: the <b>margin-level runway</b> (liquidation 40 → margin call 80 → alert 120 → stack floor 200 → growth), the <b>liq-buffer runway</b> in price space (how far the basket can fall, marked against the worst 24h dip and the worst 1-day on record), and <b>effective leverage vs the survivable ceiling</b>. One glance = safety altitude. Populated from the same Wave-1 telemetry the rails read.</p>
       </div>
       <div class="specblock card">
         <h3>Type scale</h3>
@@ -518,7 +518,7 @@ svg .axt2{ fill:var(--ink-faint); font-size:9.5px; font-family:var(--mono); }
           <div><span class="teal">552%</span> <span class="dim">— healthy · &gt; 500</span></div>
           <div><span class="teal">210%</span> <span class="dim">— growth · above the 200 stack floor</span></div>
           <div><span class="amber">178%</span> <span class="dim">— caution · seeds paused &lt; 200</span></div>
-          <div><span class="alarm">120%</span> <span class="dim">— danger · &lt; 150 · liquidation at 100</span></div>
+          <div><span class="alarm">112%</span> <span class="dim">— danger · &lt; 120 · margin call at 80 · liquidation from 40</span></div>
         </div>
       </div>
       <div class="specblock card">
@@ -723,7 +723,10 @@ function renderHero(h){
   if(sw!=null) tweenNum(document.getElementById("eqswing"), sw, fmtUsd);
   wireEquityHover(h);
   const mtot=(h.margin_used||0)+(h.free_margin||0);
-  const lvl=h.margin_level, lvlCls=lvl==null?'dim':lvl>500?'teal':lvl>=200?'teal':lvl>=150?'amber':'alarm';
+  // Alarm below MARGIN_LEVEL_ALERT_PCT (120), not 150: at the current per-pair
+  // leverage mix the book runs ml 130-199 in ordinary operation, so a 150 boundary
+  // painted the readout permanently red and taught the eye to ignore it.
+  const lvl=h.margin_level, lvlCls=lvl==null?'dim':lvl>500?'teal':lvl>=200?'teal':lvl>=120?'amber':'alarm';
   R.innerHTML=`
     <div class="hs"><span class="k">Realized</span><span class="v"><span class="dim">day</span> ${fmtUsd(h.realized_day)} · <span class="dim">wk</span> <span class="${(h.realized_week||0)>=0?'gain':'loss'}">${fmtUsd(h.realized_week)}</span></span></div>
     <div class="hs"><span class="k">Book</span><span class="v"><b class="violet">${h.pos_count}</b> pos · <b class="violet">${h.bid_count}</b> bids · uptime <span class="time">${h.uptime_s!=null?hms(h.uptime_s):'—'}</span></span></div>
@@ -736,8 +739,11 @@ function renderHero(h){
 }
 
 /* ── DEFENSE HORIZON — the signature instrument ────────────────────────── */
-function mlPos(v){  // piecewise map: 100→0 · 150→22 · 200→46 · 300→68 · 500→88 · 700→100
-  const a=[[100,0],[150,22],[200,46],[300,68],[500,88],[700,100]];
+function mlPos(v){  // piecewise map: 100→0 · 120→22 · 200→46 · 300→68 · 500→88 · 700→100
+  // Knot at 120 = MARGIN_LEVEL_ALERT_PCT. NOTE: this scale bottoms at ml 100, which
+  // predates knowing Kraken calls at 80 and liquidates from 40 — both peg to 0 here
+  // and cannot be told apart. The v8 deck's runway spans 0-800 and shows them properly.
+  const a=[[100,0],[120,22],[200,46],[300,68],[500,88],[700,100]];
   if(v<=100) return 0; if(v>=700) return 100;
   for(let i=1;i<a.length;i++) if(v<=a[i][0]){
     const [x0,y0]=a[i-1],[x1,y1]=a[i]; return y0+(v-x0)/(x1-x0)*(y1-y0); }
@@ -752,18 +758,18 @@ function renderHorizon(h){
   if(lvl==null){
     mlHtml=`<div class="runway"><div class="rw-track"></div><div class="rw-marklab" style="left:50%;top:12px;color:var(--ink-dim)">margin level populates on next bot cycle</div></div>`;
   }else{
-    const curCls = lvl>=200?'teal':lvl>=150?'amber':'alarm';
-    const curCol = lvl>=200?'var(--teal)':lvl>=150?'var(--amber)':'var(--alarm)';
-    mlHtml=`<div class="runway" title="margin level ${lvl}% — liquidation at 100, seeds pause under the 200 floor">
+    const curCls = lvl>=200?'teal':lvl>=120?'amber':'alarm';
+    const curCol = lvl>=200?'var(--teal)':lvl>=120?'var(--amber)':'var(--alarm)';
+    mlHtml=`<div class="runway" title="margin level ${lvl}% — alert under 120, seeds pause under the 200 floor; Kraken calls at 80, liquidates from 40">
       <div class="rw-track">
-        <div class="rw-zone" style="left:0;width:${mlPos(150)}%;background:repeating-linear-gradient(-45deg, rgba(232,73,61,.28) 0 5px, rgba(232,73,61,.08) 5px 10px)"></div>
-        <div class="rw-zone" style="left:${mlPos(150)}%;width:${mlPos(200)-mlPos(150)}%;background:linear-gradient(90deg, rgba(232,127,51,.22), rgba(232,127,51,.10))"></div>
+        <div class="rw-zone" style="left:0;width:${mlPos(120)}%;background:repeating-linear-gradient(-45deg, rgba(232,73,61,.28) 0 5px, rgba(232,73,61,.08) 5px 10px)"></div>
+        <div class="rw-zone" style="left:${mlPos(120)}%;width:${mlPos(200)-mlPos(120)}%;background:linear-gradient(90deg, rgba(232,127,51,.22), rgba(232,127,51,.10))"></div>
         <div class="rw-zone" style="left:${mlPos(200)}%;right:0;background:linear-gradient(90deg, rgba(70,194,164,.14), rgba(70,194,164,.04))"></div>
       </div>
-      <div class="rw-mark" style="left:${mlPos(150)}%;background:var(--amber)"></div>
+      <div class="rw-mark" style="left:${mlPos(120)}%;background:var(--amber)"></div>
       <div class="rw-mark" style="left:${mlPos(200)}%;background:var(--teal)"></div>
-      <div class="rw-marklab" style="left:0;transform:none;color:var(--alarm)">LIQ 100</div>
-      <div class="rw-marklab" style="left:${mlPos(150)}%">150</div>
+      <div class="rw-marklab" style="left:0;transform:none;color:var(--alarm)">CALL 80 ↓</div>
+      <div class="rw-marklab" style="left:${mlPos(120)}%">ALERT 120</div>
       <div class="rw-marklab" style="left:${mlPos(200)}%;color:var(--teal)">FLOOR 200</div>
       <div class="rw-marklab" style="right:0;left:auto;transform:none">500+</div>
       <div class="rw-cur" style="left:${mlPos(lvl)}%"><span class="stem" style="background:${curCol};box-shadow:0 0 8px ${curCol}"></span></div>
@@ -805,7 +811,7 @@ function renderHorizon(h){
       <span class="hzsub">${buf!=null?`liq buffer <b class="${tierCls}" style="color:inherit">${(+buf).toFixed(1)}%</b>`:""}${h.buffer_call_pct!=null?` · margin-call buffer ${(+h.buffer_call_pct).toFixed(1)}%`:""}${lev!=null?` · leverage <b>${(+lev).toFixed(2)}x</b>${ceil!=null?` / ceiling ${(+ceil).toFixed(2)}x`:""}`:""}${st.buffer_under_intraday_pct!=null?` · dip-stressed buffer ${(+st.buffer_under_intraday_pct).toFixed(1)}%`:""}</span>
     </div>
     <div class="hzgrid">
-      <div class="hzcell"><div class="lbl"><span>margin-level runway</span><b class="${lvl==null?'dim':lvl>=200?'teal':lvl>=150?'amber':'alarm'}">${lvl!=null?lvl+'%':'—'}</b></div>${mlHtml}</div>
+      <div class="hzcell"><div class="lbl"><span>margin-level runway</span><b class="${lvl==null?'dim':lvl>=200?'teal':lvl>=120?'amber':'alarm'}">${lvl!=null?lvl+'%':'—'}</b></div>${mlHtml}</div>
       <div class="hzcell"><div class="lbl"><span>liq buffer · price space</span><b class="${tierCls}">${buf!=null?(+buf).toFixed(1)+'%':'—'}</b></div>${bufHtml}</div>
       <div class="hzcell"><div class="lbl"><span>leverage vs ceiling</span><b>${lev!=null?(+lev).toFixed(2)+'x':'—'}</b></div>${levHtml}</div>
     </div>`;
