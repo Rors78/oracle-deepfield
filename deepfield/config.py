@@ -296,12 +296,24 @@ ADOPT_GRACE_SECS = 1800
 # Margin-level watch (audit 2026-07-13 #2). Kraken margin-calls at ml<=80% and force-
 # liquidates from ml<=40% — bypassing every stop, invisibly to the ledger. This is
 # protection against the EXCHANGE seizing the book, not a self-brake:
-#  - below MARGIN_LEVEL_ALERT_PCT: fire a (throttled) safety alert. Display + noise only.
+#  - below MARGIN_LEVEL_ALERT_PCT: fire a (throttled) safety alert. Alert only, never
+#    gates an order. Read by app._check_margin_level.
 #  - below MARGIN_LEVEL_STACK_FLOOR_PCT: pause SEEDS and LADDER RUNGS only — confirmed-BUY
 #    signal entries are NEVER gated by this (operator no-blockers stance). FAILS OPEN:
 #    a stale/unknown margin level never pauses anything.
 # 0 disables either threshold.
-MARGIN_LEVEL_ALERT_PCT = 150
+# 2026-07-22: 150 -> 120, and WIRED. It sat at 150 unread by any code since the audit
+# wrote it, so the number was never pressure-tested against a real book. 150 was the
+# ratio twin of an all-pairs-10:1 stack; at the current 2-5x per-pair mix the book
+# floors near ml 130 in ordinary running (p05 136, p50 161, max 199 over the last 3000
+# logged samples) while the price-space liq buffer reads a healthy 21.9% NOMINAL — the
+# two metrics genuinely diverge, which is why this watch exists separately and why its
+# threshold cannot be copied from the buffer tiers. Wiring 150 verbatim would have paged
+# through normal operation and burned the channel (cf. the 531-events-in-24h finding
+# behind the edge-triggered stack-pause narration). 120 clears the observed operating
+# floor and still sits above the 2026-07-16 near-margin-call band (ml 106-115), so it
+# stays silent until something real is happening. 0 disables.
+MARGIN_LEVEL_ALERT_PCT = 120
 # 2026-07-19: raised 160->200 (operator). The book OPERATES AT THIS FLOOR, so this
 # number — not SIZE_MULT — is what actually caps leverage. At all-10:1, ml 160 permits
 # L_eff 6.25x and a 12% liq buffer; measured over 2y the worst 1-day adverse basket

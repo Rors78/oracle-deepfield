@@ -587,6 +587,9 @@ async def _exec_state_refresh(appstate, conn, ing, interval=15):
             defense_blob = None
             if mode == "live" and balance:
                 defense_blob = _run_defense(conn, balance, equity, margin_used, _t.time())
+                # Ratio-space watch alongside the price-space tiers above: the two
+                # measure different failure modes and can disagree (see docstring).
+                _check_margin_level(conn, balance)
             appstate.exec = {
                 "mode": mode, "equity": equity, "open_count": len(positions),
                 "positions": positions, "pending": pending,
@@ -699,6 +702,52 @@ def _run_defense(conn, balance, equity, margin_used, now):
         return out
     except Exception:
         log.exception("defense engine failed (display value only — trade path unaffected)")
+        return None
+
+
+def _check_margin_level(conn, balance):
+    """Page when KRAKEN'S OWN margin level approaches the exchange's seizure band.
+
+    Not a duplicate of the price-space defense tiers. Those answer "how far can the
+    basket fall before liquidation"; this answers "how close is the account to a
+    margin call right now". At a mixed per-pair leverage the two diverge widely —
+    on 2026-07-22 the book sat at ml 132% with a healthy 21.9% liq buffer reading
+    NOMINAL, because used margin is a large fraction of equity while the price
+    distance to liquidation stays long. Kraken calls at ml<=80% and force-liquidates
+    from 40%, bypassing every stop and invisibly to the ledger, so the ratio needs
+    its own watch and cannot be inferred from the buffer.
+
+    On the threshold: MARGIN_LEVEL_ALERT_PCT was written by audit 2026-07-13 #2 at
+    150 and then never read by any code. 150 was the twin of an all-pairs-10:1 book;
+    the current 2-5x mix floors near ml 130 in ordinary running (p05 136, p50 161
+    over the last 3000 logged samples), so wiring 150 verbatim would have paged
+    continuously and trained the operator to ignore the channel — the same failure
+    the edge-triggered stack-pause narration was introduced to stop. 120 sits under
+    the observed operating floor and over the 2026-07-16 near-margin-call band
+    (106-115), so it stays quiet in normal running and fires on a real approach.
+
+    FAILS OPEN: an unknown/garbage margin level never pages. Throttle key carries a
+    5-point bucket so a worsening slide keeps paging instead of being swallowed by
+    the per-kind window (same trick as the defense buffer key). Returns the level
+    for the caller's telemetry, or None. Never raises into the loop."""
+    try:
+        floor = float(getattr(config, "MARGIN_LEVEL_ALERT_PCT", 0) or 0)
+        try:
+            lvl = float(balance["ml"]) if (balance and balance.get("ml")) else None
+        except (TypeError, ValueError, KeyError):
+            lvl = None
+        if lvl is None or lvl != lvl or lvl <= 0:
+            return None                      # unknown -> never page on a bad read
+        if floor <= 0 or lvl >= floor:       # 0 disables
+            return lvl
+        bucket = int(lvl // 5) * 5           # a new key every 5 points down
+        text = (f"margin level {lvl:.0f}% below alert floor {floor:.0f}% — "
+                f"Kraken margin-calls at 80%, force-liquidates from 40%")
+        _journal_safe(conn, "defense", "*", text)
+        alerter.fire_safety("margin-level", f"ml{bucket}", text)
+        return lvl
+    except Exception:
+        log.exception("margin-level watch failed (alert/display only — trade path unaffected)")
         return None
 
 
