@@ -10,12 +10,23 @@ A bare ESC or an unrecognized sequence dispatches nothing harmful.
 Only activates when stdin is a real TTY (never in --once/cron/tests). The
 terminal is restored in stop() no matter how the app exits — a cbreak terminal
 left behind is exactly the kind of operator-hostile mess this project bans.
+
+tty/termios are POSIX-only and this module is imported by app.py at module level,
+so a bare `import termios` made the ENTIRE bot unimportable on Windows — not a
+degraded TUI, a ModuleNotFoundError before anything started. The import is guarded
+and start() reports unavailable, which app.py already handles (it is the same path
+as a non-TTY stdin). Everything else in the package is stdlib-portable, so this one
+guard is what makes the repo runnable on Windows at all.
 """
 import os
 import sys
-import tty
-import termios
 import logging
+
+try:                                     # POSIX only
+    import tty
+    import termios
+except ImportError:                      # Windows / no POSIX terminal control
+    tty = termios = None
 
 log = logging.getLogger("deepfield.keys")
 
@@ -29,13 +40,26 @@ class KeyController:
         self._saved = None
 
     def start(self):
+        if termios is None or tty is None:
+            log.info("no POSIX terminal control on this platform — key controls "
+                     "disabled (the dashboard still renders and refreshes)")
+            return False
         if not sys.stdin.isatty():
             log.info("stdin is not a tty — key controls disabled")
             return False
         self._fd = sys.stdin.fileno()
         self._saved = termios.tcgetattr(self._fd)
         tty.setcbreak(self._fd)
-        self.loop.add_reader(self._fd, self._on_readable)
+        try:
+            # Not supported for non-socket handles on Windows' Proactor loop; if a
+            # platform ever gets past the guard above, fail back to no key controls
+            # rather than taking the whole run down.
+            self.loop.add_reader(self._fd, self._on_readable)
+        except NotImplementedError:
+            log.info("event loop does not support stdin readers — key controls disabled")
+            termios.tcsetattr(self._fd, termios.TCSADRAIN, self._saved)
+            self._fd = self._saved = None
+            return False
         printable = "".join(sorted(k.decode("latin-1") for k in self.handlers
                                    if len(k) == 1 and 32 <= k[0] < 127))
         log.info("key controls active: %s (+arrows)", printable)

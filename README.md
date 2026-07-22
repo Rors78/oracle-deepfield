@@ -250,6 +250,37 @@ rather than being coerced, because coercing `LIVE` → `live` would arm real mon
 | `validate` | Real `AddOrder` with `validate=true` — Kraken checks pair, leverage, precision, minimums and returns without executing. |
 | `live` | Real leveraged orders. |
 
+### Windows
+
+Runs on Windows 11. The package is stdlib-portable and the whole engine — scoring,
+executor, broker, store, defense, web console — behaves identically. Setup is the same
+except for the venv paths:
+
+```powershell
+python -m venv venv
+.\venv\Scripts\pip install -r requirements.txt
+.\venv\Scripts\python -m deepfield --backfill --full
+$env:DEEPFIELD_EXEC_MODE="live"; .\venv\Scripts\python -m deepfield
+```
+
+Credentials go in `%USERPROFILE%\.deepfield_keys`, same two-line format.
+
+Three things degrade, none of them on the money path:
+
+- **Keyboard controls are off.** `q`/`p`/`f`/`a` need POSIX terminal control (`termios`),
+  which Windows has no equivalent for. The dashboard still renders and refreshes; use
+  Ctrl-C to exit and the web console for everything else.
+- **Sound and desktop alerts are off.** `paplay`/`aplay`/`notify-send` are Linux; the
+  chain falls back to the terminal bell. Telegram alerts work everywhere if configured.
+- **`deepfield_run` and `scripts/*.sh` are bash**, as is the `.desktop` launcher. Invoke
+  `python -m deepfield` directly instead.
+
+`--simple` and the web console are the smoothest way to run it there.
+
+A fresh clone has no candle database (`*.db` is correctly gitignored), so run the cold
+backfill once. Until you do, two parity tests skip with "no DB (run M1 backfill)" —
+that is expected on a clean checkout, not a broken install.
+
 ### CLI
 
 ```bash

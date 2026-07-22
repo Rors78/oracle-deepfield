@@ -17,7 +17,7 @@ import sqlite3
 
 import pytest
 
-from deepfield import app, config
+from deepfield import app, config, defense
 
 SCHEMA = """
 CREATE TABLE journal(id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, kind TEXT,
@@ -119,3 +119,63 @@ def test_never_raises_into_the_exec_loop(conn, monkeypatch):
     monkeypatch.setattr(app.alerter, "fire_safety",
                         lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
     assert app._check_margin_level(conn, bal(100)) is None
+
+
+# ── calibration drift guard ────────────────────────────────────────────────
+#
+# These read the REAL config values (no monkeypatch) on purpose. The 150 that sat
+# here until 2026-07-22 was not wrong when it was written — it was the ratio twin of
+# an all-pairs-10:1 book. It went wrong silently when the posture moved underneath it
+# (SIZE_MULT 16->8->2, stack floor 120->160->200 over 07-16..07-21) and nothing failed,
+# because a bare constant has no relationship anything can check.
+#
+# So don't pin the measured band — that would rot exactly the same way. Pin the
+# RELATIONSHIP to the two levels that define the operating envelope. Both sides move
+# on their own when the posture changes, so the window re-derives itself and a
+# now-miscalibrated alert floor fails here instead of in production.
+
+_ALERT = float(config.MARGIN_LEVEL_ALERT_PCT or 0)
+_FLOOR = float(config.MARGIN_LEVEL_STACK_FLOOR_PCT or 0)
+_CALL = defense.CALL_ML * 100        # Kraken margin-calls at ml <= 80%
+
+# The book OPERATES AT the stack floor (config.py says so where the floor is set):
+# seeds pause below it, the book waits, ml recovers. Routine dips under the floor are
+# normal running, so the alert has to sit clear of that dip band or it pages at nothing.
+# 0.70 is the empirical shape — at floor 200 the book bottomed near ml 130 (0.65x).
+_DIP_BAND = 0.70
+
+# An alert that only fires once Kraken has already called you is not a warning.
+_WARN_MARGIN = 1.25
+
+
+@pytest.mark.skipif(not _ALERT, reason="alert threshold disabled (0)")
+def test_alert_floor_sits_below_the_routine_dip_band():
+    """Fires when the alert floor drifts up into normal operation — the exact failure
+    that made the old 150 unusable, and that wiring it as-is would have shipped."""
+    assert _ALERT < _FLOOR * _DIP_BAND, (
+        f"MARGIN_LEVEL_ALERT_PCT={_ALERT:.0f} is inside the routine operating band for a "
+        f"stack floor of {_FLOOR:.0f} (the book runs at and below the floor, so anything "
+        f"above {_FLOOR * _DIP_BAND:.0f} pages during normal running). Recalibrate it "
+        f"against the actual ml distribution, don't just lower the floor to suit it."
+    )
+
+
+@pytest.mark.skipif(not _ALERT, reason="alert threshold disabled (0)")
+def test_alert_floor_still_warns_before_the_exchange_acts():
+    assert _ALERT > _CALL * _WARN_MARGIN, (
+        f"MARGIN_LEVEL_ALERT_PCT={_ALERT:.0f} is too close to Kraken's margin call at "
+        f"ml {_CALL:.0f}. By the time it pages there is no room to act."
+    )
+
+
+@pytest.mark.skipif(not _ALERT, reason="alert threshold disabled (0)")
+def test_the_calibration_window_is_not_empty():
+    """If the floor and the call level ever squeeze together there is no honest value
+    to pick, and silently keeping the old one would be the worst outcome. Fail loudly
+    and make it a decision instead."""
+    lo, hi = _CALL * _WARN_MARGIN, _FLOOR * _DIP_BAND
+    assert lo < hi, (
+        f"No valid alert threshold exists between Kraken's call at {_CALL:.0f} and a "
+        f"stack floor of {_FLOOR:.0f}: the window is [{lo:.0f}, {hi:.0f}]. The stack "
+        f"floor is too low for the margin-level watch to warn about anything."
+    )
