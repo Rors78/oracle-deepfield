@@ -118,6 +118,11 @@ class Executor:
     def __init__(self, conn):
         self.conn = conn
         self.mode = config.EXEC_MODE
+        # sym -> (surplus_volume, first_seen_ts): how long a stable untracked surplus
+        # has gone unclaimed, so _adopt_surplus can tell a standing external position
+        # from a fill that has not been booked yet. In-memory by design — a restart
+        # restarts the clock rather than adopting on stale evidence.
+        self._surplus_seen = {}
 
     def _journal(self, kind, symbol, text):
         """Isolated journal emit (v6 JOURNAL view). DISPLAY-ONLY narration — a
@@ -1518,6 +1523,93 @@ class Executor:
         except Exception:
             log.exception("LADDER %s: place next rung failed (fill/stop unaffected)", symbol)
 
+    def _adopt_surplus(self, pfx, sym, margin_pair, leftover):
+        """Give untracked exchange volume a ledger row so the normal protect path arms
+        a stop over it — but ONLY when nothing else could still claim it.
+
+        Untracked volume has two causes that look identical here and must not be
+        treated alike:
+
+          * A fill this bot caused but has not booked yet — a resting entry that just
+            filled, or an ambiguous AddOrder recorded 'pending' with no txid (see the
+            transport branch in _place_next_rung). The userref/fill recovery OWNS that
+            volume and will attach it to its real row with the real cost basis.
+            Adopting it here would race that recovery and staple a SECOND row, and
+            later a second stop, onto one position — the doubled stop-sell that
+            _find_adoptable_stop exists to prevent.
+          * Volume this bot never created — a manual position, another system. Nothing
+            will ever claim it, so alerting alone leaves it naked indefinitely. This is
+            the case worth adopting.
+
+        Provenance test: any 'pending' row on this symbol means one of our own fills
+        could be in flight -> stay loud, adopt nothing. Otherwise require the surplus to
+        persist ADOPT_GRACE_SECS (at least one further reconcile) at a stable volume
+        before adopting, so a fill that merely beat its own bookkeeping is never
+        mistaken for an external position. Cost basis is the live mark, not the real
+        fill price, which we cannot know — open P&L is sourced from Kraken, not from
+        this row, so the mark only sets the stop distance.
+        """
+        if not getattr(config, "ADOPT_UNTRACKED", False):
+            return
+        pending = self.conn.execute(
+            "SELECT COUNT(*) FROM orders WHERE symbol=? AND status='pending'", (sym,)).fetchone()[0]
+        if pending:
+            self._surplus_seen.pop(sym, None)       # in-flight fill -> restart the clock
+            log.warning("%s: %s surplus %.8g NOT adopted — %d pending row(s) on this symbol "
+                        "could still claim it (fill recovery owns it)", pfx, sym, leftover, pending)
+            return
+        now = time.time()
+        prev_vol, first_seen = self._surplus_seen.get(sym, (None, None))
+        # A moving surplus is still settling; only a stable amount is evidence of a
+        # standing external position.
+        if prev_vol is None or abs(leftover - prev_vol) > max(1e-8, 0.005 * leftover):
+            self._surplus_seen[sym] = (leftover, now)
+            log.warning("%s: %s surplus %.8g is new/changed — adoption clock restarted "
+                        "(%ds to adopt)", pfx, sym, leftover, config.ADOPT_GRACE_SECS)
+            return
+        age = now - first_seen
+        if age < config.ADOPT_GRACE_SECS:
+            log.warning("%s: %s surplus %.8g stable for %ds — adopting in %ds if unclaimed",
+                        pfx, sym, leftover, int(age), int(config.ADOPT_GRACE_SECS - age))
+            return
+        mark = self._live_last(sym)
+        if not mark or mark <= 0:
+            log.error("%s: %s surplus %.8g ready to adopt but no live mark — retrying next pass",
+                      pfx, sym, leftover)
+            return
+        # Prefer the invalidation level this pair's own lots already sit on, so an
+        # adopted lot stops out WITH its siblings rather than at a lone level.
+        r = self.conn.execute(
+            "SELECT stop FROM orders WHERE symbol=? AND status='open' AND stop IS NOT NULL "
+            "ORDER BY id DESC LIMIT 1", (sym,)).fetchone()
+        stop = float(r[0]) if r and r[0] else self.compute_stop(sym, mark, None)
+        if stop >= mark:
+            # Siblings' level is already above the mark (this pair is under water):
+            # a stop resting there fires on contact. Fall back to a fresh stop under
+            # the mark and say so — late-honoring a level this lot never entered at
+            # would be an instant unasked-for market sell.
+            log.warning("%s: %s sibling stop %s is at/above mark %s — using a fresh stop "
+                        "below the mark for the adopted lot instead", pfx, sym, stop, mark)
+            stop = self.compute_stop(sym, mark, None)
+            if stop >= mark:
+                log.error("%s: %s cannot derive a stop below mark %s — NOT adopting", pfx, sym, mark)
+                return
+        lev = config.PER_PAIR_LEVERAGE.get(sym)
+        oid = store.insert_order(self.conn, {
+            "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            "symbol": sym, "margin_pair": margin_pair, "side": "buy", "ordertype": "adopted",
+            "mode": config.EXEC_MODE, "entry": mark, "stop": stop, "volume": leftover,
+            "leverage": lev, "notional": mark * leftover,
+            "margin": (mark * leftover / lev) if lev else None,
+            "status": "open",
+            "error": f"adopted untracked exchange volume (external position, "
+                     f"unclaimed {int(age)}s); entry is the mark at adoption, not a real fill",
+        })
+        self._surplus_seen.pop(sym, None)
+        log.warning("%s: %s ADOPTED untracked %.8g as row %d @ mark %s, stop %s — protect "
+                    "pass will rest its stop", pfx, sym, leftover, oid, mark, stop)
+        self._journal("recon", sym, f"adopted untracked {leftover:.8g} — row {oid}, stop {stop}")
+
     def _find_adoptable_stop(self, kr_open_orders, claimed, margin_pair, want_vol):
         """A protective stop that IS resting on Kraken's book for this pair but whose
         txid no ledger row tracks (a persist-race orphan: AddOrder landed, the DB write
@@ -1705,15 +1797,18 @@ class Executor:
         # landed, a manual position, another system). It has NO stop under our control.
         # Silently discarding it was how 'all_ok' overstated coherence. Loud, and it
         # degrades the pair's ok flag; relative threshold so lot-dust never false-alarms.
-        for (sym, _mp), leftover in budget.items():
+        for (sym, mp), leftover in budget.items():
             openvol = recon.get(sym, {}).get("openvol", 0.0) or 0.0
-            if leftover > max(1e-8, 0.005 * openvol):
-                recon[sym]["surplus"] = leftover
-                log.error("%s: %s has %.8g open volume on Kraken NO ledger row tracks — "
-                          "untracked position (no stop under our control)", pfx, sym, leftover)
-                self._journal("recon", sym, f"UNTRACKED exchange volume {leftover:.8g} — no ledger row")
-                self._safety("recon-mismatch", sym,
-                             f"{leftover:.8g} open volume on Kraken has no ledger row (no stop)")
+            if leftover <= max(1e-8, 0.005 * openvol):
+                self._surplus_seen.pop(sym, None)   # cleared -> forget the age history
+                continue
+            recon[sym]["surplus"] = leftover
+            log.error("%s: %s has %.8g open volume on Kraken NO ledger row tracks — "
+                      "untracked position (no stop under our control)", pfx, sym, leftover)
+            self._journal("recon", sym, f"UNTRACKED exchange volume {leftover:.8g} — no ledger row")
+            self._safety("recon-mismatch", sym,
+                         f"{leftover:.8g} open volume on Kraken has no ledger row (no stop)")
+            self._adopt_surplus(pfx, sym, mp, leftover)
         # ... including pairs with NO ledger rows at all (an exchange position on a pair
         # the loop above never visited — the fully-invisible case) and pairs outside the
         # config universe entirely (ghost pairs — 6 were dropped this week).

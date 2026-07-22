@@ -281,6 +281,18 @@ TP_PCT = 0.20
 # to the exchange and cancels provably-orphaned stops; it never blocks an entry.
 RUNTIME_RECON_SECS = 900
 
+# Adoption of untracked exchange volume. Reconcile has always DETECTED open volume no
+# ledger row tracks (manual position, another system) and shouted about it — but never
+# protected it, so it sat naked until someone noticed by hand (operator's manual
+# HYPE/NEAR buys, 2026-07-22: ~7h unstopped through a restart). Adoption gives it a
+# ledger row so the normal protect path rests a stop over it.
+# The grace window is the safety: volume this bot itself just filled must be claimed by
+# the userref/fill recovery, NOT adopted here, or one position ends up with two rows and
+# two stops. Any 'pending' row on the symbol blocks adoption outright; otherwise the
+# surplus must sit stable and unclaimed this long (>= one further reconcile) first.
+ADOPT_UNTRACKED = True
+ADOPT_GRACE_SECS = 1800
+
 # Margin-level watch (audit 2026-07-13 #2). Kraken margin-calls at ml<=80% and force-
 # liquidates from ml<=40% — bypassing every stop, invisibly to the ledger. This is
 # protection against the EXCHANGE seizing the book, not a self-brake:
