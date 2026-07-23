@@ -23,6 +23,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--exec-probe", action="store_true",
                    help="send validate=true orders for all pairs — prove the live order path without executing")
     p.add_argument("--exec-status", action="store_true", help="show execution config, rails, equity, recent orders")
+    p.add_argument("--trim", metavar="SYMBOL",
+                   help="operator deleverage: market-close a pair's open lots (e.g. NEAR/USD). "
+                        "STOP THE LIVE BOT FIRST — one process per API key.")
+    p.add_argument("--lots", type=int, default=None,
+                   help="with --trim: shed at most N lots (largest notional first; default: the whole line)")
     p.add_argument("--web", action="store_true", help="serve the read-only web console (localhost dashboard)")
     p.add_argument("--port", type=int, default=None,
                    help="web console port (with --web; default: DEEPFIELD_WEB_PORT or 8787)")
@@ -90,6 +95,26 @@ def main(argv=None) -> int:
             print("  ", r)
         conn.close()
         return 0
+    if args.trim:
+        import os
+        from . import store, broker, config, executor as ex
+        if os.popen("pgrep -f 'python -m deepfield$'").read().strip():
+            print("REFUSING: the live bot is running. Kraken's nonce is per API key and the "
+                  "rate counter is per ACCOUNT — a second process throttles the bot blind.\n"
+                  "Stop it first:  tmux kill-session -t deepfield")
+            return 1
+        if config.EXEC_MODE != "live" or not broker.keys_present():
+            print(f"REFUSING: EXEC_MODE={config.EXEC_MODE} keys={'present' if broker.keys_present() else 'MISSING'}")
+            return 1
+        sym = args.trim if "/" in args.trim else f"{args.trim.upper()}/USD"
+        conn = store.connect(config.DB_PATH)
+        res = ex.Executor(conn).trim_pair(sym, max_lots=args.lots)
+        conn.close()
+        print(f"trim {sym}: closed={res['closed']} failed={res['failed']} "
+              f"bids_canceled={res['bids_canceled']}")
+        if res["ml_before"] is not None and res["ml_after"] is not None:
+            print(f"  margin level {res['ml_before']:.0f}% -> {res['ml_after']:.0f}%")
+        return 1 if res["failed"] else 0
     if args.web:
         from .web import server
         from . import config

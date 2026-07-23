@@ -1048,6 +1048,95 @@ class Executor:
         except Exception:
             log.exception("reverse gear failed (poll_fills unaffected)")
 
+    def _cancel_pair_bids(self, sym):
+        """Cancel this pair's resting entry bids only (the symbol-scoped sibling of
+        _cancel_resting_bids). An operator trim sheds ONE line; canceling the whole
+        book's bids would be collateral damage, but leaving THIS pair's rungs resting
+        would let the ladder refill what was just shed. Best-effort, isolated."""
+        key = _REST_PAIR.get(sym, "")
+        oo = broker.open_orders()
+        if oo is None:
+            log.warning("TRIM %s: open-orders read failed — bids left resting", sym)
+            return 0
+        n = 0
+        for txid, o in oo.items():
+            d = o.get("descr") or {}
+            if d.get("type") != "buy" or _norm_pair_key(d.get("pair", "")) != key:
+                continue
+            broker.cancel_order(txid)
+            n += 1
+        if n:
+            self.conn.execute("UPDATE orders SET status='canceled', "
+                              "error='operator trim: bid canceled to stop refill' "
+                              "WHERE status='pending' AND mode=? AND symbol=?", (self.mode, sym))
+            self.conn.commit()
+            self._journal("trim", sym, f"canceled {n} resting bid(s) so the ladder can't refill")
+        return n
+
+    def trim_pair(self, sym, max_lots=None):
+        """OPERATOR TRIM: shed a named pair's open lots on demand — the manual
+        counterpart to _reverse_gear, which only fires off the liq buffer and picks
+        lots book-wide. Same per-lot primitive (_close_lot: cancel stop -> market
+        close capped at live net long -> retire row), so a trim can never leave an
+        oversized stop, a naked lot, or a net short.
+
+        RUN THIS ONLY WITH THE LIVE BOT STOPPED. Kraken's nonce is per API key and
+        the rate counter is per ACCOUNT: a second process on the same key collides
+        nonces and throttles the running bot blind (2026-07-19 incident).
+
+        Largest notional first; max_lots=None sheds the whole line. Returns a summary
+        dict. Never raises."""
+        out = {"symbol": sym, "closed": 0, "failed": 0, "bids_canceled": 0,
+               "ml_before": None, "ml_after": None}
+        if self.mode != "live":
+            log.error("TRIM %s: EXEC_MODE=%s — live only", sym, self.mode)
+            return out
+        rows = self.conn.execute(
+            "SELECT id, symbol, margin_pair, volume, leverage, stop_txid, "
+            "COALESCE(notional,0) FROM orders WHERE status='open' AND mode=? AND symbol=? "
+            "ORDER BY COALESCE(notional,0) DESC, volume DESC", (self.mode, sym)).fetchall()
+        if max_lots is not None:
+            rows = rows[:max_lots]
+        if not rows:
+            log.warning("TRIM %s: no open lots", sym)
+            return out
+        out["ml_before"] = self._margin_level(broker.trade_balance_full())
+        log.warning("TRIM %s: operator-requested — shedding %d lot(s), margin level %s",
+                    sym, len(rows), f"{out['ml_before']:.0f}%" if out["ml_before"] else "unknown")
+        out["bids_canceled"] = self._cancel_pair_bids(sym)   # stop the refill before shedding
+        for r in rows:
+            lot = {"id": r[0], "symbol": r[1], "margin_pair": r[2], "volume": r[3],
+                   "leverage": r[4], "stop_txid": r[5], "notional": r[6]}
+            if self._close_lot(lot):
+                out["closed"] += 1
+            else:
+                out["failed"] += 1
+                log.error("TRIM %s: lot %d failed — stopping (reprotect re-arms next cycle)",
+                          sym, lot["id"])
+                break                    # a failed close means stale state; don't keep selling
+        out["ml_after"] = self._margin_level(broker.trade_balance_full())
+        msg = f"operator trim {sym}: shed {out['closed']} lot(s)"
+        if out["failed"]:
+            msg += f", {out['failed']} FAILED"
+        if out["ml_before"] is not None and out["ml_after"] is not None:
+            msg += f" — margin level {out['ml_before']:.0f}% -> {out['ml_after']:.0f}%"
+        self._safety("trim", sym, msg)
+        return out
+
+    def _margin_level(self, bal):
+        """Margin level % (equity / used margin) from a live TradeBalance. None on a
+        bad/unknown read or a flat book — never a fabricated 0."""
+        if not bal:
+            return None
+        try:
+            e = broker.equity(bal)
+            m = float(bal.get("m") or 0)
+        except (TypeError, ValueError):
+            return None
+        if e is None or m <= 0:
+            return None
+        return 100.0 * e / m
+
     # ── equity take-profit (operator 2026-07-13) ─────────────────────────────
 
     def _check_take_profit(self):
