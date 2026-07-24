@@ -360,6 +360,7 @@ def _assemble(conn):
         "ghost_pairs": ghost,                          # W10
         # T/P cycle + fee drag (new blob keys — absent in old blobs, degrade to null)
         "tp_baseline": live.get("tp_baseline"), "tp_target": live.get("tp_target"),
+        "tp_trough": live.get("tp_trough"),
         "fees_day": live.get("fees_day"), "fees_total": live.get("fees_total"),
         # Liq-buffer telemetry. Wave 1 has published these into the blob since
         # a5e2d39 but this allowlist never forwarded them, so the console showed

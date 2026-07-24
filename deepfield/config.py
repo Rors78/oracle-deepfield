@@ -270,6 +270,11 @@ SEED_PAIRS = tuple(p["ws"] for p in PAIRS)
 # tp_baseline is DEPOSIT-SHIFTED (app._poll_external_flows): net USD deposits/
 # withdrawals detected on the Ledgers API move the baseline the same amount, so
 # +TP_PCT always measures TRADING profit, never money walking in the door.
+# The TARGET is TROUGH-RATCHETED (operator 2026-07-24): meta['tp_trough'] tracks
+# the equity low since arm and the flatten fires at min(baseline, trough) *
+# (1+TP_PCT), so a drawdown can never park the target out of reach while fees
+# bleed. The baseline itself never ratchets — the tp_cycles ledger still books
+# profit against it, so a trough-fire below baseline records an honest red cycle.
 TP_ENABLED = True
 TP_PCT = 0.20
 

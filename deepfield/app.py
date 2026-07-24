@@ -261,6 +261,27 @@ def _poll_external_flows(c, broker, now):
                     "contains the flow)", net)
         return
     c.commit()
+    # The trough ratchet (executor _check_take_profit, 2026-07-24) measures the
+    # same trading-equity dollars as the baseline — shift it by the same net, with
+    # the same CAS-skip semantics: if the executor ratcheted concurrently, the
+    # trough it wrote came from a post-flow equity read and already contains this
+    # flow. A withdrawal must shift the trough or the equity dip it causes would
+    # be double-counted (once here on the baseline, once by the ratchet).
+    raw_trough = store.meta_get(c, "tp_trough", None)
+    trough = 0.0
+    try:
+        trough = float(raw_trough or 0)
+    except (TypeError, ValueError):
+        pass
+    if trough > 0:
+        newt = trough + net
+        tcur = c.execute("UPDATE meta SET value=? WHERE key='tp_trough' AND value=?",
+                         (("0.0" if new <= 0 or newt <= 0 else str(round(newt, 4))),
+                          raw_trough))
+        c.commit()
+        if tcur.rowcount == 0:
+            log.info("T/P trough shift $%+.2f skipped — ratcheted underneath "
+                     "(post-flow equity already contains it)", net)
     store.meta_set(c, "tp_cycle_flows", round(_mf("tp_cycle_flows") + net, 4))
     log.warning("T/P BASELINE SHIFTED by external flow $%+.2f (%d ledger entr%s): "
                 "$%.2f -> $%.2f, target %s — trading-profit-only trigger",
@@ -850,6 +871,11 @@ def _persist_web_live(conn, appstate, equity, margin_used, free_margin, balance)
         except Exception:
             return None
     tpb = _mg("tp_baseline")
+    # Effective T/P base is min(baseline, trough) — the trough ratchet keeps the
+    # target reachable after a drawdown while the baseline stays the ledger's
+    # profit yardstick (executor._check_take_profit).
+    tptr = _mg("tp_trough")
+    tp_eff = min(tpb, tptr) if (tpb and tptr) else tpb
     # Defense telemetry (Wave 1) for the web dashboard's future health band. inf
     # (flat book) -> None so the blob stays STRICT JSON (JS JSON.parse rejects
     # Infinity); a JS reader treats None as "no positions / no risk".
@@ -868,7 +894,8 @@ def _persist_web_live(conn, appstate, equity, margin_used, free_margin, balance)
         "prices": prices, "chg": chg, "links": links,
         "mode": config.EXEC_MODE, "started": appstate.started_ts, "updated": _t.time(),
         "tp_baseline": round(tpb, 2) if tpb else None,
-        "tp_target": round(tpb * (1 + config.TP_PCT), 2) if tpb else None,
+        "tp_trough": round(tptr, 2) if tptr else None,
+        "tp_target": round(tp_eff * (1 + config.TP_PCT), 2) if tp_eff else None,
         "fees_day": _mg("fees_day"), "fees_total": _mg("fees_total"),
         "buffer_liq_pct": _finite(dfn.get("buffer_liq_pct")),
         "buffer_call_pct": _finite(dfn.get("buffer_call_pct")),

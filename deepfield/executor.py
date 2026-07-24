@@ -108,6 +108,10 @@ _recon_next = 0.0
 # ts = paused since. Operator ALERTING for the danger now lives in the price-space
 # defense engine (app._run_defense); this stays a quiet book-state journal note.
 _stack_pause_since = None
+# T/P trough-ratchet narration: module-level for the same rebuilt-per-cycle reason.
+# Tracks the last JOURNALED trough so the ratchet note is edge-triggered on ≥1%
+# steps down, not written on every poll of a sliding decline.
+_tp_trough_noted = None
 # Ambiguous-AddOrder recovery: rows born from a network-unknown AddOrder carry a
 # userref and txid NULL; give Kraken this long to show the order before concluding
 # it never landed (poll cadence is ~15s, so this is ~20 attempts).
@@ -1151,6 +1155,7 @@ class Executor:
         simply re-fires next poll; a partial flatten leaves unclosed rows protected
         (stops intact) or reprotectable (stop_txid NULL -> _reprotect_naked_open).
         Isolated — never raises into poll_fills."""
+        global _tp_trough_noted
         if self.mode != "live" or not getattr(config, "TP_ENABLED", False):
             return False
         try:
@@ -1172,17 +1177,47 @@ class Executor:
                     if eq is None:
                         return False
                     store.meta_set(self.conn, "tp_baseline", eq)
+                    store.meta_set(self.conn, "tp_trough", eq)
                     store.meta_set(self.conn, "tp_cycle_flows", 0.0)
+                    _tp_trough_noted = None
                     log.warning("T/P ARMED: baseline $%.2f — flatten-everything target $%.2f (+%.0f%%)",
                                 eq, eq * (1 + config.TP_PCT), config.TP_PCT * 100)
                     self._journal("tp", "*", f"T/P armed: baseline ${eq:.2f}, "
                                              f"target ${eq * (1 + config.TP_PCT):.2f}")
                     return False
-                target = baseline * (1 + config.TP_PCT)
+                # Trough ratchet (operator 2026-07-24): the target used to stay
+                # parked at baseline*(1+TP_PCT) through any drawdown — unreachable
+                # for months while fees bleed (audit 2026-07-13 #2). Track the
+                # equity low since arm and fire off min(baseline, trough) instead.
+                # The baseline itself is NEVER ratcheted: the cycle ledger keeps
+                # booking TRUE profit against it (a trough-fire below baseline
+                # books an honest red cycle), and the flow poller's CAS on
+                # tp_baseline keeps its "changed underneath = cycle completed"
+                # meaning. Ratchet is skipped while a flatten owns the book —
+                # mid-chase equity is half-settled noise, not a trading trough.
+                trough = 0.0
+                try:
+                    trough = float(store.meta_get(self.conn, "tp_trough", 0) or 0)
+                except (TypeError, ValueError):
+                    pass
+                if trough <= 0 or trough > baseline:
+                    trough = baseline       # pre-ratchet meta, or clamp after a shift
+                if eq < trough - 0.005:
+                    trough = eq
+                    store.meta_set(self.conn, "tp_trough", eq)
+                    if _tp_trough_noted is None or trough <= _tp_trough_noted * 0.99:
+                        _tp_trough_noted = trough
+                        log.warning("T/P trough ratchet: equity low $%.2f — target now "
+                                    "$%.2f (baseline $%.2f stays the profit yardstick)",
+                                    trough, trough * (1 + config.TP_PCT), baseline)
+                        self._journal("tp", "*", f"trough ratchet: ${trough:.2f} — "
+                                                 f"target ${trough * (1 + config.TP_PCT):.2f}")
+                base_eff = min(baseline, trough)
+                target = base_eff * (1 + config.TP_PCT)
                 if eq < target:
                     return False
-                log.warning("T/P HIT: equity $%.2f >= target $%.2f (baseline $%.2f) — "
-                            "FLATTENING THE BOOK (post-only limit closes)", eq, target, baseline)
+                log.warning("T/P HIT: equity $%.2f >= target $%.2f (baseline $%.2f · trough $%.2f) — "
+                            "FLATTENING THE BOOK (post-only limit closes)", eq, target, baseline, base_eff)
                 self._journal("tp", "*", f"T/P HIT: ${eq:.2f} >= ${target:.2f} — flattening")
                 store.meta_set(self.conn, "tp_flatten_active", "1")
             ran, complete = self._flatten_all()
@@ -1205,15 +1240,24 @@ class Executor:
             except (TypeError, ValueError):
                 flows = 0.0
             profit = new_eq - baseline
+            note = "limit flatten"
+            try:
+                _tr = float(store.meta_get(self.conn, "tp_trough", 0) or 0)
+                if 0 < _tr < baseline - 0.005:
+                    note = f"limit flatten · fired off trough ${_tr:.2f}"
+            except (TypeError, ValueError):
+                pass
             try:
                 store.tp_cycle_add(
                     self.conn, datetime.datetime.now(datetime.timezone.utc).isoformat(),
-                    baseline, new_eq, flows, profit, note="limit flatten")
+                    baseline, new_eq, flows, profit, note=note)
             except Exception:
                 log.exception("T/P ledger write failed (cycle still completes)")
             store.meta_set(self.conn, "tp_baseline", new_eq)
+            store.meta_set(self.conn, "tp_trough", new_eq)
             store.meta_set(self.conn, "tp_cycle_flows", 0.0)
             store.meta_set(self.conn, "tp_flatten_active", "0")
+            _tp_trough_noted = None
             log.warning("T/P CYCLE COMPLETE: baseline $%.2f -> settled $%.2f · trading "
                         "profit $%+.2f (external flows $%+.2f rode along) — seeder "
                         "restacks next cycle", baseline, new_eq, profit, flows)

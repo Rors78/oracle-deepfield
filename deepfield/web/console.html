@@ -712,7 +712,7 @@ function renderHero(h){
     <div class="eqhead">
       <div><span class="eqk">${eqLive?'Equity':'Peak equity (live on next bot cycle)'}</span>
         <span class="eqbig" id="eqbig">$${(eqMain||0).toFixed(2)}</span>
-        <div class="eqsub">peak $${(h.peak||0).toFixed(2)}${h.tp_baseline!=null?` · baseline $${(+h.tp_baseline).toFixed(2)}`:""}${h.tp_target!=null?` · T/P <span class="gain">$${(+h.tp_target).toFixed(2)}</span>${eqLive&&h.equity>0?` <span class="dim">(+${((h.tp_target/h.equity-1)*100).toFixed(1)}% away)</span>`:""}`:""}</div>
+        <div class="eqsub">peak $${(h.peak||0).toFixed(2)}${h.tp_baseline!=null?` · baseline $${(+h.tp_baseline).toFixed(2)}`:""}${h.tp_trough!=null&&h.tp_baseline!=null&&h.tp_trough<h.tp_baseline?` · trough $${(+h.tp_trough).toFixed(2)}`:""}${h.tp_target!=null?` · T/P <span class="gain">$${(+h.tp_target).toFixed(2)}</span>${eqLive&&h.equity>0?` <span class="dim">(+${((h.tp_target/h.equity-1)*100).toFixed(1)}% away)</span>`:""}`:""}</div>
       </div>
       <div class="eqdelta ${opnl>=0?'gain':'loss'}"><small>Open P&L</small><span id="eqopnl">${fmtUsd(opnl)}</span></div>
       <div class="eqdelta ${(sw||0)>=0?'gain':'loss'}"><small>Today · swing</small><span id="eqswing">${sw==null?'—':fmtUsd(sw)}</span></div>

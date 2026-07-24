@@ -1361,6 +1361,95 @@ def test_tp_failed_close_keeps_baseline_and_reprotectable_rows(tmp_path, monkeyp
     conn.close()
 
 
+# ── T/P trough ratchet (operator 2026-07-24) ─────────────────────────────────
+
+def test_tp_trough_ratchets_down_never_up(tmp_path, monkeypatch):
+    """A drawdown pulls tp_trough to the equity low; a recovery leaves it there.
+    The baseline is never touched — it stays the ledger's profit yardstick."""
+    conn = _conn(tmp_path)
+    store.meta_set(conn, "tp_baseline", 100.0)
+    sent = []
+    _wire_tp(monkeypatch, equity=80.0, positions={}, open_orders={}, terminal={}, sent=sent)
+    e = _exec(conn, mode="live")
+    assert e._check_take_profit() is False
+    assert float(store.meta_get(conn, "tp_trough")) == 80.0
+    _wire_tp(monkeypatch, equity=90.0, positions={}, open_orders={}, terminal={}, sent=sent)
+    assert e._check_take_profit() is False
+    assert float(store.meta_get(conn, "tp_trough")) == 80.0        # sticks at the low
+    assert float(store.meta_get(conn, "tp_baseline")) == 100.0     # untouched
+    conn.close()
+
+
+def test_tp_arm_seeds_trough_at_baseline(tmp_path, monkeypatch):
+    conn = _conn(tmp_path)
+    sent = []
+    _wire_tp(monkeypatch, equity=100.0, positions={}, open_orders={}, terminal={}, sent=sent)
+    e = _exec(conn, mode="live")
+    assert e._check_take_profit() is False
+    assert float(store.meta_get(conn, "tp_trough")) == 100.0
+    conn.close()
+
+
+def test_tp_fires_off_trough_and_books_red_cycle(tmp_path, monkeypatch):
+    """After a drawdown the target is min(baseline, trough)*(1+TP_PCT): equity 80
+    ratchets the trough, a bounce to 96.5 (>= 80*1.2) fires the flatten even
+    though it is below the 100 baseline — and the cycle row books the honest
+    LOSS against the baseline, noting the trough it fired from."""
+    conn = _conn(tmp_path)
+    store.meta_set(conn, "tp_baseline", 100.0)
+    sent = []
+    _wire_tp(monkeypatch, equity=80.0, positions={}, open_orders={}, terminal={}, sent=sent)
+    e = _exec(conn, mode="live")
+    assert e._check_take_profit() is False                         # ratchet only
+    a = _seed_open(conn, "OSTOP-A", vol=0.5)
+    _wire_tp(monkeypatch, equity=96.5, positions={"P": _pos(0.5)}, open_orders={},
+             terminal={}, sent=sent, bid=64990.0, ask=65000.0)
+    assert e._check_take_profit() is True                          # fired off the trough
+    assert store.meta_get(conn, "tp_flatten_active") == "1"
+    # close filled → settle
+    _wire_tp(monkeypatch, equity=96.0, positions={}, open_orders={},
+             terminal={"OCLOSE-1": {"status": "closed"}}, sent=sent)
+    assert e._check_take_profit() is True
+    ts, base, settled, flows, profit, note = store.tp_cycles_list(conn, 1)[0]
+    assert (base, settled) == (100.0, 96.0)
+    assert abs(profit - (-4.0)) < 1e-9                             # honest red
+    assert "trough $80.00" in note
+    assert float(store.meta_get(conn, "tp_baseline")) == 96.0
+    assert float(store.meta_get(conn, "tp_trough")) == 96.0        # re-seeded
+    conn.close()
+
+
+def test_tp_no_ratchet_while_flatten_active(tmp_path, monkeypatch):
+    """Mid-chase equity is half-settled noise — the trough must not ratchet while
+    the flatten owns the book."""
+    conn = _conn(tmp_path)
+    store.meta_set(conn, "tp_baseline", 100.0)
+    store.meta_set(conn, "tp_trough", 90.0)
+    store.meta_set(conn, "tp_flatten_active", "1")
+    a = _seed_open(conn, "OSTOP-A", vol=0.5)
+    sent = []
+    _wire_tp(monkeypatch, equity=50.0, positions={"P": _pos(0.5)}, open_orders={},
+             terminal={}, sent=sent)
+    e = _exec(conn, mode="live")
+    assert e._check_take_profit() is True                          # flatten pass ran
+    assert float(store.meta_get(conn, "tp_trough")) == 90.0        # untouched
+    conn.close()
+
+
+def test_tp_trough_above_baseline_clamps(tmp_path, monkeypatch):
+    """A stale trough above the baseline (e.g. after a withdrawal shifted the
+    baseline below it) clamps to the baseline — target never exceeds
+    baseline*(1+TP_PCT)."""
+    conn = _conn(tmp_path)
+    store.meta_set(conn, "tp_baseline", 100.0)
+    store.meta_set(conn, "tp_trough", 140.0)
+    sent = []
+    _wire_tp(monkeypatch, equity=120.0, positions={}, open_orders={}, terminal={}, sent=sent)
+    e = _exec(conn, mode="live")
+    assert e._check_take_profit() is True                          # 120 >= 100*1.2
+    conn.close()
+
+
 # ── deposit-aware T/P baseline (app._poll_external_flows, 2026-07-21) ────────
 
 def _flows_stub(net, count=1, complete=True):
@@ -1409,6 +1498,41 @@ def test_external_withdrawal_wiping_baseline_clears_it(tmp_path):
     app_mod._poll_external_flows(conn, _flows_stub(-150.0),
                                  _dt.datetime.now(_dt.timezone.utc))
     assert float(store.meta_get(conn, "tp_baseline")) == 0.0
+    conn.close()
+
+
+def test_external_flow_shifts_trough_with_baseline(tmp_path):
+    """The trough measures the same trading-equity dollars as the baseline: a
+    deposit/withdrawal shifts both, else the flow would double-count against the
+    ratchet (withdrawal dips equity → ratchet takes it → baseline shift takes it
+    again)."""
+    from deepfield import app as app_mod
+    import datetime as _dt
+    conn = _conn(tmp_path)
+    store.meta_set(conn, "tp_baseline", 100.0)
+    store.meta_set(conn, "tp_trough", 70.0)
+    store.meta_set(conn, "flows_cursor", 123.0)
+    now = _dt.datetime.now(_dt.timezone.utc)
+    app_mod._poll_external_flows(conn, _flows_stub(20.0), now)
+    assert float(store.meta_get(conn, "tp_baseline")) == 120.0
+    assert float(store.meta_get(conn, "tp_trough")) == 90.0
+    app_mod._poll_external_flows(conn, _flows_stub(-5.0), now)
+    assert float(store.meta_get(conn, "tp_baseline")) == 115.0
+    assert float(store.meta_get(conn, "tp_trough")) == 85.0
+    conn.close()
+
+
+def test_external_withdrawal_clearing_baseline_clears_trough(tmp_path):
+    from deepfield import app as app_mod
+    import datetime as _dt
+    conn = _conn(tmp_path)
+    store.meta_set(conn, "tp_baseline", 100.0)
+    store.meta_set(conn, "tp_trough", 70.0)
+    store.meta_set(conn, "flows_cursor", 123.0)
+    app_mod._poll_external_flows(conn, _flows_stub(-150.0),
+                                 _dt.datetime.now(_dt.timezone.utc))
+    assert float(store.meta_get(conn, "tp_baseline")) == 0.0
+    assert float(store.meta_get(conn, "tp_trough")) == 0.0
     conn.close()
 
 
