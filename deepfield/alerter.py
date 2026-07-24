@@ -165,15 +165,28 @@ def test_alert(conn):
 _safety_last = {}    # (kind, symbol) -> time.monotonic() of last fired
 
 
-def fire_safety(kind, symbol, message):
+def fire_safety(kind, symbol, message, loud=None):
     """Money-path safety event -> sound + notify-send (+ telegram iff configured).
     kind: unprotected | recon-mismatch | margin-level | tp | stop-fired | ...
     Throttled per (kind, symbol) by config.SAFETY_ALERT_THROTTLE_SECS. NEVER
     raises into the caller (money path) and takes no DB connection — journaling
-    is the caller's job (executor._journal already covers it)."""
+    is the caller's job (executor._journal already covers it).
+
+    QUIET vs LOUD (2026-07-24, operator): kinds in config.SAFETY_ALERT_QUIET_KINDS
+    are chronic STATES, not events — they log at WARNING and stay in the journal and
+    on the dashboard, but make no sound and raise no popup, because re-paging a
+    persisting condition on a timer trains the operator to ignore the channel. Pass
+    loud=True to escalate a quiet kind for one call (the margin-level watch does this
+    when the level reaches the exchange's seizure band); loud=False forces quiet.
+    An unrecognised kind is LOUD — a new event type must opt IN to silence, never
+    inherit it."""
     import time as _t
     try:
-        throttle = float(getattr(config, "SAFETY_ALERT_THROTTLE_SECS", 1800) or 0)
+        quiet_kinds = tuple(getattr(config, "SAFETY_ALERT_QUIET_KINDS", ()) or ())
+        if loud is None:
+            loud = kind not in quiet_kinds
+        throttle = float((getattr(config, "SAFETY_ALERT_THROTTLE_SECS", 1800) if loud
+                          else getattr(config, "SAFETY_ALERT_QUIET_THROTTLE_SECS", 21600)) or 0)
         key = (kind, symbol or "*")
         now = _t.monotonic()
         if throttle > 0 and now - _safety_last.get(key, -throttle) < throttle:
@@ -181,6 +194,11 @@ def fire_safety(kind, symbol, message):
             return None
         _safety_last[key] = now
         text = f"DEEPFIELD SAFETY [{kind}] {symbol or ''}: {message}"
+        if not loud:
+            # Logged and journaled, deliberately silent. Still a WARNING so it is
+            # greppable and lands in the console feed exactly like a loud one.
+            log.warning("SAFETY (quiet) kind=%s symbol=%s — %s", kind, symbol, message)
+            return {"sound": None, "notify": False, "telegram": None, "quiet": True}
         sound_tier = play_alert()
         notified = False
         if shutil.which("notify-send"):

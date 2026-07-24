@@ -705,6 +705,9 @@ def _run_defense(conn, balance, equity, margin_used, now):
         return None
 
 
+_ml_worst_bucket = None   # worst 5-point margin-level bucket paged since the last recovery
+
+
 def _check_margin_level(conn, balance):
     """Page when KRAKEN'S OWN margin level approaches the exchange's seizure band.
 
@@ -738,13 +741,34 @@ def _check_margin_level(conn, balance):
             lvl = None
         if lvl is None or lvl != lvl or lvl <= 0:
             return None                      # unknown -> never page on a bad read
-        if floor <= 0 or lvl >= floor:       # 0 disables
+        global _ml_worst_bucket
+        if floor <= 0:                       # 0 disables
+            return lvl
+        if lvl >= floor:
+            # Re-arm only on a REAL recovery, not on a touch of the floor. A level
+            # hovering at the boundary (110 <-> 120 overnight on 07-23) would otherwise
+            # re-arm on every wobble up and re-page on every wobble down.
+            rearm = floor * float(getattr(config, "MARGIN_LEVEL_REARM_RATIO", 1.15) or 1.0)
+            if lvl >= rearm:
+                _ml_worst_bucket = None
             return lvl
         bucket = int(lvl // 5) * 5           # a new key every 5 points down
+        # Only page on a WORSENING slide. Previously any bucket got its own throttle
+        # window, so a level oscillating across a boundary (110 <-> 115 all night on
+        # 2026-07-23) alternated two keys and paged at ~half the intended interval —
+        # the same condition, twice as loud. Ratcheting on the worst bucket seen means
+        # a wobble is silent and a genuine deterioration still pages immediately.
+        if _ml_worst_bucket is not None and bucket >= _ml_worst_bucket:
+            return lvl
+        _ml_worst_bucket = bucket
         text = (f"margin level {lvl:.0f}% below alert floor {floor:.0f}% — "
                 f"Kraken margin-calls at 80%, force-liquidates from 40%")
         _journal_safe(conn, "defense", "*", text)
-        alerter.fire_safety("margin-level", f"ml{bucket}", text)
+        # Under the floor is a dashboard fact; at the seizure band it is a wake-the-
+        # operator fact. Only the latter makes noise (config.MARGIN_LEVEL_LOUD_PCT).
+        loud_pct = float(getattr(config, "MARGIN_LEVEL_LOUD_PCT", 0) or 0)
+        alerter.fire_safety("margin-level", f"ml{bucket}", text,
+                            loud=(loud_pct > 0 and lvl < loud_pct))
         return lvl
     except Exception:
         log.exception("margin-level watch failed (alert/display only — trade path unaffected)")

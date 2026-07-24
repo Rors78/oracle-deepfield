@@ -416,6 +416,34 @@ REVERSE_GEAR_CANCEL_BIDS = True     # cancel resting entry bids on fire so they 
 # retry loop can't turn the speaker into a siren. 0 disables throttling (every event).
 SAFETY_ALERT_THROTTLE_SECS = 1800
 
+# 2026-07-24 (operator: "calm the notify-send alerts down, they are annoying"). The
+# channel was routing EVENTS and STATES identically: every kind got a `-u critical`
+# popup plus a sound. A state that persists (margin level under the floor) then re-paged
+# on a repeat timer all night — worse, the ml bucket key is per-5-points, so a level
+# wobbling across a boundary (110 <-> 115 overnight on 07-23) alternated two throttle
+# keys and paged at ~half the nominal window. Nothing was wrong that a popup could fix:
+# the operator watches the console 24/7 ([[no-alerting-suggestions]]), so a chronic
+# state belongs in the log + journal + dashboard, not in the speaker.
+# QUIET kinds still log at WARNING and still journal — they just don't make noise or
+# raise a popup. Anything a human must act on RIGHT NOW (a naked leveraged long, a
+# fired stop, a ledger/exchange mismatch) stays loud and is deliberately not listed.
+SAFETY_ALERT_QUIET_KINDS = ("margin-level", "trim", "tp")
+SAFETY_ALERT_QUIET_THROTTLE_SECS = 21600   # 6h; log-only, so a long window costs nothing
+
+# margin-level escapes the quiet list and goes loud below this — the alert floor (120)
+# is "getting tight", which is a dashboard fact; THIS is "the exchange is about to take
+# the book", which is a wake-the-operator fact. Kraken calls at 80% / liquidates from
+# 40%, and the 2026-07-16 near-margin-call ran 106-115%, so 100 sits below routine
+# tightness and above the band where it stops being recoverable. 0 = never escalate.
+MARGIN_LEVEL_LOUD_PCT = 100
+
+# Re-arm hysteresis for the worsening-slide ratchet. Recovering to EXACTLY the alert
+# floor must not re-arm the watch: the 07-23 overnight wobble ran 110 <-> 120 against a
+# floor of 120, so a bare floor crossing would re-arm and re-page on the very next dip —
+# the ratchet would have been decorative. Require a real recovery (1.15x floor = ml 138)
+# before the same slide counts as news again.
+MARGIN_LEVEL_REARM_RATIO = 1.15
+
 # Rollover-fee accounting (audit 2026-07-13 #2): Kraken charges 0.01-0.05% of notional
 # per 4h to hold a margin position. Poll the Ledgers API for rollover/margin entries
 # at this cadence and accumulate the paid fees into meta (fees_total / fees_day) so
