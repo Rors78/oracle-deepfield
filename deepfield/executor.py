@@ -414,16 +414,51 @@ class Executor:
         except Exception:
             log.exception("stack-pause note failed (trade path unaffected)")
 
-    def place_entry(self, symbol, entry_price, card):
+    def _respend_budget_ok(self, notional):
+        """Respend-RATE throttle: a leaky bucket over new book-growth notional
+        (seeds + rungs). Returns (ok, reason, debit). Call debit() ONLY after the
+        order actually rests, so a post-only-killed bid never burns budget. FAILS
+        OPEN: disabled, or any unreadable state, allows (operator no-blockers
+        stance). Confirmed-BUY signals never reach here (respend=False). The
+        bucket lives in meta so it survives the per-cycle Executor rebuild and
+        restarts, same as the stack-floor's web_live read. Never raises into the
+        money path."""
+        rate = float(getattr(config, "RESPEND_BUDGET_USD_PER_HR", 0) or 0)
+        if rate <= 0:
+            return True, "", (lambda: None)                    # OFF — fail open
+        try:
+            burst = float(getattr(config, "RESPEND_BURST_USD", 0) or 0) or rate
+            now = time.time()
+            b = json.loads(store.meta_get(self.conn, "respend_bucket") or "{}")
+            tokens = min(burst, float(b.get("tokens", burst))
+                         + max(0.0, now - float(b.get("updated", now))) * rate / 3600.0)
+            if tokens + 1e-9 < notional:
+                store.meta_set(self.conn, "respend_bucket",
+                               json.dumps({"tokens": tokens, "updated": now}))
+                return (False, f"respend paced: bucket ${tokens:.0f} < ${notional:.0f} "
+                               f"(rate ${rate:g}/hr) — letting the cushion breathe",
+                        (lambda: None))
+
+            def _debit():
+                bb = json.loads(store.meta_get(self.conn, "respend_bucket") or "{}")
+                t = min(burst, float(bb.get("tokens", burst)))
+                store.meta_set(self.conn, "respend_bucket",
+                               json.dumps({"tokens": max(0.0, t - notional), "updated": now}))
+            return True, "", _debit
+        except Exception:
+            log.exception("respend budget check failed — failing open")
+            return True, "", (lambda: None)
+
+    def place_entry(self, symbol, entry_price, card, respend=False):
         if self.mode == "off":
             return None
         try:
-            return self._place_entry(symbol, entry_price, card)
+            return self._place_entry(symbol, entry_price, card, respend=respend)
         except Exception:
             log.exception("executor.place_entry failed for %s (never kills the writer)", symbol)
             return None
 
-    def _place_entry(self, symbol, entry_price, card):
+    def _place_entry(self, symbol, entry_price, card, respend=False):
         if symbol not in config.MARGIN_PAIR:
             log.error("no :BTNL margin pair for %s — cannot execute", symbol)
             return None
@@ -466,6 +501,16 @@ class Executor:
                       "ceiling $%.2f — not sending (sanity guard, not a rail; check the pairs "
                       "row / EXEC_SIZE_MODE)", symbol, sizing["notional"], cmult, smult, ceiling)
             return None
+
+        # Respend-rate throttle (seeds/rungs only; signals pass respend=False and
+        # bypass). Meters new book-growth notional so a T/P cushion re-levers over
+        # days, not hours. debit() is called only once the bid definitely rests.
+        debit = (lambda: None)
+        if respend:
+            ok_b, why_b, debit = self._respend_budget_ok(sizing["notional"])
+            if not ok_b:
+                log.info("EXEC %s: %s", symbol, why_b)
+                return None
 
         margin_pair = config.MARGIN_PAIR[symbol]
         tick = config.MARGIN_TICK_DECIMALS.get(symbol, 2)
@@ -537,6 +582,7 @@ class Executor:
         if res and res.get("txid"):
             row["txid"] = res["txid"][0]
             row["status"] = "pending"
+            debit()                                  # respend budget: the bid rests
             log.info("ENTRY %s: limit resting @ %s (pending fill) %s", symbol, px, row["txid"])
             conv = f" · {cmult:g}x conviction" if cmult > 1.0 else ""
             self._journal("order", symbol, f"{row['volume']:g} entry limit resting @ {px} (pending){conv}")
@@ -880,7 +926,7 @@ class Executor:
                 log.info("SEED %s: no chain working — starting ladder with a post-only "
                          "bid below live %s", sym, live)
                 self._journal("order", sym, f"seed: starting chain below live {live:g}")
-                self.place_entry(sym, live, card=None)
+                self.place_entry(sym, live, card=None, respend=True)
         except Exception:
             log.exception("seed pass failed (poll_fills unaffected)")
 
@@ -1615,6 +1661,12 @@ class Executor:
                 log.error("LADDER %s REFUSED: rung notional $%.2f exceeds %gx-conviction x %gx-size "
                           "ceiling $%.2f", symbol, sizing["notional"], cmult, smult, ceiling)
                 return
+            # Respend-rate throttle: rungs grow the book, so they meter the same as
+            # seeds (debit only once the rung definitely rests). Signals never ladder.
+            ok_b, why_b, debit = self._respend_budget_ok(sizing["notional"])
+            if not ok_b:
+                log.info("LADDER %s: %s", symbol, why_b)
+                return
             vol = sizing["volume"]
             userref = _new_userref()
             params = {"pair": margin_pair, "type": "buy", "ordertype": "limit",
@@ -1649,6 +1701,7 @@ class Executor:
                 return
             row["txid"] = res["txid"][0]
             store.insert_order(self.conn, row)
+            debit()                                  # respend budget: the rung rests
             conv_tag = f", {cmult:g}x conviction" if cmult > 1.0 else ""
             log.info("LADDER %s: next rung resting @ %s (%.6g%s) — one step below fill %s",
                      symbol, target, vol, conv_tag, filled_price)

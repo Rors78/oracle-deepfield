@@ -332,6 +332,24 @@ MARGIN_LEVEL_ALERT_PCT = 120
 # 106% (7% from trouble). See deepfield/backtest_ladder.py and STRESS_* below.
 MARGIN_LEVEL_STACK_FLOOR_PCT = 200
 
+# ── Respend governor (respend-RATE throttle) ────────────────────────────────
+# The stack floor above is a BINARY gate: below it seeds/rungs hard-pause, above
+# it they redeploy at full cadence. That cliff is why a fresh T/P cushion (a
+# flatten leaves ml ~400%+) re-levers straight back to the 200% floor within
+# ~24-48h — banked profit is immediately re-risked instead of compounding. This
+# meters NEW book-growth notional (SEEDS + LADDER RUNGS only) with a leaky
+# bucket: at most RESPEND_BUDGET_USD_PER_HR of new notional deploys per hour,
+# the bucket capped at RESPEND_BURST_USD (the immediate post-flatten wave, then
+# it meters). It NEVER touches confirmed-BUY signal entries (they bypass, same
+# as the floor), NEVER touches leverage, NEVER touches stops. Below the floor
+# still hard-pauses underneath this. FAILS OPEN on any unreadable state.
+# 0 = OFF (default; this is a brake — operator no-blockers stance, arm to taste).
+# Starting calibration for a ~$375-notional book: PER_HR ~5, BURST ~40 → full
+# re-lever takes ~3 days instead of ~1. Watch the ml curve after a T/P and tune
+# the one number.
+RESPEND_BUDGET_USD_PER_HR = 0.0
+RESPEND_BURST_USD         = 0.0
+
 # Defense buffer engine (audit Wave 1, DEEPFIELD_AUDIT_EVIDENCE.md §B/§G). The
 # ml floor above is a ratio; the DEFENSE tiers below are the SAME comfort zone
 # expressed in PRICE space — the adverse basket move (%) that would drop the
