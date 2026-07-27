@@ -1241,6 +1241,17 @@ class Executor:
                 # tp_baseline keeps its "changed underneath = cycle completed"
                 # meaning. Ratchet is skipped while a flatten owns the book —
                 # mid-chase equity is half-settled noise, not a trading trough.
+                # Baseline floor (operator 2026-07-27): the ratchet may lower the
+                # target toward a bounce off the low but NEVER below baseline, so a
+                # fire can never settle at a loss (worst case is breakeven). Both the
+                # fire check and the ratchet narration read the same _target_for so
+                # they can't disagree. TP_TARGET_FLOOR_BASELINE=False restores the old
+                # min(baseline,trough) behavior that could bank red cycles.
+                def _target_for(tr):
+                    t = min(baseline, tr) * (1 + config.TP_PCT)
+                    if getattr(config, "TP_TARGET_FLOOR_BASELINE", False):
+                        t = max(baseline, t)
+                    return t
                 trough = 0.0
                 try:
                     trough = float(store.meta_get(self.conn, "tp_trough", 0) or 0)
@@ -1255,11 +1266,11 @@ class Executor:
                         _tp_trough_noted = trough
                         log.warning("T/P trough ratchet: equity low $%.2f — target now "
                                     "$%.2f (baseline $%.2f stays the profit yardstick)",
-                                    trough, trough * (1 + config.TP_PCT), baseline)
+                                    trough, _target_for(trough), baseline)
                         self._journal("tp", "*", f"trough ratchet: ${trough:.2f} — "
-                                                 f"target ${trough * (1 + config.TP_PCT):.2f}")
+                                                 f"target ${_target_for(trough):.2f}")
                 base_eff = min(baseline, trough)
-                target = base_eff * (1 + config.TP_PCT)
+                target = _target_for(trough)
                 if eq < target:
                     return False
                 log.warning("T/P HIT: equity $%.2f >= target $%.2f (baseline $%.2f · trough $%.2f) — "

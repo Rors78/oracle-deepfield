@@ -273,10 +273,18 @@ SEED_PAIRS = tuple(p["ws"] for p in PAIRS)
 # The TARGET is TROUGH-RATCHETED (operator 2026-07-24): meta['tp_trough'] tracks
 # the equity low since arm and the flatten fires at min(baseline, trough) *
 # (1+TP_PCT), so a drawdown can never park the target out of reach while fees
-# bleed. The baseline itself never ratchets — the tp_cycles ledger still books
-# profit against it, so a trough-fire below baseline records an honest red cycle.
+# bleed. The baseline itself never ratchets — the tp_cycles ledger books profit
+# against it.
+# FLOORED AT BASELINE (operator 2026-07-27, TP_TARGET_FLOOR_BASELINE): the ratchet
+# may lower the target toward a bounce off the low but NEVER below baseline, so a
+# fire can never bank a loss (worst case is breakeven). This closes the red-cycle
+# the 07-27 audit found (Jul-26 fired off a trough 21% under baseline, locking
+# -$15.09). Tradeoff: the book no longer auto-flattens OUT of a deep drawdown at a
+# loss — it HOLDS (per-lot stops still protect every position) until equity
+# recovers to baseline. Set False for the old min(baseline,trough) behavior.
 TP_ENABLED = True
 TP_PCT = 0.20
+TP_TARGET_FLOOR_BASELINE = True
 
 # Runtime exchange-truth sweep (audit 2026-07-13 #1): re-run the startup ledger↔Kraken
 # reconcile (verify_open_stops) every this-many seconds from the poll cycle, so an

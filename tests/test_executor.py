@@ -1391,11 +1391,14 @@ def test_tp_arm_seeds_trough_at_baseline(tmp_path, monkeypatch):
 
 
 def test_tp_fires_off_trough_and_books_red_cycle(tmp_path, monkeypatch):
-    """After a drawdown the target is min(baseline, trough)*(1+TP_PCT): equity 80
-    ratchets the trough, a bounce to 96.5 (>= 80*1.2) fires the flatten even
-    though it is below the 100 baseline — and the cycle row books the honest
-    LOSS against the baseline, noting the trough it fired from."""
+    """UN-FLOORED branch (TP_TARGET_FLOOR_BASELINE=False): the target is
+    min(baseline, trough)*(1+TP_PCT): equity 80 ratchets the trough, a bounce to
+    96.5 (>= 80*1.2) fires the flatten even though it is below the 100 baseline —
+    and the cycle row books the honest LOSS against the baseline, noting the
+    trough it fired from. The default-on floor is exercised by
+    test_tp_floor_at_baseline_never_banks_loss."""
     conn = _conn(tmp_path)
+    monkeypatch.setattr(config, "TP_TARGET_FLOOR_BASELINE", False)
     store.meta_set(conn, "tp_baseline", 100.0)
     sent = []
     _wire_tp(monkeypatch, equity=80.0, positions={}, open_orders={}, terminal={}, sent=sent)
@@ -1416,6 +1419,42 @@ def test_tp_fires_off_trough_and_books_red_cycle(tmp_path, monkeypatch):
     assert "trough $80.00" in note
     assert float(store.meta_get(conn, "tp_baseline")) == 96.0
     assert float(store.meta_get(conn, "tp_trough")) == 96.0        # re-seeded
+    conn.close()
+
+
+def test_tp_floor_at_baseline_never_banks_loss(tmp_path, monkeypatch):
+    """FLOORED branch (TP_TARGET_FLOOR_BASELINE=True, the default, operator
+    2026-07-27): the ratchet may lower the target toward the bounce but NEVER
+    below baseline. Same drawdown as the red-cycle test — baseline 100, trough
+    80 — but the bounce to 96.5 that used to fire a -$4 cycle now does NOT fire
+    (target floored to 100). Only a recovery to baseline fires, booking a
+    breakeven cycle, never a loss."""
+    conn = _conn(tmp_path)
+    assert getattr(config, "TP_TARGET_FLOOR_BASELINE", False) is True   # default on
+    store.meta_set(conn, "tp_baseline", 100.0)
+    sent = []
+    _wire_tp(monkeypatch, equity=80.0, positions={}, open_orders={}, terminal={}, sent=sent)
+    e = _exec(conn, mode="live")
+    assert e._check_take_profit() is False                          # ratchet only
+    assert float(store.meta_get(conn, "tp_trough")) == 80.0
+    # the bounce that fired a red cycle un-floored — held here (96.5 < 100 floor)
+    a = _seed_open(conn, "OSTOP-A", vol=0.5)
+    _wire_tp(monkeypatch, equity=96.5, positions={"P": _pos(0.5)}, open_orders={},
+             terminal={}, sent=sent, bid=64990.0, ask=65000.0)
+    assert e._check_take_profit() is False                          # FLOORED — no loss-fire
+    assert store.meta_get(conn, "tp_flatten_active") in (None, "0", "")
+    assert float(store.meta_get(conn, "tp_baseline")) == 100.0      # cycle still open
+    # recovery to baseline fires at breakeven
+    _wire_tp(monkeypatch, equity=100.0, positions={"P": _pos(0.5)}, open_orders={},
+             terminal={}, sent=sent, bid=64990.0, ask=65000.0)
+    assert e._check_take_profit() is True                          # fires at the floor
+    assert store.meta_get(conn, "tp_flatten_active") == "1"
+    _wire_tp(monkeypatch, equity=100.0, positions={}, open_orders={},
+             terminal={"OCLOSE-1": {"status": "closed"}}, sent=sent)
+    assert e._check_take_profit() is True
+    ts, base, settled, flows, profit, note = store.tp_cycles_list(conn, 1)[0]
+    assert (base, settled) == (100.0, 100.0)
+    assert profit >= 0.0                                           # never a loss
     conn.close()
 
 
