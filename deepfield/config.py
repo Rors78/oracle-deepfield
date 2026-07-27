@@ -347,8 +347,8 @@ MARGIN_LEVEL_STACK_FLOOR_PCT = 200
 # Starting calibration for a ~$375-notional book: PER_HR ~5, BURST ~40 → full
 # re-lever takes ~3 days instead of ~1. Watch the ml curve after a T/P and tune
 # the one number.
-RESPEND_BUDGET_USD_PER_HR = 0.0
-RESPEND_BURST_USD         = 0.0
+RESPEND_BUDGET_USD_PER_HR = 5.0
+RESPEND_BURST_USD         = 40.0
 
 # Defense buffer engine (audit Wave 1, DEEPFIELD_AUDIT_EVIDENCE.md §B/§G). The
 # ml floor above is a ratio; the DEFENSE tiers below are the SAME comfort zone
