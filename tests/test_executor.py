@@ -1794,3 +1794,77 @@ def test_realized_ledger_counts_every_priced_exit(tmp_path):
     assert store.realized_ledger_since(conn, "2027-01-01T00:00:00+00:00") == {
         "n": 0, "total": 0.0, "wins": 0, "losses": 0, "avg": 0.0}
     conn.close()
+
+
+def _seed_candle(conn, symbol, price, ts=1785200000):
+    """One 15m candle so the seed pre-gate has a local reference price."""
+    conn.execute("INSERT OR REPLACE INTO candles(pair,interval,ts,o,h,l,c,v,closed) "
+                 "VALUES(?,15,?,?,?,?,?,1.0,1)", (symbol, ts, price, price, price, price))
+    conn.commit()
+
+
+def test_seed_pre_gate_skips_before_the_ticker_and_the_narration(tmp_path, monkeypatch):
+    """The seed path is the reladder path's twin and was missed when that one got its
+    pre-gate (07-27 watch). Symptom in the live log: 'SEED X: starting ladder with a
+    post-only bid' every 10min at INFO with NO bid ever placed, because the governor's
+    refusal had been demoted to debug — a dangling announcement that reads as a
+    placement that vanished. A paced bucket must skip BEFORE the backoff stamp, the
+    ticker call, and the narration."""
+    monkeypatch.setattr(config, "SEED_PAIRS", (SYM,))
+    monkeypatch.setattr(config, "RESPEND_BUDGET_USD_PER_HR", 5.0)
+    monkeypatch.setattr(config, "RESPEND_BURST_USD", 40.0)
+    monkeypatch.setattr(config, "LADDER_STEP_PCT", 0.01)
+    ex_mod._seed_next.clear()
+    conn = _conn(tmp_path, ordermin=0.1, costmin=0.5, lot_dec=8)
+    _seed_candle(conn, SYM, 100.0)                 # smallest bid ~ 0.1 x 99 = $9.90
+    _bucket(conn, tokens=1.0, age_secs=0)          # nowhere near it
+    e = _exec(conn, mode="live")
+    sent, ticks = [], []
+    _wire_seed(monkeypatch, e, sent)
+    monkeypatch.setattr(e, "_live_last", lambda sym: ticks.append(sym) or 100.0)
+    e._seed_chains()
+    assert sent == []                              # nothing placed (as before)
+    assert ticks == []                             # ...and no REST ticker burned
+    assert ex_mod._seed_next.get(SYM) is None      # ...and no 10-min backoff eaten
+    conn.close()
+
+
+def test_seed_pre_gate_lets_a_funded_bid_through(tmp_path, monkeypatch):
+    """The gate must open once the bucket can fund the bid — a starved seeder that
+    never recovers would quietly stop rebuilding stopped-out lines."""
+    monkeypatch.setattr(config, "SEED_PAIRS", (SYM,))
+    monkeypatch.setattr(config, "RESPEND_BUDGET_USD_PER_HR", 5.0)
+    monkeypatch.setattr(config, "RESPEND_BURST_USD", 40.0)
+    monkeypatch.setattr(config, "LADDER_STEP_PCT", 0.01)
+    ex_mod._seed_next.clear()
+    conn = _conn(tmp_path, ordermin=0.1, costmin=0.5, lot_dec=8)
+    _seed_candle(conn, SYM, 100.0)
+    _bucket(conn, tokens=40.0, age_secs=0)
+    e = _exec(conn, mode="live")
+    sent = []
+    _wire_seed(monkeypatch, e, sent)
+    e._seed_chains()
+    assert len(sent) == 1 and sent[0]["type"] == "buy"
+    conn.close()
+
+
+def test_seed_pre_gate_fails_open_without_a_local_price(tmp_path, monkeypatch):
+    """No candle for the pair (fresh roster entry) -> no reference price -> proceed.
+    The gate is an optimisation; it must never be the reason a seed doesn't happen."""
+    monkeypatch.setattr(config, "SEED_PAIRS", (SYM,))
+    monkeypatch.setattr(config, "RESPEND_BUDGET_USD_PER_HR", 5.0)
+    monkeypatch.setattr(config, "RESPEND_BURST_USD", 40.0)
+    ex_mod._seed_next.clear()
+    conn = _conn(tmp_path, ordermin=0.1, costmin=0.5, lot_dec=8)
+    _bucket(conn, tokens=0.0, age_secs=0)          # empty bucket, but no price to judge
+    e = _exec(conn, mode="live")
+    assert e._last_local_price(SYM) is None
+    sent, ticks = [], []
+    _wire_seed(monkeypatch, e, sent)
+    monkeypatch.setattr(e, "_live_last", lambda sym: ticks.append(sym) or 100.0)
+    e._seed_chains()
+    # The gate did NOT short-circuit: the pass ran on to price the bid. Whether an
+    # order results is the authoritative _respend_budget_ok's call, not the gate's —
+    # here the bucket really is empty, so nothing rests. That is the correct split.
+    assert ticks == [SYM] and sent == []
+    conn.close()

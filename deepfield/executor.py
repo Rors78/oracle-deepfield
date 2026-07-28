@@ -458,6 +458,19 @@ class Executor:
             log.exception("respend budget check failed — failing open")
             return True, "", (lambda: None)
 
+    def _last_local_price(self, symbol):
+        """Newest 15m candle close from our OWN store, or None. A rough, possibly
+        minutes-stale price — good enough to decide whether a bid is worth pricing at
+        all, and free: the point is to answer that WITHOUT a ticker call. Never used
+        for sizing, stops, or anything that reaches the exchange."""
+        try:
+            row = self.conn.execute(
+                "SELECT c FROM candles WHERE pair=? AND interval=15 ORDER BY ts DESC LIMIT 1",
+                (symbol,)).fetchone()
+            return float(row[0]) if row and row[0] else None
+        except Exception:
+            return None
+
     def _respend_would_refuse(self, symbol, ref_price):
         """Cheap read-only pre-gate: True when the bucket provably cannot fund even the
         SMALLEST rung this symbol could produce, so the caller can skip before spending
@@ -970,6 +983,17 @@ class Executor:
                     continue
                 if self.conn.execute("SELECT 1 FROM orders WHERE symbol=? AND status='open' "
                                      "AND mode=? LIMIT 1", (sym, self.mode)).fetchone():
+                    continue
+                # Respend pre-gate, same as the reladder path and for the same three
+                # reasons — this is its twin and was missed when that one was fixed
+                # (07-27 watch): a paced bucket otherwise stamps a full backoff, burns a
+                # public-ticker REST call, and narrates "starting ladder with a post-only
+                # bid" at INFO before being refused at DEBUG. The dangling announcement is
+                # worse than the spam it replaced: the log reads as a placement that
+                # vanished. Priced off our OWN candles so the check itself costs nothing.
+                if self._respend_would_refuse(sym, self._last_local_price(sym)):
+                    log.debug("SEED %s: respend bucket can't fund the smallest bid "
+                              "— skipping before the ticker fetch", sym)
                     continue
                 _seed_next[sym] = now + _RELADDER_RETRY_SECS
                 live = self._live_last(sym)
