@@ -337,6 +337,10 @@ def test_ladder_conviction_does_not_decay_down_the_chain(tmp_path, monkeypatch):
     conn = _conn(tmp_path, ordermin=0.1, costmin=0.5, lot_dec=8)
     monkeypatch.setattr(config, "LADDER_CONTINUOUS", True)
     monkeypatch.setattr(config, "LADDER_STEP_PCT", 0.01)
+    # Conviction propagation only — take the respend governor out of the picture. With
+    # it armed at its live settings the $30 rung1 drains the $40 burst and rung2 is
+    # paced away, so this test measured the throttle instead of the thing it names.
+    monkeypatch.setattr(config, "RESPEND_BUDGET_USD_PER_HR", 0.0)
     monkeypatch.setattr(ex_mod.broker, "trade_balance", lambda: 1000.0)
     n = {"i": 0}
 
@@ -1585,4 +1589,102 @@ def test_external_flow_api_failure_keeps_cursor(tmp_path):
     app_mod._poll_external_flows(conn, stub, _dt.datetime.now(_dt.timezone.utc))
     assert float(store.meta_get(conn, "flows_cursor")) == 123.0    # retry same window
     assert float(store.meta_get(conn, "tp_baseline")) == 100.0
+    conn.close()
+
+
+# ── respend governor (leaky-bucket respend-RATE throttle) ────────────────────
+
+def _bucket(conn, tokens, age_secs):
+    """Seed the meta bucket as if `tokens` were stored `age_secs` ago."""
+    store.meta_set(conn, "respend_bucket",
+                   json.dumps({"tokens": tokens, "updated": time.time() - age_secs}))
+
+
+def test_respend_debit_keeps_the_accrual_it_earned(tmp_path, monkeypatch):
+    """The debit path must re-apply the same accrual the check did. Reading the
+    STORED tokens and stamping updated=now discarded everything earned since the
+    last write AND restarted the clock, so the bucket refilled strictly slower
+    than the configured rate (07-27 audit: 966 blocks vs 26 rungs in 13h)."""
+    conn = _conn(tmp_path)
+    monkeypatch.setattr(config, "RESPEND_BUDGET_USD_PER_HR", 5.0)
+    monkeypatch.setattr(config, "RESPEND_BURST_USD", 40.0)
+    e = _exec(conn, mode="live")
+    _bucket(conn, tokens=0.0, age_secs=3600)          # empty an hour ago -> $5 accrued
+    ok, _why, debit = e._respend_budget_ok(3.0)
+    assert ok                                          # $5 accrued covers a $3 rung
+    debit()
+    left = json.loads(store.meta_get(conn, "respend_bucket"))["tokens"]
+    assert abs(left - 2.0) < 0.01                      # $5 - $3, NOT $0
+    conn.close()
+
+
+def test_respend_debit_never_exceeds_burst(tmp_path, monkeypatch):
+    """Accrual on the debit path is still capped at the burst ceiling — a long
+    quiet spell can't mint more than RESPEND_BURST_USD of budget."""
+    conn = _conn(tmp_path)
+    monkeypatch.setattr(config, "RESPEND_BUDGET_USD_PER_HR", 5.0)
+    monkeypatch.setattr(config, "RESPEND_BURST_USD", 40.0)
+    e = _exec(conn, mode="live")
+    _bucket(conn, tokens=0.0, age_secs=3600 * 100)     # 100h idle = $500 uncapped
+    ok, _why, debit = e._respend_budget_ok(10.0)
+    assert ok
+    debit()
+    left = json.loads(store.meta_get(conn, "respend_bucket"))["tokens"]
+    assert abs(left - 30.0) < 0.01                     # capped 40, minus 10
+    conn.close()
+
+
+def test_respend_blocks_when_bucket_short(tmp_path, monkeypatch):
+    """Under the notional, the governor refuses and the debit is a no-op."""
+    conn = _conn(tmp_path)
+    monkeypatch.setattr(config, "RESPEND_BUDGET_USD_PER_HR", 5.0)
+    monkeypatch.setattr(config, "RESPEND_BURST_USD", 40.0)
+    e = _exec(conn, mode="live")
+    _bucket(conn, tokens=1.0, age_secs=0)
+    ok, why, debit = e._respend_budget_ok(30.0)
+    assert not ok and "respend paced" in why
+    debit()                                            # refused -> must not spend
+    assert json.loads(store.meta_get(conn, "respend_bucket"))["tokens"] <= 1.01
+    conn.close()
+
+
+def test_respend_disabled_fails_open(tmp_path, monkeypatch):
+    """Rate 0 = OFF: always allowed, bucket untouched (operator no-blockers)."""
+    conn = _conn(tmp_path)
+    monkeypatch.setattr(config, "RESPEND_BUDGET_USD_PER_HR", 0.0)
+    e = _exec(conn, mode="live")
+    ok, _why, debit = e._respend_budget_ok(10_000.0)
+    assert ok
+    debit()
+    assert store.meta_get(conn, "respend_bucket") is None
+    conn.close()
+
+
+def test_respend_pre_gate_skips_only_what_it_would_refuse(tmp_path, monkeypatch):
+    """The cheap pre-gate must be conservative: it may skip only when the bucket
+    cannot fund even the smallest possible rung, so it can never drop a rung the
+    authoritative check would have funded."""
+    conn = _conn(tmp_path, ordermin=0.1, costmin=0.5, lot_dec=8)
+    monkeypatch.setattr(config, "RESPEND_BUDGET_USD_PER_HR", 5.0)
+    monkeypatch.setattr(config, "RESPEND_BURST_USD", 40.0)
+    monkeypatch.setattr(config, "LADDER_STEP_PCT", 0.01)
+    e = _exec(conn, mode="live")
+    # smallest rung at a 1%-lower price = 0.1 x 99.0 = $9.90
+    _bucket(conn, tokens=1.0, age_secs=0)
+    assert e._respend_would_refuse(SYM, 100.0) is True      # $1 can't fund $9.90
+    _bucket(conn, tokens=20.0, age_secs=0)
+    assert e._respend_would_refuse(SYM, 100.0) is False     # $20 can — do the work
+    conn.close()
+
+
+def test_respend_pre_gate_fails_open(tmp_path, monkeypatch):
+    """Governor off, or no usable reference price, never suppresses a rung."""
+    conn = _conn(tmp_path, ordermin=0.1, costmin=0.5, lot_dec=8)
+    e = _exec(conn, mode="live")
+    monkeypatch.setattr(config, "RESPEND_BUDGET_USD_PER_HR", 0.0)
+    _bucket(conn, tokens=0.0, age_secs=0)
+    assert e._respend_would_refuse(SYM, 100.0) is False     # OFF
+    monkeypatch.setattr(config, "RESPEND_BUDGET_USD_PER_HR", 5.0)
+    assert e._respend_would_refuse(SYM, 0.0) is False       # unknown price
+    assert e._respend_would_refuse("NOPE/USD", 100.0) is False   # unknown pair
     conn.close()

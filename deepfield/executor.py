@@ -440,14 +440,54 @@ class Executor:
                         (lambda: None))
 
             def _debit():
+                # Re-apply accrual on the debit path too. Reading the STORED tokens and
+                # then stamping updated=now would DISCARD everything earned since the
+                # last write and restart the clock — the bucket would refill strictly
+                # slower than RESPEND_BUDGET_USD_PER_HR, tightening the throttle well
+                # past what's configured (07-27 audit: 966 blocks vs 26 rungs in 13h).
+                # Accrue to a fresh `then`, not the check's `now`, so the time spent
+                # placing the order is credited rather than dropped.
                 bb = json.loads(store.meta_get(self.conn, "respend_bucket") or "{}")
-                t = min(burst, float(bb.get("tokens", burst)))
+                then = time.time()
+                t = min(burst, float(bb.get("tokens", burst))
+                        + max(0.0, then - float(bb.get("updated", then))) * rate / 3600.0)
                 store.meta_set(self.conn, "respend_bucket",
-                               json.dumps({"tokens": max(0.0, t - notional), "updated": now}))
+                               json.dumps({"tokens": max(0.0, t - notional), "updated": then}))
             return True, "", _debit
         except Exception:
             log.exception("respend budget check failed — failing open")
             return True, "", (lambda: None)
+
+    def _respend_would_refuse(self, symbol, ref_price):
+        """Cheap read-only pre-gate: True when the bucket provably cannot fund even the
+        SMALLEST rung this symbol could produce, so the caller can skip before spending
+        a public-ticker REST call and a narration line on work that ends in a refusal.
+
+        Conservative by construction — it compares against a true LOWER bound on the
+        rung notional (min placeable volume at a price one ladder step BELOW ref_price,
+        which is at or under whatever the real rung prices at), so it can never skip a
+        rung that would in fact have been funded. The authoritative check remains
+        _respend_budget_ok() on the real sizing. Never raises: any doubt -> False
+        (proceed), matching the governor's own fail-open stance."""
+        try:
+            rate = float(getattr(config, "RESPEND_BUDGET_USD_PER_HR", 0) or 0)
+            if rate <= 0 or not ref_price or ref_price <= 0:
+                return False                                   # OFF / unknown — proceed
+            info = store.get_pair_info(self.conn, symbol) or {}
+            floor_price = ref_price * (1 - config.LADDER_STEP_PCT)
+            vol = self._min_volume(info.get("ordermin") or 0.0, info.get("costmin") or 0.0,
+                                   floor_price, info.get("lot_decimals"))
+            if not vol or vol <= 0:
+                return False
+            burst = float(getattr(config, "RESPEND_BURST_USD", 0) or 0) or rate
+            b = json.loads(store.meta_get(self.conn, "respend_bucket") or "{}")
+            now = time.time()
+            tokens = min(burst, float(b.get("tokens", burst))
+                         + max(0.0, now - float(b.get("updated", now))) * rate / 3600.0)
+            return (tokens + 1e-9) < (vol * floor_price)
+        except Exception:
+            log.exception("respend pre-gate failed — proceeding (fail open)")
+            return False
 
     def place_entry(self, symbol, entry_price, card, respend=False):
         if self.mode == "off":
@@ -509,7 +549,7 @@ class Executor:
         if respend:
             ok_b, why_b, debit = self._respend_budget_ok(sizing["notional"])
             if not ok_b:
-                log.info("EXEC %s: %s", symbol, why_b)
+                log.debug("EXEC %s: %s", symbol, why_b)      # per-pair per-cycle — debug
                 return None
 
         margin_pair = config.MARGIN_PAIR[symbol]
@@ -883,7 +923,19 @@ class Executor:
                     continue
                 if now < _reladder_next.get(sym, 0.0):
                     continue
+                # Respend pre-gate BEFORE the retry-clock stamp and before any work: a
+                # paced bucket otherwise burned a public-ticker REST call plus a RELADDER
+                # + LADDER narration pair per pair per pass, only to be refused at the
+                # last step (07-27 audit: ~27 pairs x every 10min). Leaving the clock
+                # unstamped means the pair retries as soon as the bucket refills instead
+                # of eating a full backoff for a refusal that never reached the exchange.
+                if self._respend_would_refuse(sym, entry):
+                    log.debug("RELADDER %s: respend bucket can't fund the smallest rung "
+                              "— skipping before the ticker fetch", sym)
+                    continue
                 _reladder_next[sym] = now + _RELADDER_RETRY_SECS
+                # Stays INFO: past the pre-gate this fires only when a rung will really be
+                # attempted, which is the self-heal this safety net exists to surface.
                 log.info("RELADDER %s: open chain with no resting bid — re-placing "
                          "next rung below lowest open fill %s", sym, entry)
                 self._journal("order", sym, f"reladder: chain had no resting bid — "
@@ -1676,7 +1728,7 @@ class Executor:
             # seeds (debit only once the rung definitely rests). Signals never ladder.
             ok_b, why_b, debit = self._respend_budget_ok(sizing["notional"])
             if not ok_b:
-                log.info("LADDER %s: %s", symbol, why_b)
+                log.debug("LADDER %s: %s", symbol, why_b)     # per-pair per-cycle — debug
                 return
             vol = sizing["volume"]
             userref = _new_userref()
@@ -2000,8 +2052,19 @@ class Executor:
                 self._surplus_seen.pop(sym, None)   # cleared -> forget the age history
                 continue
             recon[sym]["surplus"] = leftover
-            log.error("%s: %s has %.8g open volume on Kraken NO ledger row tracks — "
-                      "untracked position (no stop under our control)", pfx, sym, leftover)
+            # Severity by provenance, not by symptom. A 'pending' row on this symbol means
+            # one of OUR OWN rungs just filled and fill-recovery is about to claim it (it
+            # self-heals in ~1s) — routine, and shouting ERROR at it was drowning the real
+            # signal this line exists for (07-27 audit: 6/6 of the day's ERRORs were this
+            # benign race). Genuinely unclaimable volume — nothing pending, so no stop is
+            # coming from us — stays ERROR. Same predicate _adopt_surplus decides on.
+            claimable = self.conn.execute(
+                "SELECT COUNT(*) FROM orders WHERE symbol=? AND status='pending'", (sym,)).fetchone()[0]
+            log.log(logging.WARNING if claimable else logging.ERROR,
+                    "%s: %s has %.8g open volume on Kraken NO ledger row tracks — "
+                    "untracked position (%s)", pfx, sym, leftover,
+                    "fill recovery should claim it" if claimable
+                    else "no stop under our control")
             self._journal("recon", sym, f"UNTRACKED exchange volume {leftover:.8g} — no ledger row")
             self._safety("recon-mismatch", sym,
                          f"{leftover:.8g} open volume on Kraken has no ledger row (no stop)")
