@@ -347,13 +347,44 @@ def realized_pnl_since(conn, since_iso):
     'malformed JSON' on a non-JSON value, which crashes the whole query and every
     caller (the rails loss caps AND the v6 exec snapshot). Guard with json_valid so
     a plain-text row is simply skipped — matching the documented 'contributes
-    nothing' intent instead of exploding."""
+    nothing' intent instead of exploding.
+
+    STOP EXITS ONLY, deliberately. This feeds the daily/weekly loss-limit rails, whose
+    question is "how much did the stops take out of me" — the flatten is a harvest, not
+    a loss event, and the tp_cycles ledger already books it against the baseline. Once
+    the flatten started recording per-lot P&L too (2026-07-27) an unfiltered SUM would
+    have silently changed what a live risk rail counts, so the kind is pinned here.
+    Use realized_ledger_since() for the whole track record."""
     row = conn.execute(
         "SELECT COALESCE(SUM(CAST(json_extract(error,'$.pnl') AS REAL)),0) FROM orders "
-        "WHERE status='closed' AND json_valid(error)=1 AND json_extract(error,'$.closed_ts') >= ?",
+        "WHERE status='closed' AND json_valid(error)=1 "
+        "AND json_extract(error,'$.exit')='stop' AND json_extract(error,'$.closed_ts') >= ?",
         (since_iso,),
     ).fetchone()
     return row[0] if row else 0.0
+
+
+def realized_ledger_since(conn, since_iso, kind=None):
+    """The per-lot realized track record: every priced exit (stop AND tp-flatten), the
+    thing win-rate / expectancy / profit-factor are computed from. `kind` filters to one
+    exit type; None means all. Returns {'n','total','wins','losses','avg'} — zeros on an
+    empty ledger, never a division by zero.
+
+    Separate from realized_pnl_since() on purpose: that one is a risk rail pinned to
+    stop-outs, this one is the accounting view. Same json_valid guard, so plain-text
+    'error' rows (manual closes, unpriceable exits) contribute nothing."""
+    row = conn.execute(
+        "SELECT COUNT(*), COALESCE(SUM(CAST(json_extract(error,'$.pnl') AS REAL)),0), "
+        "       COALESCE(SUM(CAST(json_extract(error,'$.pnl') AS REAL) > 0),0) "
+        "FROM orders WHERE status='closed' AND json_valid(error)=1 "
+        "  AND json_extract(error,'$.pnl') IS NOT NULL "
+        "  AND json_extract(error,'$.closed_ts') >= ? "
+        "  AND (? IS NULL OR json_extract(error,'$.exit') = ?)",
+        (since_iso, kind, kind),
+    ).fetchone()
+    n, total, wins = (row[0] or 0), (row[1] or 0.0), (row[2] or 0)
+    return {"n": n, "total": total, "wins": wins, "losses": n - wins,
+            "avg": (total / n) if n else 0.0}
 
 
 def equity_snapshot(conn, equity, min_gap_s=300, keep_days=90):

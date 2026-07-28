@@ -1688,3 +1688,109 @@ def test_respend_pre_gate_fails_open(tmp_path, monkeypatch):
     assert e._respend_would_refuse(SYM, 0.0) is False       # unknown price
     assert e._respend_would_refuse("NOPE/USD", 100.0) is False   # unknown pair
     conn.close()
+
+
+# ── realized-exit ledger (per-lot track record) ──────────────────────────────
+
+def _seed_open_priced(conn, stop_txid, vol, entry, stop=90.0):
+    """An OPEN lot carrying its entry price — the flatten's cost basis."""
+    cur = conn.execute(
+        "INSERT INTO orders(symbol,margin_pair,volume,leverage,entry,stop,stop_txid,status,mode) "
+        "VALUES(?,?,?,?,?,?,?, 'open','live')",
+        (SYM, "XBTUSD:BTNL", vol, 10, entry, stop, stop_txid))
+    conn.commit()
+    return cur.lastrowid
+
+
+def _seed_closed_exit(conn, pnl, kind, closed_ts):
+    """A retired row carrying a priced exit record in the polymorphic error column."""
+    conn.execute(
+        "INSERT INTO orders(symbol,side,status,mode,error) VALUES(?,'buy','closed','live',?)",
+        (SYM, json.dumps({"pnl": pnl, "exit": kind, "closed_ts": closed_ts})))
+    conn.commit()
+
+
+def test_tp_flatten_records_per_lot_realized_pnl(tmp_path, monkeypatch):
+    """The flatten retires MOST positions, and until 2026-07-27 it wrote only the plain
+    'tp-flatten' marker — no per-lot P&L, so edge was unmeasurable (373 unpriced rows
+    against 21 priced stop exits). One close order retires N lots, so proceeds are
+    allocated pro-rata by lot volume at the close's real average fill."""
+    conn = _conn(tmp_path)
+    store.meta_set(conn, "tp_baseline", 100.0)
+    a = _seed_open_priced(conn, "OSTOP-A", vol=0.4, entry=60000.0)
+    b = _seed_open_priced(conn, "OSTOP-B", vol=0.6, entry=64000.0)
+    sent = []
+    _wire_tp(monkeypatch, equity=120.0, positions={"P": _pos(1.0)}, open_orders={},
+             terminal={}, sent=sent, bid=64990.0, ask=65000.0)
+    e = _exec(conn, mode="live")
+    assert e._check_take_profit() is True                  # pass 1 rests the close
+    # pass 2 — close filled: 1.0 @ 65000 avg, $10 fee
+    _wire_tp(monkeypatch, equity=119.5, positions={}, open_orders={},
+             terminal={"OCLOSE-1": {"status": "closed", "vol_exec": "1.0",
+                                    "cost": "65000.0", "fee": "10.0", "closetm": 1785200000.0}},
+             sent=sent)
+    assert e._check_take_profit() is True
+    recs = {oid: json.loads(err) for oid, err in conn.execute(
+        "SELECT id, error FROM orders WHERE id IN (?,?)", (a, b)).fetchall()}
+    # exit 65000/unit, fee 10/unit-of-volume -> effective 64990 per unit
+    assert abs(recs[a]["pnl"] - (0.4 * (65000.0 - 10.0) - 0.4 * 60000.0)) < 1e-6
+    assert abs(recs[b]["pnl"] - (0.6 * (65000.0 - 10.0) - 0.6 * 64000.0)) < 1e-6
+    assert recs[a]["exit"] == recs[b]["exit"] == "tp-flatten"
+    assert recs[a]["closed_ts"].startswith("2026-")        # the close's own execution time
+    conn.close()
+
+
+def test_tp_flatten_unpriceable_exit_keeps_plain_marker(tmp_path, monkeypatch):
+    """A pair the stops swept first (or any close we can't price) must still retire —
+    a missing P&L record can never cost us the close."""
+    conn = _conn(tmp_path)
+    store.meta_set(conn, "tp_baseline", 100.0)
+    a = _seed_open_priced(conn, "OSTOP-A", vol=0.4, entry=60000.0)
+    sent = []
+    _wire_tp(monkeypatch, equity=120.0, positions={"P": _pos(0.4)}, open_orders={},
+             terminal={}, sent=sent)
+    e = _exec(conn, mode="live")
+    assert e._check_take_profit() is True
+    _wire_tp(monkeypatch, equity=119.5, positions={}, open_orders={},
+             terminal={"OCLOSE-1": {"status": "closed"}},     # no cost/vol_exec to price
+             sent=sent)
+    assert e._check_take_profit() is True
+    status, err = conn.execute("SELECT status, error FROM orders WHERE id=?", (a,)).fetchone()
+    assert (status, err) == ("closed", "tp-flatten")          # retired, plainly marked
+    conn.close()
+
+
+def test_realized_pnl_since_counts_stop_exits_only(tmp_path):
+    """RAILS INVARIANT. realized_pnl_since feeds the daily/weekly loss limits, whose
+    question is what the STOPS took out. Now that the flatten also records per-lot P&L,
+    an unfiltered SUM would silently change what a live risk rail counts — a harvest
+    would read as loss-limit headroom. Pin the kind."""
+    conn = _conn(tmp_path)
+    _seed_closed_exit(conn, -5.0, "stop", "2026-07-27T10:00:00+00:00")
+    _seed_closed_exit(conn, +40.0, "tp-flatten", "2026-07-27T11:00:00+00:00")
+    conn.execute("INSERT INTO orders(symbol,side,status,mode,error) "
+                 "VALUES(?,'buy','closed','live','tp-flatten')", (SYM,))   # plain text
+    conn.commit()
+    assert store.realized_pnl_since(conn, "2026-07-27T00:00:00+00:00") == -5.0
+    conn.close()
+
+
+def test_realized_ledger_counts_every_priced_exit(tmp_path):
+    """The accounting view: both exit kinds, win/loss split, plain-text rows ignored."""
+    conn = _conn(tmp_path)
+    _seed_closed_exit(conn, -5.0, "stop", "2026-07-27T10:00:00+00:00")
+    _seed_closed_exit(conn, -1.0, "stop", "2026-07-27T10:30:00+00:00")
+    _seed_closed_exit(conn, +40.0, "tp-flatten", "2026-07-27T11:00:00+00:00")
+    _seed_closed_exit(conn, -99.0, "stop", "2026-07-01T10:00:00+00:00")     # before window
+    conn.execute("INSERT INTO orders(symbol,side,status,mode,error) "
+                 "VALUES(?,'buy','closed','live','closed manually by operator')", (SYM,))
+    conn.commit()
+    since = "2026-07-27T00:00:00+00:00"
+    all_ = store.realized_ledger_since(conn, since)
+    assert (all_["n"], all_["wins"], all_["losses"]) == (3, 1, 2)
+    assert abs(all_["total"] - 34.0) < 1e-9 and abs(all_["avg"] - 34.0 / 3) < 1e-9
+    stops = store.realized_ledger_since(conn, since, kind="stop")
+    assert (stops["n"], stops["total"]) == (2, -6.0)
+    assert store.realized_ledger_since(conn, "2027-01-01T00:00:00+00:00") == {
+        "n": 0, "total": 0.0, "wins": 0, "losses": 0, "avg": 0.0}
+    conn.close()

@@ -1555,9 +1555,15 @@ class Executor:
                 for t in d["closes"]:
                     if (close_info.get(t) or {}).get("status") in ("open", "pending"):
                         broker.cancel_order(t)
+                # Record realized P&L per lot before retiring. Until 2026-07-27 the
+                # flatten wrote the plain marker 'tp-flatten', so the exit path that
+                # retires MOST positions left no per-lot record at all — 373 closed rows
+                # against 21 priced stop exits, and no way to measure the book's edge.
+                pnl_map = self._flatten_exit_pnl_map(sym, d["rows"], d["closes"], close_info)
                 for oid in d["rows"]:
                     self.conn.execute("UPDATE orders SET status='closed', close_txid=NULL, "
-                                      "error='tp-flatten' WHERE id=?", (oid,))
+                                      "error=? WHERE id=?",
+                                      (pnl_map.get(oid, "tp-flatten"), oid))
                 self.conn.commit()
                 log.warning("T/P %s: flat — rows retired (limit close filled or no volume)", sym)
                 self._journal("tp", sym, "flatten: pair flat — rows retired")
@@ -2240,6 +2246,68 @@ class Executor:
         except Exception:
             log.exception("PNL record failed for order %d (closing anyway)", oid)
             return None
+
+    def _flatten_exit_pnl_map(self, sym, oids, close_txids, close_info):
+        """Realized P&L per LOT for a T/P-flatten exit -> {oid: json_str}, same shape the
+        stop path records ({'pnl','exit','closed_ts'}) so one query reads the whole
+        ledger. Empty dict when the exit can't be priced (no filled close order in
+        hand: a stop swept the pair first, a manual close, an unresolved query) —
+        those rows retire with the plain 'tp-flatten' marker exactly as before.
+
+        A flatten is 1:N — ONE close order retires every lot on the pair — so proceeds
+        are allocated pro-rata by lot volume at the close's actual average fill, with
+        its fee spread the same way. Cost basis is the row's own recorded entry price:
+        entries rest as post-only MAKER limits, so they fill AT that price and the
+        basis is exact.
+
+        Same accounting stance as _stop_exit_pnl_json, and the same two documented
+        omissions: the entry-side fee and rollover/financing are not subtracted, so a
+        held leveraged loss reads slightly better than it was. Never raises into the
+        flatten path — a P&L record must never cost us a close."""
+        out = {}
+        try:
+            vol_x = cost_x = fee_x = 0.0
+            closed_ts = None
+            for t in close_txids:
+                o = close_info.get(t) or {}
+                if o.get("status") != "closed":
+                    continue
+                v = float(o.get("vol_exec", 0) or 0)
+                c = float(o.get("cost", 0) or 0)
+                if v <= 0 or c <= 0:
+                    continue
+                vol_x += v
+                cost_x += c
+                fee_x += float(o.get("fee", 0) or 0)
+                closed_ts = closed_ts or o.get("closetm")
+            if vol_x <= 0 or cost_x <= 0:
+                return {}                       # unpriceable — caller keeps 'tp-flatten'
+            exit_px = cost_x / vol_x            # Kraken 'cost' is the quote amount
+            fee_per_unit = fee_x / vol_x
+            try:
+                ts = (datetime.datetime.fromtimestamp(float(closed_ts), datetime.timezone.utc).isoformat()
+                      if closed_ts else datetime.datetime.now(datetime.timezone.utc).isoformat())
+            except (TypeError, ValueError):
+                ts = datetime.datetime.now(datetime.timezone.utc).isoformat()
+            qs = ",".join("?" * len(oids))
+            rows = self.conn.execute(
+                f"SELECT id, volume, entry FROM orders WHERE id IN ({qs})", tuple(oids)).fetchall()
+            for oid, vol, entry in rows:
+                v = float(vol or 0)
+                e = float(entry or 0)
+                if v <= 0 or e <= 0:
+                    continue                    # can't price this lot — leave it plain
+                pnl = v * (exit_px - fee_per_unit) - v * e
+                out[oid] = json.dumps({"pnl": round(pnl, 8), "exit": "tp-flatten",
+                                       "closed_ts": ts})
+            if out:
+                log.info("PNL %s: %d lot(s) recorded at flatten exit %.10g (realized $%.4f)",
+                         sym, len(out),
+                         exit_px, sum(json.loads(j)["pnl"] for j in out.values()))
+        except Exception:
+            log.exception("PNL %s: flatten P&L record failed (rows retire anyway)", sym)
+            return {}
+        return out
 
     def _rest_stop(self, symbol, margin_pair, stop_px, volume, leverage, order_id, paper):
         if not config.PROTECTIVE_STOP:
