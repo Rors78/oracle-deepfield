@@ -93,14 +93,19 @@ def _web_live(conn):
 
 def _ladder(conn):
     by = {}
-    for oid, sym, vol, lev, entry, stop, txid in conn.execute(
-            "SELECT id,symbol,volume,leverage,entry,stop,stop_txid FROM orders "
+    for oid, sym, vol, lev, entry, stop, txid, ctxid in conn.execute(
+            "SELECT id,symbol,volume,leverage,entry,stop,stop_txid,close_txid FROM orders "
             "WHERE status='open' ORDER BY symbol,id"):
-        d = by.setdefault(sym, {"fills": [], "pendings": [], "stopped": 0})
+        d = by.setdefault(sym, {"fills": [], "pendings": [], "stopped": 0, "harvesting": 0})
+        # close_txid on an open row = mid-harvest (tp-rung) or mid-flatten: the
+        # stop is OFF because a resting sell owns the exit — a deliberate state
+        # the UI must show as harvest, never as "unprotected".
         d["fills"].append({"vol": vol, "lev": lev, "entry": entry, "stop": stop,
-                           "stop_txid": txid or ""})
+                           "stop_txid": txid or "", "harv": bool(ctxid)})
         if txid:
             d["stopped"] += 1
+        elif ctxid:
+            d["harvesting"] += 1
     for sym, entry, vol in conn.execute(
             "SELECT symbol,entry,volume FROM orders WHERE status='pending' ORDER BY symbol,id"):
         d = by.setdefault(sym, {"fills": [], "pendings": [], "stopped": 0})
@@ -283,6 +288,7 @@ def _assemble(conn):
             "sig": sig, "naReason": na, "lo": lo52, "hi": hi52, "pctLow": pct_low,
             "fills": fills, "size": size, "pnl": pnl, "avg": avg, "stop": stop,
             "stops": (lad["stopped"] if lad else 0),   # open fills with a resting stop_txid
+            "harv": (lad["harvesting"] if lad else 0),  # fills mid-harvest (sell resting, stop off)
             "bid": bid, "bids": bids, "rungs": rungs, "vols": vols,
             "fstops": fstops, "prot": prot,            # per-fill stop / protection (W3/W4)
             "fault": fault,
@@ -304,7 +310,9 @@ def _assemble(conn):
         rday = rweek = 0.0
     scov = conn.execute(
         "SELECT COUNT(*),COALESCE(SUM(CASE WHEN stop_txid IS NOT NULL AND stop_txid<>'' "
-        "THEN 1 ELSE 0 END),0) FROM orders WHERE status='open'").fetchone()
+        "THEN 1 ELSE 0 END),0),COALESCE(SUM(CASE WHEN (stop_txid IS NULL OR stop_txid='') "
+        "AND close_txid IS NOT NULL THEN 1 ELSE 0 END),0) "
+        "FROM orders WHERE status='open'").fetchone()
     bid_count = conn.execute("SELECT COUNT(*) FROM orders WHERE status='pending'").fetchone()[0]
     peak = _num(store.meta_get(conn, "peak_equity"))
     equity = live.get("equity") if live.get("_fresh") else None
@@ -350,6 +358,7 @@ def _assemble(conn):
         "swing_day": swing_day,
         "pos_count": scov[0], "bid_count": bid_count,
         "stops_covered": scov[1], "stops_total": scov[0],
+        "harvesting": scov[2],                         # lots whose exit is a resting harvest sell
         "margin_used": live.get("margin_used") if live.get("_fresh") else None,
         "free_margin": live.get("free_margin") if live.get("_fresh") else None,
         "margin_level": live.get("margin_level") if live.get("_fresh") else None,
@@ -536,15 +545,17 @@ def build_pair(sym_display):
         days = [[r[0], round(r[1], 6), round(r[2], 6), round(r[3], 6),
                  round(r[4], 6), round(r[5], 4)] for r in rows]
         fills, pendings = [], []
-        for (oid, ts, entry, stop, stop_txid, vol, lev, notional, margin,
+        for (oid, ts, entry, stop, stop_txid, ctxid, vol, lev, notional, margin,
              score, req, status) in conn.execute(
-                "SELECT id,ts,entry,stop,stop_txid,volume,leverage,notional,margin,"
+                "SELECT id,ts,entry,stop,stop_txid,close_txid,volume,leverage,notional,margin,"
                 "score,required,status FROM orders WHERE symbol=? "
                 "AND status IN ('open','pending') ORDER BY id", (ws,)):
             # W3: per-fill stop AND stop_txid — protection is a per-fill truth,
-            # never a hardcode ("live" only when a resting stop order exists)
+            # never a hardcode ("live" only when a resting stop order exists).
+            # harv: a resting harvest/flatten sell owns this fill's exit (stop off
+            # BY DESIGN) — the detail sheet shows it brass, not danger-red.
             row = {"id": oid, "ts": ts, "entry": entry, "stop": stop,
-                   "stop_txid": stop_txid or "",
+                   "stop_txid": stop_txid or "", "harv": bool(ctxid),
                    "vol": vol, "lev": lev, "notional": notional,
                    "margin": margin, "score": score, "req": req}
             (fills if status == "open" else pendings).append(row)

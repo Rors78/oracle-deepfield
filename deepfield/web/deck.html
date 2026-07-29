@@ -676,8 +676,9 @@ function renderDefense(h){
       "price-space to forced liq", h.buffer_liq_pct==null?"":h.buffer_liq_pct>30?"gain":h.buffer_liq_pct>12?"warn":"loss"],
     ["call buffer", h.buffer_call_pct!=null?h.buffer_call_pct.toFixed(1)+"%":"—",
       "to margin call (ml 80)", h.buffer_call_pct==null?"":h.buffer_call_pct>25?"gain":h.buffer_call_pct>10?"warn":"loss"],
-    ["stops", `${h.stops_covered??"—"}/${h.stops_total??"—"}`,
-      "open lots protected", (h.stops_covered===h.stops_total)?"gain":"loss"],
+    ["stops", `${h.stops_covered??"—"}${h.harvesting?`+${h.harvesting}◆`:""}/${h.stops_total??"—"}`,
+      h.harvesting?`protected · ${h.harvesting} harvesting`:"open lots protected",
+      ((h.stops_covered||0)+(h.harvesting||0)===h.stops_total)?"gain":"loss"],
     ["worst day ref", st.ref_move_pct?("−"+(st.ref_move_pct["1"]||0).toFixed(1)+"%"):"—",
       "1-day basket history", "sec"],
     ["intraday dd", st.intraday_dd_pct!=null?("−"+st.intraday_dd_pct.toFixed(1)+"%"):"—",
@@ -826,7 +827,8 @@ function wireFieldDots(){
         ${d!=null?`<div class="row"><span>distance</span><b class="${d<3?"loss":"sec"}">${d.toFixed(1)}%</b></div>`:""}
         <div class="row"><span>p&l</span><b class="${cls(p.pnl||0)}">${fmtSigned(p.pnl)}</b></div>
         <div class="row"><span>notional</span><b>${fmt$(p.size*p.price)}</b></div>
-        ${p.stops<p.fills?`<div class="row"><span class="loss">protection</span><b class="loss">${p.stops}/${p.fills} lots</b></div>`:""}`, e.clientX, e.clientY);
+        ${(p.stops+(p.harv||0))<p.fills?`<div class="row"><span class="loss">protection</span><b class="loss">${p.stops}/${p.fills} lots</b></div>`
+          :p.harv?`<div class="row"><span style="color:var(--brass-hi)">harvesting</span><b style="color:var(--brass-hi)">${p.harv} lot${p.harv>1?"s":""} · sell resting</b></div>`:""}`, e.clientX, e.clientY);
     });
     dot.addEventListener("mouseleave",hideTip);
     dot.addEventListener("click",()=>openDetail(dot.dataset.sym));
@@ -867,13 +869,17 @@ function renderBook(){
     const d=(p.price&&p.stop)?((p.price-p.stop)/p.stop*100):null;
     const dCol=d==null?"var(--ink4)":d<3?"var(--loss)":d<6?"var(--warn)":"var(--gain)";
     const dW=d==null?0:Math.max(4,Math.min(100,(d-dLo)/(dHi-dLo)*100));
+    // mid-harvest lots (stop off, sell resting) are ACCOUNTED FOR, not naked —
+    // brass state, never the red that means genuinely unprotected
+    const hv=p.harv||0;
     const prot=p.stops>=p.fills?`<span class="protlamp gain" title="all fills protected">●</span>`
+      :(p.stops+hv)>=p.fills&&hv?`<span class="protlamp" style="color:var(--brass-hi)" title="${hv} lot${hv>1?"s":""} mid-harvest — sell resting, stop off by design">◆</span>`
       :p.stops>0?`<span class="protlamp warn" title="${p.stops}/${p.fills} protected">◐</span>`
       :`<span class="protlamp loss" title="NO RESTING STOP">○</span>`;
     const flash=prevPx[p.sym]!=null&&p.price!=null&&p.price!==prevPx[p.sym]
       ?(p.price>prevPx[p.sym]?"flash-up":"flash-dn"):"";
     return `<tr class="${p.fault?"fault":""} ${flash}" data-sym="${p.sym}">
-      <td class="l"><span class="sym">${p.sym}</span>${p.status!=="HOLD"?` <span class="statuschip ${p.stStyle}">${p.status}</span>`:""}</td>
+      <td class="l"><span class="sym">${p.sym}</span>${p.status!=="HOLD"?` <span class="statuschip ${p.stStyle}">${p.status}</span>`:""}${hv?` <span class="statuschip" style="color:var(--brass-hi);border-color:var(--brass-dim)">HARVEST</span>`:""}</td>
       <td>${fmtPx(p.price)}</td>
       <td class="${cls(p.chg||0)}">${p.chg==null?"—":(p.chg>=0?"+":"")+p.chg.toFixed(1)+"%"}</td>
       <td class="${cls(p.pnl||0)}">${fmtSigned(p.pnl)}</td>
@@ -1031,7 +1037,9 @@ function renderDetail(){
         <table><thead><tr><th class="l">rung</th><th>entry</th><th>vol</th><th>stop</th><th>prot</th></tr></thead><tbody>
         ${(d.fills||[]).map((f,i)=>`<tr><td class="l dim">#${i+1}</td><td>${fmtPx(f.entry)}</td>
           <td>${fmtVol(f.vol)}</td><td class="loss">${fmtPx(f.stop)}</td>
-          <td>${f.stop_txid?'<span class="gain">●</span>':'<span class="loss" title="no resting stop">○</span>'}</td></tr>`).join("")
+          <td>${f.stop_txid?'<span class="gain">●</span>'
+            :f.harv?'<span style="color:var(--brass-hi)" title="mid-harvest — sell resting, stop off by design">◆</span>'
+            :'<span class="loss" title="no resting stop">○</span>'}</td></tr>`).join("")
           ||`<tr><td colspan="5" class="dim l">no open fills</td></tr>`}
         ${(d.pendings||[]).map(f=>`<tr><td class="l dim">bid</td><td class="dim">${fmtPx(f.entry)}</td>
           <td class="dim">${fmtVol(f.vol)}</td><td class="dim">${fmtPx(f.stop)}</td><td class="dim">resting</td></tr>`).join("")}
