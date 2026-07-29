@@ -93,6 +93,10 @@ def _web_live(conn):
 
 def _ladder(conn):
     by = {}
+    # one shape for every symbol, whether it entered here via a fill or via a bare
+    # resting bid — a pair whose last fill closed still has bids, and a half-built
+    # dict 500s the whole deck on the first counter the caller reads.
+    blank = lambda: {"fills": [], "pendings": [], "stopped": 0, "harvesting": 0}
     # COALESCE(stop_prot, stop): stop distance is a RISK reading — it must show the
     # level a stop would actually rest at, which for a rung that proved the harvest
     # target is its ratcheted breakeven, not the chain invalidation level below it.
@@ -100,7 +104,7 @@ def _ladder(conn):
             "SELECT id,symbol,volume,leverage,entry,COALESCE(stop_prot,stop),"
             "stop_txid,close_txid FROM orders "
             "WHERE status='open' ORDER BY symbol,id"):
-        d = by.setdefault(sym, {"fills": [], "pendings": [], "stopped": 0, "harvesting": 0})
+        d = by.setdefault(sym, blank())
         # close_txid on an open row = mid-harvest (tp-rung) or mid-flatten: the
         # stop is OFF because a resting sell owns the exit — a deliberate state
         # the UI must show as harvest, never as "unprotected".
@@ -112,7 +116,7 @@ def _ladder(conn):
             d["harvesting"] += 1
     for sym, entry, vol in conn.execute(
             "SELECT symbol,entry,volume FROM orders WHERE status='pending' ORDER BY symbol,id"):
-        d = by.setdefault(sym, {"fills": [], "pendings": [], "stopped": 0})
+        d = by.setdefault(sym, blank())
         d["pendings"].append({"price": entry, "vol": vol})   # every resting bid is real state
     for sym, d in by.items():
         # resting bids nearest-first (highest price fills first in a falling market)

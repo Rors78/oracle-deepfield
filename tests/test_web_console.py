@@ -261,6 +261,22 @@ def test_lev_default_is_per_pair_max(tmp_path, monkeypatch):
     assert _pair(st2, "CRV")["lev"] == 5             # fills keep the real order lev
 
 
+# ── a bid with no fill behind it is a whole symbol — and must not 500 the deck ─
+
+def test_pending_only_symbol_assembles(tmp_path, monkeypatch):
+    """A pair whose last fill closed still has a resting bid. The ladder row it
+    builds has no fills, so every counter the payload reads must still exist —
+    a missing 'harvesting' key 500s /api/state for the ENTIRE deck, not one pair.
+    """
+    now = time.time()
+    st = _state(tmp_path, monkeypatch, blob=_blob(now), candles=_candles_ada(now),
+                orders=[_order("SHIB/USD", 4.59e-06, None, "", vol=770000.0,
+                               status="pending")])
+    shib = _pair(st, "SHIB")
+    assert shib["harv"] == 0 and shib["stops"] == 0   # no fills → nothing to protect
+    assert shib["bid"] == 4.59e-06                    # the bid itself still shows
+
+
 # ── W11 (TUI): proximity has no lower bound; BELOW STOP is explicit ───────────
 
 def _v(price, stop, fills=True):
