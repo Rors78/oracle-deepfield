@@ -290,3 +290,118 @@ def test_reconcile_leaves_flatten_shared_close_refs_alone(tmp_path, monkeypatch)
     assert _row(conn, a)[0] == "open" and _row(conn, b)[0] == "open"
     assert _row(conn, a)[2] == "FLAT-X" and _row(conn, b)[2] == "FLAT-X"
     assert calls["adds"] == []                     # and no stop re-placed beside them
+
+
+# ── stop ratchet: a proved rung re-arms at breakeven, ladder floor unchanged ──
+#
+# The harvest layer is asymmetric (+4% target vs ~7.8% mean stop distance), so it
+# needs ~70% of rungs to reach target before stop just to break even. The ratchet
+# closes the one-sided leak: a rung that PROVED the target and then faded used to
+# re-arm at its original invalidation level and ride ~8% further down.
+
+def _prot(conn, oid):
+    """The level a stop would actually rest at — what reprotect/reconcile read."""
+    return conn.execute("SELECT COALESCE(stop_prot, stop) FROM orders WHERE id=?",
+                        (oid,)).fetchone()[0]
+
+
+def test_harvest_start_ratchets_protective_stop_to_breakeven(tmp_path, monkeypatch):
+    conn = _mk_conn(tmp_path)
+    oid = _seed_rung(conn, entry=1.0, vol=100.0, stop=0.92)
+    _seed_candle(conn, 1.05)
+    _mock_broker(monkeypatch, quotes={REST: {"b": ["1.049"], "a": ["1.051"]}},
+                 positions=_pos(100.0))
+    _mk_exec(conn, monkeypatch)._check_rung_harvest()
+    assert _prot(conn, oid) == 1.0                 # protective stop -> breakeven
+    # ...and the chain's INVALIDATION level is untouched, so the ladder still
+    # has room below (this is the whole reason stop_prot is its own column).
+    assert conn.execute("SELECT stop FROM orders WHERE id=?", (oid,)).fetchone()[0] == 0.92
+
+
+def test_ratcheted_rung_reprotects_at_breakeven_after_abort(tmp_path, monkeypatch):
+    """End to end: harvest starts (+5%), fades under the floor, aborts, settles —
+    the re-armed stop must be breakeven, not the original 0.92."""
+    conn = _mk_conn(tmp_path)
+    oid = _seed_rung(conn, entry=1.0, vol=100.0, stop=0.92)
+    _seed_candle(conn, 1.05)
+    _mock_broker(monkeypatch, quotes={REST: {"b": ["1.049"], "a": ["1.051"]}},
+                 positions=_pos(100.0))
+    e = _mk_exec(conn, monkeypatch)
+    e._check_rung_harvest()                        # sell rests, stop ratcheted
+    assert _row(conn, oid)[2] == "SELL-1"
+    # market fades under the +2% floor -> abort cancels the sell
+    _mock_broker(monkeypatch, quotes={REST: {"b": ["1.005"], "a": ["1.007"]}},
+                 positions=_pos(100.0), close_orders={"SELL-1": {"status": "open"}})
+    _mk_exec(conn, monkeypatch)._check_rung_harvest()
+    # terminal settle: canceled unfilled -> close_txid clears, row is naked
+    _mock_broker(monkeypatch, quotes={REST: {"b": ["1.005"], "a": ["1.007"]}},
+                 positions=_pos(100.0),
+                 close_orders={"SELL-1": {"status": "canceled", "vol_exec": "0"}})
+    _mk_exec(conn, monkeypatch)._check_rung_harvest()
+    assert _row(conn, oid)[2] is None and _row(conn, oid)[1] is None
+    # reprotect re-arms: the stop it rests must be the RATCHETED level
+    calls = _mock_broker(monkeypatch, positions=_pos(100.0))
+    monkeypatch.setattr(ex_mod.broker, "open_orders", lambda: {})
+    monkeypatch.setattr(config, "PROTECTIVE_STOP", True)
+    _mk_exec(conn, monkeypatch)._reprotect_naked_open()
+    assert len(calls["adds"]) == 1
+    assert float(calls["adds"][0]["price"]) == 1.0        # breakeven, not 0.92
+    assert calls["adds"][0]["ordertype"] == "stop-loss"
+
+
+def test_ratchet_never_lowers_an_existing_protective_stop(tmp_path, monkeypatch):
+    conn = _mk_conn(tmp_path)
+    oid = _seed_rung(conn, entry=1.0, vol=100.0, stop=0.92)
+    conn.execute("UPDATE orders SET stop_prot=1.03 WHERE id=?", (oid,))   # already higher
+    conn.commit()
+    _seed_candle(conn, 1.05)
+    _mock_broker(monkeypatch, quotes={REST: {"b": ["1.049"], "a": ["1.051"]}},
+                 positions=_pos(100.0))
+    _mk_exec(conn, monkeypatch)._check_rung_harvest()
+    assert _prot(conn, oid) == 1.03                # monotonic — never ratchets down
+
+
+def test_ratchet_skipped_when_level_would_rest_at_or_above_market(tmp_path, monkeypatch):
+    """A stop resting at/above the market fires on contact. With the ratchet pct
+    misconfigured above the floor, the per-rung bid guard must no-op it."""
+    conn = _mk_conn(tmp_path)
+    oid = _seed_rung(conn, entry=1.0, vol=100.0, stop=0.92)
+    _seed_candle(conn, 1.05)
+    _mock_broker(monkeypatch, quotes={REST: {"b": ["1.03"], "a": ["1.032"]}},
+                 positions=_pos(100.0))
+    # ratchet 10% -> 1.10, above the 1.03 bid: refuse rather than arm a live trigger
+    monkeypatch.setattr(config, "TP_RUNG_RATCHET_PCT", 0.10, raising=False)
+    _mk_exec(conn, monkeypatch)._check_rung_harvest()
+    assert _prot(conn, oid) == 0.92                # untouched
+
+
+def test_ratchet_disabled_leaves_stop_alone(tmp_path, monkeypatch):
+    conn = _mk_conn(tmp_path)
+    oid = _seed_rung(conn, entry=1.0, vol=100.0, stop=0.92)
+    _seed_candle(conn, 1.05)
+    _mock_broker(monkeypatch, quotes={REST: {"b": ["1.049"], "a": ["1.051"]}},
+                 positions=_pos(100.0))
+    monkeypatch.setattr(config, "TP_RUNG_RATCHET_ENABLED", False, raising=False)
+    _mk_exec(conn, monkeypatch)._check_rung_harvest()
+    assert _prot(conn, oid) == 0.92
+
+
+def test_ratchet_does_not_freeze_the_ladder(tmp_path, monkeypatch):
+    """Regression for the reason stop_prot is a separate column: _reladder inherits
+    the lowest open fill's `stop` as the next rung's FLOOR. The lowest entry in a
+    long chain is the most in profit — i.e. exactly the rung that gets ratcheted —
+    so writing breakeven into `stop` would trip "ladder floor reached" and silently
+    stop accumulating on a winning pair."""
+    conn = _mk_conn(tmp_path)
+    oid = _seed_rung(conn, entry=1.0, vol=100.0, stop=0.92)
+    _seed_candle(conn, 1.05)
+    _mock_broker(monkeypatch, quotes={REST: {"b": ["1.049"], "a": ["1.051"]}},
+                 positions=_pos(100.0))
+    _mk_exec(conn, monkeypatch)._check_rung_harvest()
+    # what _reladder hands _place_ladder_rung as the floor:
+    stop_for_ladder = conn.execute(
+        "SELECT stop FROM orders WHERE status='open' AND entry IS NOT NULL "
+        "ORDER BY entry ASC LIMIT 1").fetchone()[0]
+    next_rung = 1.0 * (1 - config.LADDER_STEP_PCT)
+    assert stop_for_ladder == 0.92
+    assert next_rung > stop_for_ladder * (1 + config.LADDER_STOP_BUFFER)   # room remains

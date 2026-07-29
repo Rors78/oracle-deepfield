@@ -120,6 +120,7 @@ CREATE TABLE IF NOT EXISTS orders(
     id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, symbol TEXT, margin_pair TEXT,
     side TEXT, ordertype TEXT, mode TEXT,        -- off | paper | live | validate
     entry REAL, stop REAL, volume REAL, leverage INTEGER,
+    stop_prot REAL,                              -- ratcheted PROTECTIVE stop (see below)
     notional REAL, margin REAL, risk_usd REAL,
     score INTEGER, required INTEGER,             -- entry conviction (rides down the ladder chain)
     txid TEXT, stop_txid TEXT, status TEXT, error TEXT
@@ -183,8 +184,17 @@ def connect(db_path):
         # post-only T/P close order. A row carrying one is OWNED by the flatten —
         # reprotect/reconcile must not re-arm a stop beside it (stop + resting sell
         # would double the sell volume -> short on fill+trigger).
+        # stop_prot (rung stop-ratchet, 2026-07-29): the PROTECTIVE stop price, once a
+        # rung has proved it can reach the harvest target. Deliberately NOT the `stop`
+        # column: `stop` is the chain's INVALIDATION level, which _reladder hands to
+        # _place_ladder_rung as the next rung's floor and sizing denominator — pinning
+        # it up to breakeven would read as "ladder floor reached" and silently stop
+        # accumulating on exactly the pairs that are working. Protection paths
+        # (reprotect, reconcile re-place) read COALESCE(stop_prot, stop); ladder
+        # geometry keeps reading `stop`. NULL = never ratcheted.
         _ensure_columns(conn, "orders", [("score", "INTEGER"), ("required", "INTEGER"),
-                                         ("userref", "INTEGER"), ("close_txid", "TEXT")])
+                                         ("userref", "INTEGER"), ("close_txid", "TEXT"),
+                                         ("stop_prot", "REAL")])
         conn.commit()
     except Exception:
         conn.close()   # _WriterConn.close() frees the write lock the schema writes took

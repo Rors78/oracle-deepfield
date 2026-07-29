@@ -821,8 +821,12 @@ class Executor:
             # close_txid rows are excluded: the T/P flatten owns them — a resting
             # limit close IS the pair's exit, and re-arming a stop beside it would
             # double the sell volume (stop fires + close fills -> short).
+            # COALESCE(stop_prot, stop): a rung that proved the harvest target carries a
+            # ratcheted protective level (breakeven) — re-arm THERE, not at the original
+            # invalidation level ~8% lower. NULL stop_prot (never ratcheted) -> `stop`.
             naked = self.conn.execute(
-                "SELECT id, symbol, margin_pair, volume, leverage, stop FROM orders "
+                "SELECT id, symbol, margin_pair, volume, leverage, "
+                "COALESCE(stop_prot, stop) FROM orders "
                 "WHERE status='open' AND stop_txid IS NULL AND close_txid IS NULL "
                 "AND mode=?", (self.mode,)).fetchall()
             if not naked:
@@ -1895,6 +1899,10 @@ class Executor:
                 self.conn.execute("UPDATE orders SET stop_txid=NULL WHERE id=?", (oid,))
                 self.conn.commit()
                 stopped_vol[sym] = stopped_vol.get(sym, 0.0) - volf
+            # This rung has now PROVED the target (local candle cleared it, the live
+            # bid confirms it above the floor, backing verified). Pin its protective
+            # stop to breakeven before the sell rests, so an abort re-arms there.
+            self._ratchet_stop_prot(oid, sym, entry, bid)
             tick_dec = config.MARGIN_TICK_DECIMALS.get(sym, 2)
             tick = 10 ** -tick_dec
             px = min(_round_price(bid + tick, tick_dec), ask)
@@ -1922,6 +1930,52 @@ class Executor:
                 log.error("HARVEST %s: sell placement FAILED for rung %d — stop dropped, "
                           "reprotect re-arms next cycle", sym, oid)
                 self._journal("tp-rung", sym, f"rung {oid} harvest sell FAILED — reprotect re-arms")
+
+    def _ratchet_stop_prot(self, oid, sym, entry, bid):
+        """Pin a proved rung's PROTECTIVE stop up to entry*(1+TP_RUNG_RATCHET_PCT)
+        (breakeven by default). Called once per rung, at the moment its harvest
+        commits — the point at which the lot has demonstrably reached the target.
+        Every downstream re-arm path (abort, unfilled cancel, partial remainder)
+        reads COALESCE(stop_prot, stop), so this one write covers all of them.
+
+        Writes stop_prot, never `stop`: `stop` is the chain's invalidation level
+        that _reladder hands to _place_ladder_rung as the next rung's floor and
+        sizing denominator, and moving it to breakeven would read as "ladder floor
+        reached" and freeze accumulation on a pair that is working.
+
+        Two invariants: MONOTONIC (never lowers an existing protective stop) and
+        BELOW THE MARKET (skipped unless the level sits strictly under the live
+        bid, so a ratcheted stop can never rest at/above the market and fire on
+        contact). Advisory — a failure here never blocks the harvest."""
+        if not getattr(config, "TP_RUNG_RATCHET_ENABLED", False):
+            return
+        try:
+            entryf = float(entry or 0)
+            bidf = float(bid or 0)
+            if entryf <= 0 or bidf <= 0:
+                return
+            tick_dec = config.MARGIN_TICK_DECIMALS.get(sym, 2)
+            px = _round_price(
+                entryf * (1 + getattr(config, "TP_RUNG_RATCHET_PCT", 0.0)), tick_dec)
+            if px >= bidf:
+                log.info("RATCHET %s: rung %d level %s not below bid %s — stop left at "
+                         "its invalidation level", sym, oid, f"{px:g}", f"{bidf:g}")
+                return
+            r = self.conn.execute(
+                "SELECT COALESCE(stop_prot, stop) FROM orders WHERE id=?", (oid,)).fetchone()
+            cur = float(r[0]) if r and r[0] is not None else None
+            if cur is not None and px <= cur:
+                return                            # already at/above — never lower a stop
+            self.conn.execute("UPDATE orders SET stop_prot=? WHERE id=?", (px, oid))
+            self.conn.commit()
+            log.warning("RATCHET %s: rung %d proved +%.1f%% — protective stop %s -> %s "
+                        "(an abort now re-arms at breakeven; ladder floor unchanged)",
+                        sym, oid, getattr(config, "TP_RUNG_PCT", 0.04) * 100,
+                        f"{cur:g}" if cur is not None else "none", f"{px:g}")
+            self._journal("stop", sym, f"rung {oid} proved target — protective stop "
+                                       f"ratcheted to {px:g} (breakeven)")
+        except Exception:
+            log.exception("RATCHET %s: rung %d failed (harvest continues)", sym, oid)
 
     def _place_ladder_rung(self, symbol, margin_pair, leverage, stop, filled_price,
                            score=None, required=None):
@@ -2247,8 +2301,11 @@ class Executor:
 
         # Oldest-first: when part of a pair's stack has closed out, surviving open
         # volume is allocated to the earliest rows; the newest (now-unbacked) rows retire.
+        # COALESCE(stop_prot, stop): re-place a proved rung's stop at its RATCHETED
+        # protective level (see _ratchet_stop_prot), not the chain invalidation level.
         rows = self.conn.execute(
-            "SELECT id, symbol, margin_pair, volume, leverage, stop, stop_txid, txid, close_txid, "
+            "SELECT id, symbol, margin_pair, volume, leverage, COALESCE(stop_prot, stop), "
+            "stop_txid, txid, close_txid, "
             "entry FROM orders WHERE status='open' AND mode=? ORDER BY id", (self.mode,)).fetchall()
 
         # Batch every row's stop status into ONE QueryOrders sweep (50 txids/call)

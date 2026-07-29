@@ -307,6 +307,28 @@ TP_RUNG_PCT = 0.04
 TP_RUNG_FLOOR_PCT = 0.02
 TP_RUNG_MAX_PER_PASS = 4
 
+# Stop RATCHET on a proved rung (operator 2026-07-29, off the same night's audit).
+# The harvest layer is geometrically asymmetric: +4% up against a 7.83% mean stop
+# distance (volume-weighted across the live book), so net of round-trip fees it
+# needs ~70% of rungs to reach target before stop merely to break even — and the
+# 446-rung backtest measured 69%. The layer sits ON its break-even line, and the
+# leak is one-sided: a rung that reaches +4%, rests its sell, then fades under the
+# floor ABORTS and re-arms its stop at the ORIGINAL invalidation level, riding a
+# further ~8% down having already proved it could pay. Pin that stop up to
+# entry*(1+TP_RUNG_RATCHET_PCT) at the moment the harvest starts, so a proved
+# rung's worst case is ~breakeven (fees) instead of a full stop-out. This lowers
+# the break-even hit rate well under 70% without touching leverage, size, or the
+# long-only rule (a stop is still the only thing that sells).
+# Written to orders.stop_prot, NOT `stop` — see the store.py schema note: `stop`
+# is the ladder's inherited invalidation level, and ratcheting it in place would
+# trip the "rung would hit stop, ladder floor reached" guard and freeze
+# accumulation on the winning pairs. 0.0 = breakeven. Keep BELOW
+# TP_RUNG_FLOOR_PCT: the ratchet is applied while the bid is above the floor, and
+# a stop resting at/above the market fires on contact — also enforced per-rung
+# against the live bid, so a misconfigured value here can only no-op, never fire.
+TP_RUNG_RATCHET_ENABLED = True
+TP_RUNG_RATCHET_PCT = 0.0
+
 # Runtime exchange-truth sweep (audit 2026-07-13 #1): re-run the startup ledger↔Kraken
 # reconcile (verify_open_stops) every this-many seconds from the poll cycle, so an
 # intraday stop-fire, force-liquidation, or manual close is noticed within minutes —

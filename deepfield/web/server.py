@@ -93,8 +93,12 @@ def _web_live(conn):
 
 def _ladder(conn):
     by = {}
+    # COALESCE(stop_prot, stop): stop distance is a RISK reading — it must show the
+    # level a stop would actually rest at, which for a rung that proved the harvest
+    # target is its ratcheted breakeven, not the chain invalidation level below it.
     for oid, sym, vol, lev, entry, stop, txid, ctxid in conn.execute(
-            "SELECT id,symbol,volume,leverage,entry,stop,stop_txid,close_txid FROM orders "
+            "SELECT id,symbol,volume,leverage,entry,COALESCE(stop_prot,stop),"
+            "stop_txid,close_txid FROM orders "
             "WHERE status='open' ORDER BY symbol,id"):
         d = by.setdefault(sym, {"fills": [], "pendings": [], "stopped": 0, "harvesting": 0})
         # close_txid on an open row = mid-harvest (tp-rung) or mid-flatten: the
@@ -547,7 +551,8 @@ def build_pair(sym_display):
         fills, pendings = [], []
         for (oid, ts, entry, stop, stop_txid, ctxid, vol, lev, notional, margin,
              score, req, status) in conn.execute(
-                "SELECT id,ts,entry,stop,stop_txid,close_txid,volume,leverage,notional,margin,"
+                "SELECT id,ts,entry,COALESCE(stop_prot,stop),stop_txid,close_txid,"
+                "volume,leverage,notional,margin,"
                 "score,required,status FROM orders WHERE symbol=? "
                 "AND status IN ('open','pending') ORDER BY id", (ws,)):
             # W3: per-fill stop AND stop_txid — protection is a per-fill truth,
