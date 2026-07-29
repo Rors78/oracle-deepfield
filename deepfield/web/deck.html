@@ -1092,7 +1092,11 @@ setInterval(()=>{
 async function fetchState(){
   const failed=[];
   try{
-    const r=await fetch("/api/state",{cache:"no-store"}); if(!r.ok) throw 0;
+    const r=await fetch("/api/state",{cache:"no-store"});
+    // A 500 is NOT "unreachable" — the bot answered, its state builder threw.
+    // Carry the server's own error text up so the banner can say which it was.
+    if(!r.ok){ let d=""; try{ d=(await r.json()).error||""; }catch(_){}
+               const e=new Error("server"); e.srv=`HTTP ${r.status}${d?` · ${d}`:""}`; throw e; }
     S=await r.json();
     $("errbar").classList.remove("on");
     const oldPx={}; PAIRS.forEach(p=>oldPx[p.sym]=p.price); prevPx=oldPx;
@@ -1118,7 +1122,14 @@ async function fetchState(){
     const rb=$("renderbar");
     if(failed.length){ rb.textContent=`⚠ instrument fault — ${failed.join(", ")} failed to draw (data is live; this is a display bug)`; rb.classList.add("on"); }
     else rb.classList.remove("on");
-  }catch(_){ $("errbar").classList.add("on"); }
+  }catch(err){
+    // "unreachable" is a diagnosis, and a wrong one reads as "the bot died".
+    // Name the real failure: transport down vs. a live bot whose deck is throwing.
+    $("errbar").textContent = err && err.srv
+      ? `● console fault — ${err.srv} · the BOT IS UP and answering; /api/state is throwing`
+      : "● live API unreachable — retrying";
+    $("errbar").classList.add("on");
+  }
 }
 fetchState(); setInterval(fetchState,4000);
 /* deep link */
