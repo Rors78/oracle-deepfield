@@ -141,6 +141,15 @@ main{max-width:1720px; margin:0 auto; padding:18px 26px 30px; display:grid; gap:
 .chartwrap svg{display:block; width:100%}
 
 /* ── harvest ──────────────────────────────────────────────────────────── */
+.hv-rungs{border-bottom:1px solid var(--line); padding-bottom:10px; margin-bottom:4px}
+.hv-rungstat{display:flex; gap:8px}
+.hv-rungstat .chip{flex:1; min-width:0}
+.hv-recent{display:grid; gap:3px; margin-top:8px}
+.hv-recent .rrow{display:flex; gap:8px; align-items:baseline; font-family:var(--mono); font-size:10.5px}
+.hv-recent .rsym{font-family:var(--disp); font-weight:650; font-size:10.5px; letter-spacing:.05em; width:52px; flex:none}
+.hv-recent .rwhen{color:var(--ink4); flex:1}
+.hv-recent .rpct{color:var(--ink3)}
+.hv-recent .rp{font-weight:600}
 .harvest .gaugewrap{display:flex; justify-content:center; padding:2px 0 0}
 .gauge-center{text-anchor:middle}
 .hv-nums{display:flex; justify-content:space-between; font-family:var(--mono);
@@ -242,14 +251,14 @@ main{max-width:1720px; margin:0 auto; padding:18px 26px 30px; display:grid; gap:
 .jfeed{overflow-y:auto; display:grid; gap:2px; padding-right:4px}
 .jday{font-size:9px; letter-spacing:.2em; text-transform:uppercase; color:var(--ink4);
   padding:8px 0 3px; border-bottom:1px solid var(--line); margin-bottom:3px}
-.jrow{display:grid; grid-template-columns:52px 46px 1fr; gap:8px; align-items:baseline;
+.jrow{display:grid; grid-template-columns:52px 56px 1fr; gap:8px; align-items:baseline;
   font-size:11.5px; padding:2.5px 0}
 .jrow .ts{font-family:var(--mono); font-size:10px; color:var(--ink4)}
 .jrow .kind{font-family:var(--mono); font-size:8.5px; letter-spacing:.1em; text-align:center;
   border-radius:3px; padding:1.5px 0 .5px; border:1px solid var(--line2); color:var(--ink3)}
 .k-fill .kind{color:var(--gain-ink); border-color:rgba(47,169,124,.4)}
 .k-stop .kind{color:var(--loss-ink); border-color:rgba(216,80,107,.45)}
-.k-tp .kind{color:var(--brass-hi); border-color:var(--brass-dim)}
+.k-tp .kind,.k-tp-rung .kind{color:var(--brass-hi); border-color:var(--brass-dim)}
 .k-defense .kind,.k-safety .kind{color:var(--warn-ink); border-color:rgba(186,139,50,.5)}
 .jrow .tx{color:var(--ink2)}
 .jrow .tx b{color:var(--ink); font-weight:600; font-family:var(--mono); font-size:11px}
@@ -365,10 +374,11 @@ footer .reg{color:var(--ink2)}
     </article>
 
     <article class="card harvest rise" style="animation-delay:.07s">
-      <div class="eyebrow">Harvest cycle <span class="aux">+20% then flatten</span></div>
+      <div class="eyebrow">Harvest <span class="aux">rung +4% · book +20% backstop</span></div>
+      <div class="hv-rungs" id="hv-rungs"></div>
       <div class="gaugewrap" id="hv-gauge"></div>
       <div class="hv-nums" id="hv-nums"></div>
-      <div class="hv-banked"><span class="k">Banked · true trading profit</span><span class="v" id="hv-banked">—</span></div>
+      <div class="hv-banked"><span class="k">Banked · cycle ledger</span><span class="v" id="hv-banked">—</span></div>
       <div class="miniledger" id="hv-mini"></div>
     </article>
 
@@ -572,6 +582,22 @@ function arcPath(cx,cy,r,a0,a1){
   return `M ${x0.toFixed(2)} ${y0.toFixed(2)} A ${r} ${r} 0 ${large} 1 ${x1.toFixed(2)} ${y1.toFixed(2)}`;
 }
 function renderHarvest(h){
+  // per-rung harvest strip (the primary engine since 07-29) — cycle gauge below
+  // is the book-level backstop. Ledgers stay separate: cycle profit is settled
+  // minus baseline, so rung banks inside a completed cycle are already in it.
+  const rh=S.rung_harvest||{total:0,n:0,today:0,today_n:0,recent:[]};
+  $("hv-rungs").innerHTML=`
+    <div class="hv-rungstat">
+      <div class="chip"><div class="k">rungs banked today</div>
+        <div class="v num ${cls(rh.today)}">${rh.today_n?fmtSigned(rh.today):"—"}${rh.today_n?` <span class="dim" style="font-size:10px">· ${rh.today_n}</span>`:""}</div></div>
+      <div class="chip"><div class="k">all rung banks</div>
+        <div class="v num ${cls(rh.total)}">${rh.n?fmtSigned(rh.total):"—"}${rh.n?` <span class="dim" style="font-size:10px">· ${rh.n} lot${rh.n>1?"s":""}</span>`:""}</div></div>
+    </div>
+    ${rh.recent.length?`<div class="hv-recent">${rh.recent.slice(0,3).map(r=>
+      `<div class="rrow"><span class="rsym">${esc(r.sym)}</span><span class="rwhen">${esc(r.label)}</span>
+       ${r.pct!=null?`<span class="rpct">+${r.pct}%</span>`:""}
+       <span class="rp ${cls(r.pnl)}">${fmtSigned(r.pnl)}</span></div>`).join("")}</div>`
+    :`<div class="dim" style="font-size:10.5px;margin-top:7px">no rungs banked yet — first +4% rip lands here</div>`}`;
   const base=h.tp_baseline, tgt=h.tp_target, eq=h.equity!=null?h.equity:h.peak;
   const span=(tgt&&base)?tgt-base:null;
   const p=span?Math.max(0,Math.min(1,(eq-base)/span)):0;
@@ -593,7 +619,7 @@ function renderHarvest(h){
     <circle cx="${(CX+R*Math.cos(prog)).toFixed(1)}" cy="${(CY+R*Math.sin(prog)).toFixed(1)}" r="5"
       fill="var(--brass-hi)" stroke="var(--panel)" stroke-width="2.5"/>
     <text class="gauge-center" x="${CX}" y="${CY-8}" fill="var(--ink)" font-family="var(--mono)" font-weight="600" font-size="27">${pct==null?"—":(pct>=0?"+":"")+pct.toFixed(1)+"%"}</text>
-    <text class="gauge-center" x="${CX}" y="${CY+13}" fill="var(--ink3)" font-size="9.5" letter-spacing="2" font-family="var(--disp)">GAINED ON BASE</text>
+    <text class="gauge-center" x="${CX}" y="${CY+13}" fill="var(--ink3)" font-size="9.5" letter-spacing="2" font-family="var(--disp)">VS BASE · BOOK T/P</text>
     <text class="gauge-center" x="${CX}" y="${CY+34}" fill="var(--ink2)" font-family="var(--mono)" font-size="11">${span?fmtSigned(eq-base)+" this cycle":""}</text>
   </svg>`;
   $("hv-nums").innerHTML=`<span>base <b>${fmt$(base)}</b></span><span>equity <b>${fmt$(eq)}</b></span><span>target <b>${fmt$(tgt)}</b></span>`;
@@ -891,7 +917,8 @@ function renderLedger(){
 }
 function renderJournal(){
   let lastDay=null, html="";
-  JOURNAL.filter(j=>jFilter==="all"||j[1]===jFilter).forEach(j=>{
+  // "tp" (the harvest button) must catch the whole family: tp AND tp-rung
+  JOURNAL.filter(j=>jFilter==="all"||j[1]===jFilter||(jFilter==="tp"&&String(j[1]).startsWith("tp"))).forEach(j=>{
     const [ts,kind,sym,text,day]=j;
     if(day!==lastDay){ html+=`<div class="jday">${esc(day||"")}</div>`; lastDay=day; }
     html+=`<div class="jrow k-${esc(kind)}"><span class="ts">${esc(ts)}</span>

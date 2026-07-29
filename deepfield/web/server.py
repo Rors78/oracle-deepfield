@@ -382,7 +382,8 @@ def _assemble(conn):
         "label": reg.get("label"), "note": reg.get("note"), "daily_rsi": reg.get("drsi"),
     }
     return {"health": health, "regime": regime, "pairs": pairs,
-            "journal": _journal(conn), "tp_cycles": _tp_cycles(conn), "v": VERSION,
+            "journal": _journal(conn), "tp_cycles": _tp_cycles(conn),
+            "rung_harvest": _rung_harvest(conn, day0), "v": VERSION,
             # W1: the client must KNOW when market data is frozen. data_age_s is
             # always sent (null only when no blob has ever been written).
             "data_stale": not fresh,
@@ -426,6 +427,41 @@ def _tp_cycles(conn, n=30):
                     "flows": (round(flows, 2) if flows is not None else None),
                     "profit": round(profit, 2), "note": note})
     return out
+
+
+def _rung_harvest(conn, day0_iso, n=6):
+    """Per-rung harvest aggregates + the most recent banks (exit='tp-rung',
+    operator 2026-07-29 'build it at 4%'). KEPT SEPARATE from the tp_cycles
+    ledger on purpose: a cycle's profit is settled-minus-baseline, so rung banks
+    inside a completed cycle are already inside that number — summing the two
+    ledgers would double-count. `pct` is the price-space gain on the rung's own
+    basis (pnl / entry*vol), the number the 4% target is set in."""
+    try:
+        total = store.realized_ledger_since(conn, "1970-01-01", kind="tp-rung")
+        today = store.realized_ledger_since(conn, day0_iso, kind="tp-rung")
+        recent = []
+        for sym, pnl, cts, entry, vol in conn.execute(
+                "SELECT symbol, CAST(json_extract(error,'$.pnl') AS REAL), "
+                "json_extract(error,'$.closed_ts'), entry, volume FROM orders "
+                "WHERE status='closed' AND json_valid(error)=1 "
+                "AND json_extract(error,'$.exit')='tp-rung' "
+                "ORDER BY json_extract(error,'$.closed_ts') DESC LIMIT ?", (n,)):
+            try:
+                dt = datetime.datetime.fromisoformat(cts)
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=UTC)
+                label = dt.astimezone(DENVER).strftime("%b %d · %H:%M")
+            except Exception:
+                label = (cts or "")[:16]
+            basis = (entry or 0) * (vol or 0)
+            recent.append({"sym": (sym or "").replace("/USD", ""), "pnl": round(pnl or 0, 4),
+                           "label": label,
+                           "pct": (round(pnl / basis * 100, 1) if pnl is not None and basis > 0 else None)})
+        return {"total": round(total["total"], 4), "n": total["n"], "wins": total["wins"],
+                "today": round(today["total"], 4), "today_n": today["n"], "recent": recent}
+    except Exception:
+        # display-only block — a bad row must never take down /api/state
+        return {"total": 0.0, "n": 0, "wins": 0, "today": 0.0, "today_n": 0, "recent": []}
 
 
 def _journal(conn, n=60):
