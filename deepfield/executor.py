@@ -758,6 +758,7 @@ class Executor:
         # resting bid died, then seed a starter chain on any SEED_PAIRS symbol with
         # nothing working.
         self._reprotect_naked_open()
+        self._check_rung_harvest()       # per-rung T/P: bank +4% rungs, stops re-arm on abort
         self._reverse_gear()             # deleverage governor (Wave 4) — sheds before it grows
         self._ensure_ladder_rungs()
         self._seed_chains()
@@ -1663,6 +1664,265 @@ class Executor:
                           "cleared; reprotect re-arms them, next pass retries", sym)
         return True, complete
 
+    # ── per-rung take-profit harvest (operator 2026-07-29 "build it at 4%") ──
+
+    def _rung_exit_pnl_json(self, sym, oid, entry, close_order):
+        """Realized P&L for a harvest close -> JSON string, same {'pnl','exit',
+        'closed_ts'} shape as the stop/flatten records so one query reads the whole
+        ledger. Proceeds are the close's actual cost minus its fee; basis is the
+        row's recorded entry price (post-only maker entries fill AT that price).
+        Same documented omissions as _flatten_exit_pnl_map: entry-side fee and
+        rollover are not subtracted. None when unpriceable — never raises."""
+        try:
+            v = float(close_order.get("vol_exec", 0) or 0)
+            c = float(close_order.get("cost", 0) or 0)
+            f = float(close_order.get("fee", 0) or 0)
+            e = float(entry or 0)
+            if v <= 0 or c <= 0 or e <= 0:
+                return None
+            pnl = (c - f) - v * e
+            ct = close_order.get("closetm")
+            try:
+                ts = (datetime.datetime.fromtimestamp(float(ct), datetime.timezone.utc).isoformat()
+                      if ct else datetime.datetime.now(datetime.timezone.utc).isoformat())
+            except (TypeError, ValueError):
+                ts = datetime.datetime.now(datetime.timezone.utc).isoformat()
+            log.info("PNL %s: order %d realized $%.4f (rung harvest)", sym, oid, pnl)
+            return json.dumps({"pnl": round(pnl, 8), "exit": "tp-rung", "closed_ts": ts})
+        except Exception:
+            log.exception("PNL record failed for harvest of order %d (settling anyway)", oid)
+            return None
+
+    def _check_rung_harvest(self):
+        """Bank individual rungs at entry*(1+TP_RUNG_PCT) — the per-lot harvester the
+        07-28 backtest sized (4% target: realized-net peak, 69% win rate, ~1.5 days
+        to bank). Two passes: settle/chase the harvests already working, then start
+        new ones. Runs every poll; ZERO API calls when no rung is near target and
+        nothing is mid-harvest. The whole-book flatten owns the book when active —
+        this never runs beside it. Isolated — never raises into poll_fills."""
+        if self.mode != "live" or not getattr(config, "TP_RUNG_ENABLED", False):
+            return
+        try:
+            if str(store.meta_get(self.conn, "tp_flatten_active", "") or "") == "1":
+                return
+            self._harvest_manage_active()
+            self._harvest_start_new()
+        except Exception:
+            log.exception("rung-harvest pass failed (poll_fills continues)")
+
+    def _harvest_manage_active(self):
+        """Settle, chase, or abort every resting harvest sell. Safety rules are the
+        flatten's: act only on DEFINITE order state; a cancel leaves close_txid in
+        place so the NEXT pass settles the terminal truth (a cancel can race a
+        partial fill — the terminal vol_exec decides, never our intent). An abort
+        clears close_txid so _reprotect_naked_open re-arms the rung's stop."""
+        rows = self.conn.execute(
+            "SELECT id, symbol, margin_pair, volume, leverage, entry, close_txid "
+            "FROM orders WHERE status='open' AND close_txid IS NOT NULL AND mode=?",
+            (self.mode,)).fetchall()
+        if not rows:
+            return
+        # A close_txid shared by SIBLING rows is a flatten's (1:N) — never ours.
+        by_close = {}
+        for r in rows:
+            by_close.setdefault(r[6], []).append(r)
+        mine = {t: rs[0] for t, rs in by_close.items() if len(rs) == 1}
+        if not mine:
+            return
+        close_info = broker.query_orders(list(mine))
+        need_quote = sorted({_REST_PAIR.get(r[1], "") for t, r in mine.items()
+                             if _REST_PAIR.get(r[1])
+                             and (close_info.get(t) or {}).get("status") in ("open", "pending")})
+        quotes = (rest_client.fetch_ticker(need_quote) or {}) if need_quote else {}
+        for txid, (oid, sym, mpair, vol, lev, entry, _) in mine.items():
+            o = close_info.get(txid)
+            if o is None:
+                log.warning("HARVEST %s: close %s status UNKNOWN — leaving alone "
+                            "(never risk a doubled sell)", sym, txid)
+                continue
+            status = o.get("status")
+            try:
+                vol_exec = float(o.get("vol_exec", 0) or 0)
+            except (TypeError, ValueError):
+                vol_exec = 0.0
+            volf = float(vol or 0)
+            if status in ("closed", "canceled", "expired"):
+                if vol_exec >= volf - 1e-8 and vol_exec > 0:
+                    pnl_json = self._rung_exit_pnl_json(sym, oid, entry, o)
+                    self.conn.execute(
+                        "UPDATE orders SET status='closed', close_txid=NULL, "
+                        "error=COALESCE(?, 'tp-rung') WHERE id=?", (pnl_json, oid))
+                    self.conn.commit()
+                    try:
+                        banked = json.loads(pnl_json)["pnl"] if pnl_json else 0.0
+                    except (TypeError, ValueError, KeyError):
+                        banked = 0.0
+                    log.warning("HARVEST %s: rung %d BANKED $%+.4f (%.6g @ ~+%.1f%% target)",
+                                sym, oid, banked, vol_exec,
+                                getattr(config, "TP_RUNG_PCT", 0.04) * 100)
+                    self._journal("tp-rung", sym, f"rung {oid} banked ${banked:+.4f} "
+                                                  f"({vol_exec:.6g} sold)")
+                elif vol_exec > 0:
+                    # partial fill then terminal: the sold part is banked on the
+                    # exchange; shrink the row to the remainder and let reprotect
+                    # re-arm its stop. Per-lot P&L for the sold slice lives in the
+                    # journal only (the row must keep ONE terminal pnl record).
+                    self.conn.execute(
+                        "UPDATE orders SET volume=?, close_txid=NULL WHERE id=?",
+                        (volf - vol_exec, oid))
+                    self.conn.commit()
+                    log.warning("HARVEST %s: rung %d PARTIAL %.6g sold, %.6g remains — "
+                                "stop re-arms for the remainder", sym, oid, vol_exec, volf - vol_exec)
+                    self._journal("tp-rung", sym, f"rung {oid} partial harvest: {vol_exec:.6g} "
+                                                  f"sold, {volf - vol_exec:.6g} re-protected")
+                else:
+                    self.conn.execute("UPDATE orders SET close_txid=NULL WHERE id=?", (oid,))
+                    self.conn.commit()
+                    log.info("HARVEST %s: rung %d close %s unfilled — stop re-arms", sym, oid, status)
+                continue
+            # resting: chase within the floor, abort below it
+            q = quotes.get(_REST_PAIR.get(sym, ""))
+            if q is None:
+                key = _REST_PAIR.get(sym, "")
+                q = next((v for k, v in quotes.items() if _norm_pair_key(k) == key), None)
+            try:
+                bid, ask = (float(q["b"][0]), float(q["a"][0])) if q else (None, None)
+            except (TypeError, ValueError, KeyError, IndexError):
+                bid = ask = None
+            if bid is None:
+                continue                          # can't judge — leave it resting
+            floor_px = float(entry or 0) * (1 + getattr(config, "TP_RUNG_FLOOR_PCT", 0.02))
+            tick = 10 ** -config.MARGIN_TICK_DECIMALS.get(sym, 2)
+            try:
+                opx = float((o.get("descr") or {}).get("price") or 0)
+            except (TypeError, ValueError):
+                opx = 0.0
+            if bid < floor_px:
+                if broker.cancel_order(txid) is None:
+                    log.warning("HARVEST %s: abort cancel of %s FAILED — retry next pass", sym, txid)
+                    continue
+                log.warning("HARVEST %s: rung %d ABORTED — bid %.10g under floor %.10g, "
+                            "sell canceled, stop re-arms next pass", sym, oid, bid, floor_px)
+                self._journal("tp-rung", sym, f"rung {oid} harvest aborted under floor — re-protecting")
+                # close_txid stays; next pass reads the terminal vol_exec and settles
+            elif opx and opx > ask + tick / 2:
+                if broker.cancel_order(txid) is None:
+                    log.warning("HARVEST %s: chase cancel of %s FAILED — retry next pass", sym, txid)
+                    continue
+                log.info("HARVEST %s: close %s @ %s above ask %s — canceled to re-peg", sym, txid, opx, ask)
+                # close_txid stays; terminal settle next pass, re-trigger after that
+            # else: resting at/near the touch — let it work
+
+    def _harvest_start_new(self):
+        """Open new harvests: best rung per pair whose LOCAL price clears the target,
+        capped per pass. Order of operations per rung is the safety argument: quote
+        confirms the move first, backing is checked against live exchange volume
+        minus what sibling stops already commit (reprotect's rule), the stop is
+        canceled BEFORE the sell is placed (they never rest together), and a failed
+        placement leaves a stop-less row that reprotect re-arms within a cycle."""
+        active = {s for (s,) in self.conn.execute(
+            "SELECT DISTINCT symbol FROM orders WHERE status='open' "
+            "AND close_txid IS NOT NULL AND mode=?", (self.mode,))}
+        tgt_mult = 1 + getattr(config, "TP_RUNG_PCT", 0.04)
+        floor_mult = 1 + getattr(config, "TP_RUNG_FLOOR_PCT", 0.02)
+        best = {}                                 # sym -> (ratio, row)
+        for row in self.conn.execute(
+                "SELECT id, symbol, margin_pair, volume, leverage, entry, stop_txid "
+                "FROM orders WHERE status='open' AND close_txid IS NULL AND mode=? "
+                "AND COALESCE(entry,0) > 0 AND COALESCE(volume,0) > 0", (self.mode,)):
+            sym = row[1]
+            if sym in active:
+                continue
+            last = self._last_local_price(sym)
+            if not last or last < float(row[5]) * tgt_mult:
+                continue
+            ratio = last / float(row[5])
+            if sym not in best or ratio > best[sym][0]:
+                best[sym] = (ratio, row)
+        if not best:
+            return
+        cap = int(getattr(config, "TP_RUNG_MAX_PER_PASS", 4) or 4)
+        cands = sorted(best.values(), key=lambda t: -t[0])[:cap]
+        kr = broker.open_positions()
+        if kr is None:
+            log.warning("HARVEST: OpenPositions unavailable — cannot verify backing, retry next poll")
+            return
+        positions = list(kr.values()) if isinstance(kr, dict) else []
+
+        def _pair_long_vol(sym):
+            key = _REST_PAIR.get(sym, "")
+            tot = 0.0
+            for p in positions:
+                if _norm_pair_key(p.get("pair", "")) != key:
+                    continue
+                if str(p.get("type", "")).lower() == "sell":
+                    continue
+                try:
+                    tot += max(0.0, float(p.get("vol", 0) or 0) - float(p.get("vol_closed", 0) or 0))
+                except (TypeError, ValueError):
+                    continue
+            return tot
+
+        stopped_vol = {}          # sym -> volume committed by RESTING sibling stops
+        for s, v in self.conn.execute(
+                "SELECT symbol, COALESCE(volume,0) FROM orders "
+                "WHERE status='open' AND stop_txid IS NOT NULL AND mode=?", (self.mode,)):
+            stopped_vol[s] = stopped_vol.get(s, 0.0) + float(v or 0)
+        need = sorted({_REST_PAIR.get(r[1][1], "") for r in cands if _REST_PAIR.get(r[1][1])})
+        quotes = (rest_client.fetch_ticker(need) or {}) if need else {}
+        for ratio, (oid, sym, mpair, vol, lev, entry, stop_txid) in cands:
+            q = quotes.get(_REST_PAIR.get(sym, ""))
+            if q is None:
+                key = _REST_PAIR.get(sym, "")
+                q = next((v for k, v in quotes.items() if _norm_pair_key(k) == key), None)
+            try:
+                bid, ask = (float(q["b"][0]), float(q["a"][0])) if q else (None, None)
+            except (TypeError, ValueError, KeyError, IndexError):
+                bid = ask = None
+            if bid is None or bid <= float(entry) * floor_mult:
+                continue                          # quote gone or move already faded
+            volf = float(vol or 0)
+            committed = stopped_vol.get(sym, 0.0) - (volf if stop_txid else 0.0)
+            if _pair_long_vol(sym) - committed < volf - 1e-8:
+                log.warning("HARVEST %s: rung %d not backed by free live volume — "
+                            "skipping (reconcile will true up)", sym, oid)
+                continue
+            if stop_txid:
+                if broker.cancel_order(stop_txid) is None:
+                    log.warning("HARVEST %s: stop cancel FAILED for rung %d — "
+                                "still protected, retry next pass", sym, oid)
+                    continue
+                self.conn.execute("UPDATE orders SET stop_txid=NULL WHERE id=?", (oid,))
+                self.conn.commit()
+                stopped_vol[sym] = stopped_vol.get(sym, 0.0) - volf
+            tick_dec = config.MARGIN_TICK_DECIMALS.get(sym, 2)
+            tick = 10 ** -tick_dec
+            px = min(_round_price(bid + tick, tick_dec), ask)
+            if px <= bid:
+                px = ask                          # degenerate book — join the ask
+            info = store.get_pair_info(self.conn, sym) or {}
+            lot_dec = info.get("lot_decimals")
+            volstr = f"{volf:.{lot_dec}f}" if lot_dec is not None else f"{volf:.8f}"
+            pxstr = f"{px:.{tick_dec}f}"
+            res = broker.private("/0/private/AddOrder",
+                                 {"pair": mpair, "type": "sell", "ordertype": "limit",
+                                  "price": pxstr, "volume": volstr,
+                                  "leverage": str(lev), "oflags": "post"},
+                                 idempotent=False)
+            if res and res.get("txid"):
+                self.conn.execute("UPDATE orders SET close_txid=? WHERE id=?",
+                                  (res["txid"][0], oid))
+                self.conn.commit()
+                log.warning("HARVEST %s: rung %d at +%.1f%% — post-only sell resting "
+                            "%s @ %s (%s)", sym, oid, (ratio - 1) * 100, volstr, pxstr,
+                            res["txid"][0])
+                self._journal("tp-rung", sym, f"rung {oid} harvest: sell resting "
+                                              f"{volstr} @ {pxstr} (+{(ratio - 1) * 100:.1f}%)")
+            else:
+                log.error("HARVEST %s: sell placement FAILED for rung %d — stop dropped, "
+                          "reprotect re-arms next cycle", sym, oid)
+                self._journal("tp-rung", sym, f"rung {oid} harvest sell FAILED — reprotect re-arms")
+
     def _place_ladder_rung(self, symbol, margin_pair, leverage, stop, filled_price,
                            score=None, required=None):
         """Continuous laddering (config.LADDER_CONTINUOUS): when a bid fills, drop the
@@ -1988,8 +2248,8 @@ class Executor:
         # Oldest-first: when part of a pair's stack has closed out, surviving open
         # volume is allocated to the earliest rows; the newest (now-unbacked) rows retire.
         rows = self.conn.execute(
-            "SELECT id, symbol, margin_pair, volume, leverage, stop, stop_txid, txid, close_txid "
-            "FROM orders WHERE status='open' AND mode=? ORDER BY id", (self.mode,)).fetchall()
+            "SELECT id, symbol, margin_pair, volume, leverage, stop, stop_txid, txid, close_txid, "
+            "entry FROM orders WHERE status='open' AND mode=? ORDER BY id", (self.mode,)).fetchall()
 
         # Batch every row's stop status into ONE QueryOrders sweep (50 txids/call)
         # instead of one call per row: a 60-position reconcile otherwise fires 60+
@@ -1997,6 +2257,17 @@ class Executor:
         # restart. A stop_txid absent from this map reads as None below -> 'status
         # UNKNOWN', identical to the old per-row query_order failure (never re-placed).
         stop_info = broker.query_orders([r[6] for r in rows])   # r[6] = stop_txid
+        # Per-rung harvest closes (close_txid held by exactly ONE row — a flatten's is
+        # 1:N) must settle BEFORE the volume budget below: a harvest sell that FILLED
+        # since the last poll already shrank the pair's live volume, and oldest-first
+        # budgeting would otherwise retire the wrong sibling and cancel its LIVE stop
+        # as an "orphan" (the 2026-07-20 XLM/ZEC failure shape, harvest edition).
+        _close_refs = {}
+        for r in rows:
+            if r[8]:
+                _close_refs.setdefault(r[8], []).append(r[0])
+        _solo_closes = [t for t, ids in _close_refs.items() if len(ids) == 1]
+        close_order_info = broker.query_orders(_solo_closes) if _solo_closes else {}
         # Kraken's actually-resting orders, so PASS 2 can ADOPT a stop that rests on the
         # book but whose txid the ledger lost (persist-race orphan) instead of placing a
         # duplicate -> naked short (rank 3 / gap A). None on API failure -> adoption is
@@ -2010,7 +2281,7 @@ class Executor:
         budget = {}
         backed = []
         recon = {}   # per-pair happy-path tally -> a positive evidence line at the end
-        for oid, sym, mpair, vol, lev, stop, stop_txid, entry_txid, close_txid in rows:
+        for oid, sym, mpair, vol, lev, stop, stop_txid, entry_txid, close_txid, entry in rows:
             key = (sym, mpair)
             if key not in budget:
                 budget[key] = _pair_open_volume(sym)
@@ -2022,6 +2293,54 @@ class Executor:
                 volf = float(vol or 0)
             except (TypeError, ValueError):
                 volf = 0.0
+            # Harvest-owned row (solo close_txid): settle it off the CLOSE order's
+            # terminal truth first. Filled -> retire w/ P&L, budget preserved for
+            # siblings (its volume is already gone from the exchange). Partial/
+            # unfilled terminal -> shrink/clear and fall through as an ordinary row
+            # (stop re-arms below). Resting -> consume only the UNFILLED remainder.
+            # Unknown -> leave everything alone (status quo, consume in full).
+            if close_txid and len(_close_refs.get(close_txid, ())) == 1:
+                co = close_order_info.get(close_txid)
+                cstat = (co or {}).get("status")
+                try:
+                    cvol = float((co or {}).get("vol_exec", 0) or 0)
+                except (TypeError, ValueError):
+                    cvol = 0.0
+                if cstat in ("closed", "canceled", "expired"):
+                    if cvol >= volf - 1e-8 and cvol > 0:
+                        pnl_json = self._rung_exit_pnl_json(sym, oid, entry, co)
+                        self.conn.execute(
+                            "UPDATE orders SET status='closed', close_txid=NULL, "
+                            "error=COALESCE(?, 'tp-rung') WHERE id=?", (pnl_json, oid))
+                        self.conn.commit()
+                        recon[sym]["closed"] += 1
+                        log.info("%s: %s order %d harvest close filled — retired w/ P&L, "
+                                 "budget preserved for siblings", pfx, sym, oid)
+                        self._journal("tp-rung", sym, f"rung {oid} harvest settled by reconcile")
+                        continue
+                    if cvol > 0:
+                        volf -= cvol
+                        vol = volf               # backed tuple must carry the remainder
+                        self.conn.execute(
+                            "UPDATE orders SET volume=?, close_txid=NULL WHERE id=?", (volf, oid))
+                    else:
+                        self.conn.execute(
+                            "UPDATE orders SET close_txid=NULL WHERE id=?", (oid,))
+                    self.conn.commit()
+                    close_txid = None            # ordinary row now — stop re-arms below
+                elif cstat in ("open", "pending"):
+                    budget[key] -= max(0.0, volf - cvol)
+                    backed.append((oid, sym, mpair, vol, lev, stop, stop_txid, close_txid))
+                    continue
+                else:
+                    # close status UNKNOWN: the sell may rest live — retiring this row
+                    # would strand it (an untracked sell). Leave everything alone.
+                    recon[sym]["unknown"] += 1
+                    log.warning("%s: %s order %d harvest close %s status UNKNOWN — "
+                                "leaving as-is, retry next sweep", pfx, sym, oid, close_txid)
+                    budget[key] -= volf
+                    backed.append((oid, sym, mpair, vol, lev, stop, stop_txid, close_txid))
+                    continue
             o = stop_info.get(stop_txid) if stop_txid else None
             ostatus = (o or {}).get("status")
             # (rank 2) This row's OWN stop EXECUTED -> the position is definitively gone,

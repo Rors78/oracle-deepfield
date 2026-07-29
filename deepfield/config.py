@@ -286,6 +286,27 @@ TP_ENABLED = True
 TP_PCT = 0.20
 TP_TARGET_FLOOR_BASELINE = True
 
+# Per-RUNG take-profit harvest (operator 2026-07-29 "build it at 4%"): each open
+# lot banks itself at entry*(1+TP_RUNG_PCT) instead of waiting for the whole-book
+# equity target above (which stays armed as the melt-up backstop). Backtest over
+# the 446 live rungs 07-13..07-28: realized net peaks at 4% (+$45, 69% win rate,
+# median 1.5 days fill->bank); 20% per-rung fired 7 times in 446. The trigger
+# rides the poll cycle off the LOCAL candle price (no API cost when nothing is
+# near target); the exit is the flatten's maker mechanics: cancel the rung's stop
+# FIRST, then rest a post-only limit sell a tick over best bid — the stop and the
+# harvest sell NEVER rest together (double-sell -> short), tracked in
+# orders.close_txid exactly like a flatten close so reprotect/reconcile leave it
+# alone. If the market sags below entry*(1+TP_RUNG_FLOOR_PCT) before the sell
+# fills, the harvest ABORTS: sell canceled, stop re-armed (reprotect path) — the
+# chase may follow a rip down to the floor but never banks below it, so a
+# harvest can never realize a loss (floor > round-trip fees). Same long-only
+# amendment as the flatten: an event-triggered close of a long, resting until
+# filled. One harvest per pair at a time; new starts capped per pass (API budget).
+TP_RUNG_ENABLED = True
+TP_RUNG_PCT = 0.04
+TP_RUNG_FLOOR_PCT = 0.02
+TP_RUNG_MAX_PER_PASS = 4
+
 # Runtime exchange-truth sweep (audit 2026-07-13 #1): re-run the startup ledger↔Kraken
 # reconcile (verify_open_stops) every this-many seconds from the poll cycle, so an
 # intraday stop-fire, force-liquidation, or manual close is noticed within minutes —
