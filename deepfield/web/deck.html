@@ -456,6 +456,13 @@ const fmtPx=v=>{ if(v==null)return "—"; const a=Math.abs(v);
 const fmtVol=v=>{ if(v==null)return "—"; const a=Math.abs(v);
   return a>=1e6?(a/1e6).toFixed(2).replace(/\.?0+$/,"")+"M":a>=1e3?(a/1e3).toFixed(1).replace(/\.0$/,"")+"k":String(parseFloat(a.toFixed(6))); };
 const cls=v=>v>=0?"gain":"loss";
+/* W5, carried from v7: which pairs the last reconcile sweep flagged. A pair is
+   bad only on an explicit ok:false — absence of data is the header's UNVERIFIED
+   state, not a per-pair alarm. */
+const reconBad=h=>(!h||h.recon_ok!==false||!h.recon_per_pair)?[]
+  :Object.entries(h.recon_per_pair).filter(([,v])=>v&&v.ok===false)
+    .map(([s,v])=>({sym:s.replace("/USD",""),
+      lab:`${s.replace("/USD","")} ${v.rows??"?"}r/${v.vol??"?"}v/${v.stops??"?"}s`}));
 const hms=s=>{ const h=s/3600|0,m=(s%3600)/60|0; return h>=48?`${(h/24)|0}d ${h%24}h`:`${h}h ${String(m).padStart(2,"0")}m`; };
 const cdown=s=>{ if(s==null)return "—"; const h=s/3600|0,m=(s%3600)/60|0;
   return h>=24?`${(h/24)|0}d ${h%24}h`:h?`${h}h ${String(m).padStart(2,"0")}m`:`${m}m`; };
@@ -666,7 +673,13 @@ function renderDefense(h){
   const tier=h.defense_tier||"—";
   const tb=$("tierbadge"); tb.textContent=tier; tb.className="tierbadge tier-"+(tier||"NOMINAL");
   $("tiernote").textContent=tier==="NOMINAL"?"all rails green":tier==="CAUTION"?"buffer thinning":tier==="CRITICAL"?"deleverage territory":"";
-  $("def-aux").textContent=h.recon_ok==null?"":(h.recon_ok?`recon ✓ ${h.recon_time||""}`:`recon MISMATCH ${h.recon_time||""}`);
+  // recon is three-state truth: ✓, MISMATCH (named per pair), or UNVERIFIED.
+  // A null must read as amber doubt — a blank badge is indistinguishable from ✓.
+  const rbad=reconBad(h);
+  $("def-aux").innerHTML=h.recon_ok==null
+    ?`<span class="warn">recon UNVERIFIED — no sweep recorded</span>`
+    :h.recon_ok?`recon ✓ ${esc(h.recon_time||"")}`
+    :`<span class="loss" style="font-weight:600">recon MISMATCH ${esc(h.recon_time||"")}${rbad.length?" · "+rbad.map(b=>esc(b.lab)).join(" · "):""}</span>`;
   const lvl=h.margin_level, x=mlX(lvl);
   const W=420,H=64;
   // Zones split at 120 (MARGIN_LEVEL_ALERT_PCT). Below it the watch is paging, so it
@@ -875,6 +888,7 @@ function sortVal(p,k){
 }
 function renderBook(){
   const held=PAIRS.filter(p=>p.fills>0), scout=PAIRS.filter(p=>!p.fills);
+  const rbad=new Set(reconBad(S.health||{}).map(b=>b.sym));
   $("book-aux").textContent=`${held.length} positions · ${S.health.bid_count??"—"} entry bids working (rungs + scouts)`;
   held.sort((a,b)=>{ const va=sortVal(a,sortKey), vb=sortVal(b,sortKey);
     return (va<vb?-1:va>vb?1:0)*sortDir; });
@@ -898,8 +912,8 @@ function renderBook(){
       :`<span class="protlamp loss" title="NO RESTING STOP">○</span>`;
     const flash=prevPx[p.sym]!=null&&p.price!=null&&p.price!==prevPx[p.sym]
       ?(p.price>prevPx[p.sym]?"flash-up":"flash-dn"):"";
-    return `<tr class="${p.fault?"fault":""} ${flash}" data-sym="${p.sym}">
-      <td class="l"><span class="sym">${p.sym}</span>${p.status!=="HOLD"?` <span class="statuschip ${p.stStyle}">${p.status}</span>`:""}${hv?` <span class="statuschip" style="color:var(--brass-hi);border-color:var(--brass-dim)">HARVEST</span>`:""}</td>
+    return `<tr class="${p.fault||rbad.has(p.sym)?"fault":""} ${flash}" data-sym="${p.sym}">
+      <td class="l"><span class="sym">${p.sym}</span>${p.status!=="HOLD"?` <span class="statuschip ${p.stStyle}">${p.status}</span>`:""}${hv?` <span class="statuschip" style="color:var(--brass-hi);border-color:var(--brass-dim)">HARVEST</span>`:""}${rbad.has(p.sym)?` <span class="statuschip fault" title="reconcile mismatch — ledger and exchange truth disagree on this pair">▢ MISMATCH</span>`:""}</td>
       <td>${fmtPx(p.price)}</td>
       <td class="${cls(p.chg||0)}">${p.chg==null?"—":(p.chg>=0?"+":"")+p.chg.toFixed(1)+"%"}</td>
       <td class="${cls(p.pnl||0)}">${fmtSigned(p.pnl)}</td>

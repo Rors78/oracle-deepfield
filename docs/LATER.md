@@ -3,7 +3,8 @@
 - sig3 fresh-cross variant: convert `W-MACD Hist Crossup` from state to event
   (`hist[-1]>0 AND hist[-2]<=0`). Strategy change — operator must gate.
 
-- continuous laddering (built in v6 worktree, NOT deployed): drop next post-only
+- continuous laddering (DEPLOYED — `LADDER_CONTINUOUS=True` has been live on master
+  since mid-July; this note predates the cutover): drop next post-only
   rung 1% below each fill down to the stop. My "thesis-gated" refinement (re-run
   engine before each rung) is WEAKER than it sounds — the 7 signals are daily/weekly,
   so an intraday gate is inert between closes. Key finding: a strategy-paced ladder
