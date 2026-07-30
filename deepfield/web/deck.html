@@ -144,6 +144,10 @@ main{max-width:1720px; margin:0 auto; padding:18px 26px 30px; display:grid; gap:
 .hv-rungs{border-bottom:1px solid var(--line); padding-bottom:10px; margin-bottom:4px}
 .hv-rungstat{display:flex; gap:8px}
 .hv-rungstat .chip{flex:1; min-width:0}
+.hv-carry{display:flex; gap:8px; align-items:baseline; margin-top:8px; padding-top:7px;
+  border-top:1px solid var(--line2); font-family:var(--mono); font-size:10.5px}
+.hv-carry .ck{font-family:var(--disp); font-weight:650; font-size:10.5px; letter-spacing:.05em; color:var(--ink3); flex:none}
+.hv-carry .cnet{margin-left:auto; font-weight:600}
 .hv-recent{display:grid; gap:3px; margin-top:8px}
 .hv-recent .rrow{display:flex; gap:8px; align-items:baseline; font-family:var(--mono); font-size:10.5px}
 .hv-recent .rsym{font-family:var(--disp); font-weight:650; font-size:10.5px; letter-spacing:.05em; width:52px; flex:none}
@@ -565,7 +569,7 @@ function renderCapital(h){
     ["open p&l", h.open_pnl, cls(h.open_pnl||0), fmtSigned(h.open_pnl)],
     ["today · swing", h.swing_day, cls(h.swing_day||0), h.swing_day==null?"—":fmtSigned(h.swing_day)],
     ["realized wk", h.realized_week, cls(h.realized_week||0), fmtSigned(h.realized_week)],
-    ["fees today", h.fees_day, "loss", h.fees_day==null?"—":"−"+fmt$(h.fees_day)],
+    ["carry · fees", h.fees_day, "loss", h.fees_day==null?"—":"−"+fmt$(h.fees_day)],
     ["margin free", h.free_margin, "sec", h.free_margin==null?"—":fmt$(h.free_margin,0)],
   ];
   $("cap-chips").innerHTML=chips.map(([k,_,c,txt])=>
@@ -581,6 +585,21 @@ function arcPath(cx,cy,r,a0,a1){
   const large=(a1-a0)>Math.PI?1:0;
   return `M ${x0.toFixed(2)} ${y0.toFixed(2)} A ${r} ${r} 0 ${large} 1 ${x1.toFixed(2)} ${y1.toFixed(2)}`;
 }
+function carryRow(h,rh){
+  // Rollover carry vs the rung harvest — the daily race that decides whether the
+  // book skims net-positive. fees_day is Kraken-ledger truth (hourly poll), not an
+  // estimate; fees_total accrues from fees_epoch (accounting anchor), NOT all-time.
+  if(h.fees_day==null) return "";
+  const net=(rh.today||0)-h.fees_day;
+  const since=h.fees_epoch
+    ?` since ${new Date(h.fees_epoch*1000).toLocaleDateString("en-US",{month:"short",day:"numeric"}).toLowerCase()}`
+    :"";
+  return `<div class="hv-carry" title="margin rollover paid (Kraken ledger truth) vs rungs banked — net skim today">
+    <span class="ck">carry</span>
+    <span class="loss">−${fmt$(h.fees_day)}</span><span class="dim">today</span>
+    ${h.fees_total!=null?`<span class="dim">· −${fmt$(h.fees_total)}${since}</span>`:""}
+    <span class="cnet ${cls(net)}">net ${fmtSigned(net)}</span></div>`;
+}
 function renderHarvest(h){
   // per-rung harvest strip (the primary engine since 07-29) — cycle gauge below
   // is the book-level backstop. Ledgers stay separate: cycle profit is settled
@@ -593,6 +612,7 @@ function renderHarvest(h){
       <div class="chip"><div class="k">all rung banks</div>
         <div class="v num ${cls(rh.total)}">${rh.n?fmtSigned(rh.total):"—"}${rh.n?` <span class="dim" style="font-size:10px">· ${rh.n} lot${rh.n>1?"s":""}</span>`:""}</div></div>
     </div>
+    ${carryRow(h,rh)}
     ${rh.recent.length?`<div class="hv-recent">${rh.recent.slice(0,3).map(r=>
       `<div class="rrow"><span class="rsym">${esc(r.sym)}</span><span class="rwhen">${esc(r.label)}</span>
        ${r.pct!=null?`<span class="rpct">+${r.pct}%</span>`:""}

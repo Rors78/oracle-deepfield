@@ -897,6 +897,7 @@ def _persist_web_live(conn, appstate, equity, margin_used, free_margin, balance)
         "tp_trough": round(tptr, 2) if tptr else None,
         "tp_target": round(tp_eff * (1 + config.TP_PCT), 2) if tp_eff else None,
         "fees_day": _mg("fees_day"), "fees_total": _mg("fees_total"),
+        "fees_epoch": _mg("fees_epoch"),
         "buffer_liq_pct": _finite(dfn.get("buffer_liq_pct")),
         "buffer_call_pct": _finite(dfn.get("buffer_call_pct")),
         "eff_leverage": _finite(dfn.get("eff_leverage")),

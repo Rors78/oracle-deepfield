@@ -379,6 +379,7 @@ def _assemble(conn):
         "tp_baseline": live.get("tp_baseline"), "tp_target": live.get("tp_target"),
         "tp_trough": live.get("tp_trough"),
         "fees_day": live.get("fees_day"), "fees_total": live.get("fees_total"),
+        "fees_epoch": live.get("fees_epoch"),   # unix ts rollover accounting anchored (may be absent in old blobs)
         # Liq-buffer telemetry. Wave 1 has published these into the blob since
         # a5e2d39 but this allowlist never forwarded them, so the console showed
         # nothing — the operator's only price-space risk read was the TUI, the
