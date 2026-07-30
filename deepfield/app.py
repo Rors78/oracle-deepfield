@@ -282,6 +282,28 @@ def _poll_external_flows(c, broker, now):
         if tcur.rowcount == 0:
             log.info("T/P trough shift $%+.2f skipped — ratcheted underneath "
                      "(post-flow equity already contains it)", net)
+    # Kill-switch peak rides the same ledger truth (rails re-arm 2026-07-30): a
+    # deposit is not profit and a withdrawal is not a drawdown — an unshifted
+    # peak would either mask a real drawdown (deposit-inflated peak already bit
+    # once: the 07-16 $40 deposit helped set the old 223.79) or trip the switch
+    # on money the operator moved out. Same CAS-skip semantics as the baseline:
+    # if the executor reset/ratcheted the peak underneath, that write came from
+    # a post-flow equity read and already contains this flow. Floor 0 — a big
+    # withdrawal clears it and _update_peak re-seeds from live equity.
+    raw_peak = store.meta_get(c, "peak_equity", None)
+    peak = 0.0
+    try:
+        peak = float(raw_peak or 0)
+    except (TypeError, ValueError):
+        pass
+    if peak > 0:
+        newp = peak + net
+        pcur = c.execute("UPDATE meta SET value=? WHERE key='peak_equity' AND value=?",
+                         (("0.0" if newp <= 0 else str(round(newp, 4))), raw_peak))
+        c.commit()
+        if pcur.rowcount == 0:
+            log.info("kill-switch peak shift $%+.2f skipped — peak changed underneath "
+                     "(post-flow equity already contains it)", net)
     store.meta_set(c, "tp_cycle_flows", round(_mf("tp_cycle_flows") + net, 4))
     log.warning("T/P BASELINE SHIFTED by external flow $%+.2f (%d ledger entr%s): "
                 "$%.2f -> $%.2f, target %s — trading-profit-only trigger",
@@ -351,7 +373,8 @@ def _poll_stress_threaded():
     try:
         weights = _stress_weights(c)
         if not weights:
-            store.meta_set(c, "stress_state", json.dumps({"flat": True}))
+            store.meta_set(c, "stress_state", json.dumps(
+                {"flat": True, "updated": time.time()}))
             return
         syms = [s for s, _ in weights]
         wmap = dict(weights)
@@ -375,6 +398,9 @@ def _poll_stress_threaded():
             "ref_move_pct": {str(h): round(r * 100, 3) for h, r in refs.items()},
             "buffer_now_pct": None, "buffer_under_intraday_pct": None,
             "lev_now": None, "lev_ceiling": None,
+            # Freshness stamp so the L_eff growth gate (_stack_margin_ok) can
+            # fail open on a stale blob instead of trusting a dead poll forever.
+            "updated": time.time(),
         }
         cur = defense.compute(e, m, v)
         if cur:
@@ -956,8 +982,21 @@ def _startup(debug, announce=False):
             # kr is None on an API failure — guard the len() so a transient blip in this
             # cosmetic log line can't raise and skip verify_open_stops() below (which has
             # its own None-handling and MUST run to re-place any missing/orphaned stops).
+            # Kraken splits ONE order's fill across multiple position RECORDS
+            # (venue partials — an ETH dust split held 3 records on 1 order,
+            # 2026-07-30), so len(kr) counts records, not positions; the ledger
+            # counts orders. Compare orders to orders, and name the record count
+            # only when it differs, so this line stops reading as a mismatch.
+            if kr is None:
+                kr_txt = "unavailable"
+            else:
+                refs = {p.get("ordertxid") for p in kr.values()
+                        if isinstance(p, dict) and p.get("ordertxid")} if isinstance(kr, dict) else set()
+                n_orders = len(refs) if refs else len(kr)
+                kr_txt = (str(n_orders) if n_orders == len(kr)
+                          else f"{n_orders} ({len(kr)} records — venue fill splits)")
             log.info("startup position check: ledger open=%d · Kraken open positions=%s",
-                     ours, len(kr) if kr is not None else "unavailable")
+                     ours, kr_txt)
             ing.executor.verify_open_stops()   # re-place any missing protective stops
         except Exception:
             log.exception("startup position/stop check failed")

@@ -491,6 +491,10 @@ def test_journal_rows_emitted_on_order_fill_stop(tmp_path, monkeypatch):
     a resting live entry emits 'order', a confirmed fill emits 'fill', the
     protective stop emits 'stop'."""
     conn = _conn(tmp_path)
+    # Rails re-arm 2026-07-30: armed rails block live placement on an unknown
+    # equity (the kill-switch can't be evaluated blind) — this test is about
+    # journal narration, so give it a live equity read.
+    monkeypatch.setattr(ex_mod.broker, "trade_balance", lambda: 1000.0)
     monkeypatch.setattr(ex_mod.broker, "private",
                         lambda ep, p=None, **kw: ({"txid": ["OENTRY-1"]}
                                                   if p and p.get("ordertype") == "limit"
@@ -914,6 +918,67 @@ def test_verify_backed_row_missing_stop_is_reprotected(tmp_path, monkeypatch):
     placed = [p for kind, p in sent if kind == "private"]
     assert len(placed) == 1                              # exactly one re-place
     assert placed[0]["type"] == "sell" and placed[0]["ordertype"] == "stop-loss"
+    assert conn.execute("SELECT stop_txid FROM orders WHERE id=?", (a,)).fetchone()[0] == "ONEWSTOP"
+    conn.close()
+
+
+def test_verify_replace_gated_on_fresh_backing(tmp_path, monkeypatch):
+    """07-29 ADA race regression: the sweep-START snapshot shows the position
+    backed, but by the time PASS 2 reaches the re-place the position is GONE
+    (operator hand-canceled the stops, then market-closed — the sweep raced the
+    close). The stop must NOT be re-placed off the stale snapshot: the fresh
+    re-read says unbacked, so the row's stop_txid clears and the per-poll
+    _reprotect_naked_open (definite-state, backing-gated) owns re-arming."""
+    conn = _conn(tmp_path)
+    a = _seed_open(conn, "OSTOP-A")
+    sent = []
+    _wire_broker(monkeypatch,
+                 positions={"P1": _pos(0.1)},          # sweep start: backed
+                 stop_status={"OSTOP-A": "canceled"},  # stop externally canceled
+                 sent=sent)
+    snaps = [{"P1": _pos(0.1)}, {}]                    # 1st call: backed · fresh: gone
+    monkeypatch.setattr(ex_mod.broker, "open_positions",
+                        lambda: snaps.pop(0) if snaps else {})
+    _exec(conn, mode="live").verify_open_stops()
+    assert not any(kind == "private" for kind, _ in sent)   # NO orphan stop placed
+    row = conn.execute("SELECT status, stop_txid FROM orders WHERE id=?", (a,)).fetchone()
+    assert row[0] == "open" and row[1] is None              # handoff to reprotect
+    conn.close()
+
+
+def test_verify_replace_defers_when_fresh_read_unavailable(tmp_path, monkeypatch):
+    """Fresh OpenPositions None at the re-place moment = cannot verify backing —
+    defer (stop_txid NULL, reprotect owns it), never place on the stale snapshot."""
+    conn = _conn(tmp_path)
+    a = _seed_open(conn, "OSTOP-A")
+    sent = []
+    _wire_broker(monkeypatch,
+                 positions={"P1": _pos(0.1)},
+                 stop_status={"OSTOP-A": "canceled"},
+                 sent=sent)
+    snaps = [{"P1": _pos(0.1)}, None]                  # fresh read fails
+    monkeypatch.setattr(ex_mod.broker, "open_positions",
+                        lambda: snaps.pop(0) if snaps else None)
+    _exec(conn, mode="live").verify_open_stops()
+    assert not any(kind == "private" for kind, _ in sent)
+    row = conn.execute("SELECT status, stop_txid FROM orders WHERE id=?", (a,)).fetchone()
+    assert row[0] == "open" and row[1] is None
+    conn.close()
+
+
+def test_verify_replace_proceeds_on_confirmed_fresh_backing(tmp_path, monkeypatch):
+    """The healthy case is unchanged: fresh backing confirms the position and the
+    missing stop is re-placed exactly once, immediately."""
+    conn = _conn(tmp_path)
+    a = _seed_open(conn, "OSTOP-A")
+    sent = []
+    _wire_broker(monkeypatch,
+                 positions={"P1": _pos(0.1)},          # constant: both reads backed
+                 stop_status={"OSTOP-A": "canceled"},
+                 sent=sent)
+    _exec(conn, mode="live").verify_open_stops()
+    placed = [p for kind, p in sent if kind == "private"]
+    assert len(placed) == 1 and placed[0]["ordertype"] == "stop-loss"
     assert conn.execute("SELECT stop_txid FROM orders WHERE id=?", (a,)).fetchone()[0] == "ONEWSTOP"
     conn.close()
 

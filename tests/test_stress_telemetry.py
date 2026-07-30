@@ -154,7 +154,11 @@ def test_flat_book_records_flat_and_does_not_alert(tmp_path, monkeypatch):
     fired = []
     monkeypatch.setattr(app.alerter, "fire_safety", lambda *a, **k: fired.append(a))
     app._poll_stress_threaded()
-    assert _state() == {"flat": True}
+    s = _state()
+    assert s.get("flat") is True
+    # Rails re-arm 2026-07-30: every stress_state write carries a freshness
+    # stamp so the L_eff growth gate can fail open on a dead poll.
+    assert s.get("updated", 0) > 0
     assert fired == []
 
 

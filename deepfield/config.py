@@ -256,7 +256,15 @@ except ValueError:
 # no signal gate" across the entire margin universe — min-fill rungs; the
 # margin cost of the lower-leverage tiers is operator-accepted). Regime gate,
 # HALT, stack floor and all rung guards still apply per placement.
-SEED_PAIRS = tuple(p["ws"] for p in PAIRS)
+# USDC/USD is a PEGGED pair: 731 daily bars close 0.9995–1.0001 — the +4% rung
+# harvest can never print, the 5%-minimum stop can never trigger, and a filled
+# lot would pay rollover forever for zero expected move. Seeding it only cycles
+# a structurally-unfillable ~$5 bid through the respend bucket (bids rest 0.1%
+# below a peg that doesn't dip; 7 lifetime bids, 7 TTL cancels, 0 fills).
+# Pulled from seeding 2026-07-30 — this reverses one line of the 07-19
+# full-universe dispatch; restore by deleting the exclusion. Stays in PAIRS:
+# display and signals untouched.
+SEED_PAIRS = tuple(p["ws"] for p in PAIRS if p["ws"] != "USDC/USD")
 
 # Equity take-profit (operator 2026-07-13 "t/p out at +20%, then go again"): when
 # live equity >= tp_baseline * (1 + TP_PCT), flatten the WHOLE book — cancel every
@@ -539,14 +547,25 @@ NO_ACCUMULATE_REGIMES = ("BULL",)   # regimes that pause new entries/rungs when 
 # volume at that instant, operator-ordered 2026-07-13). Do NOT add resting sells.
 
 # Risk rails (deterministic hard limits, from GoldenEye — NOT learners).
-# OPERATOR OVERRIDE: automatic circuit breakers OFF ("no circuit breakers, no
-# fear"). RAILS_ENABLED=False makes rails_ok skip the drawdown kill-switch, the
-# daily/weekly loss caps, the max-positions gate, and the equity-unknown block —
-# the bot never stops ITSELF. The manual HALT file (below) stays as the operator's
-# hand-on-switch, and the per-position protective stop is the strategy's own exit,
-# neither of which is a "circuit breaker". Flip True to re-arm the auto-brakes.
-RAILS_ENABLED = False
-MAX_OPEN_POSITIONS = 15
+# RE-ARMED 2026-07-30 at operator direction ("no more off the rails — do it your
+# way"), recalibrated for the ladder era in the same change — the 07-04 values
+# predate continuous laddering:
+#   MAX_OPEN_POSITIONS 15 -> 300. rails_ok counts COMMITTED rows (open + pending);
+#   the 29-pair ladder book runs ~90 open + ~25 resting bids in normal shape, so 15
+#   was a permanent freeze (and, via rails_ok's short-circuit, made every check
+#   behind it unreachable). 300 ≈ 10-rung chains on every pair — a runaway-loop
+#   backstop, never a working-set cap. The working-set brakes are the ML stack
+#   floor, the respend governor, and the L_eff ceiling gate in _stack_margin_ok.
+#   KILL_SWITCH peak: peak_equity now RESETS at each T/P cycle settle
+#   (executor._check_take_profit) and SHIFTS with external deposits/withdrawals
+#   (app._poll_external_flows), so the 20% drawdown measures TRADING loss of the
+#   CURRENT cycle — the old never-resetting, deposit-contaminated peak sat 3.4%
+#   above 2026-07-30 equity and would have latched on the first red day.
+# The manual HALT file (below) stays the operator's hand-on-switch, and the
+# per-position protective stop is the strategy's own exit — neither is a
+# circuit breaker.
+RAILS_ENABLED = True
+MAX_OPEN_POSITIONS = 300
 DAILY_LOSS_LIMIT_USD = 15.0         # halt new entries after this realized daily loss
 WEEKLY_LOSS_LIMIT_USD = 35.0
 KILL_SWITCH_DD_PCT = 0.20           # halt at 20% drawdown from peak equity (manual reset)

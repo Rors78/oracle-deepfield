@@ -371,6 +371,28 @@ class Executor:
                 return False, "T/P flatten in progress"
         except Exception:
             pass                                   # fail open, same as the floor read
+        # L_eff ceiling gate (rails re-arm 2026-07-30): the stress telemetry
+        # already computes the effective leverage that survives the worst 1-day
+        # basket move on record (meta stress_state, app._poll_stress_threaded,
+        # 300s cadence) — it used to only alert. Here it gates GROWTH: seeds and
+        # rungs pause while lev_now > lev_ceiling. Composition-independent
+        # backstop the ML floor can't give: an all-10x book passes the ML-200
+        # floor up to ~5x effective — above the ~4x survivable ceiling. Same
+        # fail-open idiom as the floor read below: missing/stale (>600s, two
+        # missed stress polls)/flat/inf never pauses anything. Entry-gating
+        # only — never closes positions (the reverse gear is the only actuator).
+        try:
+            st = json.loads(store.meta_get(self.conn, "stress_state") or "{}")
+            lev, lceil = st.get("lev_now"), st.get("lev_ceiling")
+            upd = float(st.get("updated", 0) or 0)
+            if (lev is not None and lceil is not None and upd > 0
+                    and time.time() - upd <= 600):
+                lev, lceil = float(lev), float(lceil)
+                if lceil > 0 and not math.isinf(lceil) and lev > lceil:
+                    return False, (f"effective leverage {lev:.2f}x > survivable "
+                                   f"ceiling {lceil:.2f}x — growth paused")
+        except Exception:
+            log.exception("L_eff ceiling check failed — failing open")
         floor = float(getattr(config, "MARGIN_LEVEL_STACK_FLOOR_PCT", 0) or 0)
         if floor <= 0:
             return True, ""
@@ -1429,6 +1451,12 @@ class Executor:
             store.meta_set(self.conn, "tp_trough", new_eq)
             store.meta_set(self.conn, "tp_cycle_flows", 0.0)
             store.meta_set(self.conn, "tp_flatten_active", "0")
+            # Kill-switch peak rides the cycle (rails re-arm 2026-07-30): settled
+            # profit is BANKED — off the table, not at risk. Carrying the
+            # pre-flatten peak across a settle would read the deliberate flatten
+            # itself as a drawdown and latch the rails through the restack.
+            # peak_equity re-ratchets from here via _update_peak.
+            store.meta_set(self.conn, "peak_equity", new_eq)
             _tp_trough_noted = None
             log.warning("T/P CYCLE COMPLETE: baseline $%.2f -> settled $%.2f · trading "
                         "profit $%+.2f (external flows $%+.2f rode along) — seeder "
@@ -2531,22 +2559,42 @@ class Executor:
 
         # PASS 2 — ADDITIONS only, after every removal is done: ensure each backed row
         # has exactly one resting stop; re-place only a DEFINITELY-gone/missing one.
+        # Fresh-backing gate for re-places (2026-07-30 — the 07-29 ADA race): the
+        # backing classification above rode ONE OpenPositions snapshot from sweep
+        # start, so a manual close mid-sweep (stops hand-canceled, market close
+        # landing) got 4 stops re-placed onto a dying position — orphan sell
+        # orders that would have OPENED A SHORT on trigger, resting for a full
+        # RUNTIME_RECON_SECS. Before any re-place, re-read OpenPositions ONCE per
+        # sweep (lazy — most sweeps re-place nothing) and budget the row against
+        # FRESH volume minus what this pass already knows is claimed by sibling
+        # rows' resting sells. On doubt (fetch None, or unbacked): do NOT
+        # re-place — clear the row's stop_txid so _reprotect_naked_open (every
+        # poll, definite-state, backing-gated) owns re-arming within seconds.
+        # Protection is deferred one poll, never lost.
+        fresh_fetched = False
+        fresh_list = None            # None AFTER a fetch == unavailable this sweep
+        committed_vol = {}           # sym -> volume already claimed by resting sells
         for oid, sym, mpair, vol, lev, stop, stop_txid, close_txid in backed:
+            volf = float(vol or 0)
             if close_txid:
                 # The T/P flatten owns this row — its resting limit close is the
                 # exit. Re-placing a stop here would double the sell volume.
                 log.info("%s: %s order %d has a resting T/P close (%s) — flatten owns "
                          "it, no stop re-place", pfx, sym, oid, close_txid)
+                committed_vol[sym] = committed_vol.get(sym, 0.0) + volf
                 continue
             o = stop_info.get(stop_txid) if stop_txid else None
             status = (o or {}).get("status")
             if status in ("open", "pending"):
                 recon[sym]["resting"] += 1
+                committed_vol[sym] = committed_vol.get(sym, 0.0) + volf
                 continue                                   # stop confirmed resting -> fine
             if o is None and stop_txid:
                 # Stop status UNKNOWN (query failed) while backed: do NOT re-place
                 # blindly (it might already rest -> duplicate -> short). Retry later.
+                # Conservatively assume it rests when budgeting fresh backing below.
                 recon[sym]["unknown"] += 1
+                committed_vol[sym] = committed_vol.get(sym, 0.0) + volf
                 log.warning("%s: %s order %d stop query failed — leaving as-is, retry next restart", pfx, sym, oid)
                 continue
             if not config.PROTECTIVE_STOP:                 # stops disabled -> never place one
@@ -2560,12 +2608,36 @@ class Executor:
                 self.conn.commit()
                 claimed_stops.add(adopt)
                 recon[sym]["resting"] += 1
+                committed_vol[sym] = committed_vol.get(sym, 0.0) + volf
                 log.warning("%s: %s order %d adopted resting orphan stop %s (ledger had %s) — "
                             "no duplicate placed", pfx, sym, oid, adopt, stop_txid or "none")
                 self._journal("stop", sym, f"adopted resting orphan stop {adopt}")
                 continue
             # Stop DEFINITELY gone (closed/canceled/expired) or never placed, no orphan to
-            # adopt, and the position is backed: re-place once, non-idempotent transport.
+            # adopt, and the position is backed: re-place once, non-idempotent transport —
+            # but only against FRESH backing (the ADA-race gate declared above PASS 2).
+            if not fresh_fetched:
+                fresh_fetched = True
+                fp = broker.open_positions()
+                fresh_list = list(fp.values()) if isinstance(fp, dict) else (
+                    None if fp is None else [])
+            backed_now = False
+            if fresh_list is not None:
+                fresh_vol = sum(_long_vol(p) for p in fresh_list
+                                if _norm_pair(p.get("pair", "")) == rest_by_ws.get(sym, ""))
+                backed_now = fresh_vol - committed_vol.get(sym, 0.0) >= volf - 1e-8
+            if not backed_now:
+                self.conn.execute("UPDATE orders SET stop_txid=NULL WHERE id=?", (oid,))
+                self.conn.commit()
+                recon[sym]["unknown"] += 1     # not resting, not re-placed — pair reads not-ok
+                log.warning("%s: %s order %d stop gone but FRESH backing %s — NOT re-placing "
+                            "(manual close may be landing); stop_txid cleared, reprotect "
+                            "re-arms next poll if the position survives", pfx, sym, oid,
+                            "unavailable" if fresh_list is None else "insufficient")
+                self._journal("stop", sym, f"row {oid}: re-place deferred — fresh backing "
+                                           f"{'unavailable' if fresh_list is None else 'insufficient'}, "
+                                           f"reprotect owns it")
+                continue
             log.warning("%s: %s order %d position backed but stop %s — re-placing",
                         pfx, sym, oid, status or "missing")
             # Stale-price tell (audit M4): if the market gapped BELOW the stored stop
@@ -2587,6 +2659,7 @@ class Executor:
                 self.conn.commit()
                 claimed_stops.add(res["txid"][0])   # a sibling row must not adopt it
                 recon[sym]["replaced"] += 1
+                committed_vol[sym] = committed_vol.get(sym, 0.0) + volf
                 log.info("PROTECT %s: re-placed stop @ %s (%s)", sym, stop, res["txid"][0])
                 self._journal("stop", sym, f"re-placed missing stop @ {stop}")
             else:
