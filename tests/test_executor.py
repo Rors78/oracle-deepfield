@@ -1634,6 +1634,39 @@ def test_respend_debit_never_exceeds_burst(tmp_path, monkeypatch):
     conn.close()
 
 
+def test_respend_credit_refunds_a_canceled_bid(tmp_path, monkeypatch):
+    """A canceled-unfilled bid hands its notional back (2026-07-30: TTL/post-only
+    re-places are not new growth — the churn was starving ZEC/USDC of re-seeds).
+    The credit must ALSO apply accrual first, same as debit — and never mint past
+    the burst ceiling."""
+    conn = _conn(tmp_path)
+    monkeypatch.setattr(config, "RESPEND_BUDGET_USD_PER_HR", 5.0)
+    monkeypatch.setattr(config, "RESPEND_BURST_USD", 40.0)
+    e = _exec(conn, mode="live")
+    _bucket(conn, tokens=1.0, age_secs=3600)           # $1 stored + $5 accrued = $6
+    e._respend_credit(4.0, "ZEC/USD")
+    left = json.loads(store.meta_get(conn, "respend_bucket"))["tokens"]
+    assert abs(left - 10.0) < 0.01                     # $6 + $4 refund, accrual kept
+    e._respend_credit(500.0, "ZEC/USD")                # refund can't mint past burst
+    left = json.loads(store.meta_get(conn, "respend_bucket"))["tokens"]
+    assert abs(left - 40.0) < 0.01
+    conn.close()
+
+
+def test_respend_credit_noop_when_disabled_or_empty(tmp_path, monkeypatch):
+    """Governor off, or a row with no notional, must leave the bucket untouched."""
+    conn = _conn(tmp_path)
+    monkeypatch.setattr(config, "RESPEND_BUDGET_USD_PER_HR", 0.0)   # OFF
+    e = _exec(conn, mode="live")
+    e._respend_credit(4.0, "ZEC/USD")
+    assert store.meta_get(conn, "respend_bucket") is None
+    monkeypatch.setattr(config, "RESPEND_BUDGET_USD_PER_HR", 5.0)
+    _bucket(conn, tokens=1.0, age_secs=0)
+    e._respend_credit(None, "ZEC/USD")                 # NULL notional row — no-op
+    assert json.loads(store.meta_get(conn, "respend_bucket"))["tokens"] <= 1.01
+    conn.close()
+
+
 def test_respend_blocks_when_bucket_short(tmp_path, monkeypatch):
     """Under the notional, the governor refuses and the debit is a no-op."""
     conn = _conn(tmp_path)

@@ -458,6 +458,36 @@ class Executor:
             log.exception("respend budget check failed — failing open")
             return True, "", (lambda: None)
 
+    def _respend_credit(self, notional, sym):
+        """Refund a canceled-unfilled entry bid's notional to the respend bucket
+        (operator directive 2026-07-30: a TTL/post-only re-place of an existing bid
+        is not new book growth, so the churn must not drain the bucket — it was
+        starving the priciest min-lot pairs, ZEC/USDC, out of ever re-seeding).
+        Debit fires only once a bid rests; this is its inverse at the only terminal
+        where a rested bid dies without a fill, so rest->die->re-place nets zero.
+        KNOWN LOOSENESS, accepted: confirmed-BUY bids never debited (respend=False)
+        but their rare TTL cancel still credits here — a phantom credit bounded by
+        the burst cap, erring toward re-levering faster (operator no-blockers
+        stance) rather than tracking per-row debit state in the polymorphic error
+        column. Same accrue-then-write discipline as _debit: stale-stamping the
+        stored tokens would discard accrual earned since the last write."""
+        rate = float(getattr(config, "RESPEND_BUDGET_USD_PER_HR", 0) or 0)
+        if rate <= 0 or not notional or notional <= 0:
+            return
+        try:
+            burst = float(getattr(config, "RESPEND_BURST_USD", 0) or 0) or rate
+            b = json.loads(store.meta_get(self.conn, "respend_bucket") or "{}")
+            now = time.time()
+            tokens = min(burst, float(b.get("tokens", burst))
+                         + max(0.0, now - float(b.get("updated", now))) * rate / 3600.0)
+            new = min(burst, tokens + float(notional))
+            store.meta_set(self.conn, "respend_bucket",
+                           json.dumps({"tokens": new, "updated": now}))
+            log.info("RESPEND %s: canceled-unfilled bid refunds $%.2f to the bucket "
+                     "($%.0f -> $%.0f) — a re-place is not growth", sym, notional, tokens, new)
+        except Exception:
+            log.exception("respend credit failed (bucket unchanged — throttle only tightens)")
+
     def _last_local_price(self, symbol):
         """Newest 15m candle close from our OWN store, or None. A rough, possibly
         minutes-stale price — good enough to decide whether a bid is worth pricing at
@@ -673,7 +703,8 @@ class Executor:
         if self._check_take_profit():
             return          # book was just flattened — nothing to promote or ladder this cycle
         rows = self.conn.execute(
-            "SELECT id, symbol, margin_pair, volume, leverage, stop, txid, ts, entry, score, required "
+            "SELECT id, symbol, margin_pair, volume, leverage, stop, txid, ts, entry, score, required, "
+            "COALESCE(notional, entry*volume) "
             "FROM orders WHERE status='pending' AND mode=?", (self.mode,)).fetchall()
         # ONE batched QueryOrders sweep for every pending txid (50/call). On the
         # full-universe roster (2026-07-19) a healthy book RESTS 130+ seed bids —
@@ -682,7 +713,7 @@ class Executor:
         # A txid ABSENT from the map is UNKNOWN (== query_order None): skip and
         # converge next cycle, never treat as gone.
         known = broker.query_orders([r[6] for r in rows if r[6]])
-        for oid, sym, mpair, vol, lev, stop, txid, ts, entry, score, required in rows:
+        for oid, sym, mpair, vol, lev, stop, txid, ts, entry, score, required, row_notional in rows:
             if not txid:
                 # Ambiguous-AddOrder recovery (audit C3): this row was born from an
                 # AddOrder whose network transport failed — it MAY be on the book.
@@ -752,6 +783,9 @@ class Executor:
                                   (f"entry {status}, unfilled", oid))
                 self.conn.commit()
                 log.info("ENTRY %s: %s unfilled — no position", sym, status)
+                # The bid rested (debited) and died unfilled — hand its claim back so
+                # the TTL/post-only re-place cycle doesn't drain the bucket (2026-07-30).
+                self._respend_credit(row_notional, sym)
         # Runtime safety nets: re-protect any 'open' position whose stop-rest failed
         # (again — fresh fills this cycle can be naked; the pre-T/P pass above covers
         # the flatten-retry window), re-place the next ladder rung for any chain whose
