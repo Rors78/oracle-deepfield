@@ -946,6 +946,32 @@ def test_verify_replace_gated_on_fresh_backing(tmp_path, monkeypatch):
     conn.close()
 
 
+def test_verify_fresh_backing_counts_higher_id_siblings(tmp_path, monkeypatch):
+    """The fresh-backing budget must be ORDER-INDEPENDENT. Two backed rows on one
+    pair: the LOW-id row's stop is gone, the HIGH-id sibling's stop rests. Half the
+    volume closes mid-sweep. Budgeting incrementally (siblings-seen-so-far) would
+    let the low-id row re-place against volume the sibling's live stop already
+    claims -> resting-sell volume ABOVE open volume, the naked short the whole
+    reconcile exists to prevent. The row must defer to reprotect instead."""
+    conn = _conn(tmp_path)
+    a = _seed_open(conn, "OSTOP-A")            # low id, stop GONE
+    b = _seed_open(conn, "OSTOP-B")            # high id, stop RESTING
+    sent = []
+    _wire_broker(monkeypatch,
+                 positions={"P1": _pos(0.1), "P2": _pos(0.1)},   # sweep start: 0.2 backs both
+                 stop_status={"OSTOP-A": "canceled", "OSTOP-B": "open"},
+                 sent=sent)
+    snaps = [{"P1": _pos(0.1), "P2": _pos(0.1)}, {"P1": _pos(0.1)}]   # fresh: only 0.1 left
+    monkeypatch.setattr(ex_mod.broker, "open_positions",
+                        lambda: snaps.pop(0) if snaps else {"P1": _pos(0.1)})
+    _exec(conn, mode="live").verify_open_stops()
+    assert not any(kind == "private" for kind, _ in sent), \
+        "re-placed against volume the sibling's resting stop already claims"
+    assert conn.execute("SELECT stop_txid FROM orders WHERE id=?", (a,)).fetchone()[0] is None
+    assert conn.execute("SELECT stop_txid FROM orders WHERE id=?", (b,)).fetchone()[0] == "OSTOP-B"
+    conn.close()
+
+
 def test_verify_replace_defers_when_fresh_read_unavailable(tmp_path, monkeypatch):
     """Fresh OpenPositions None at the re-place moment = cannot verify backing —
     defer (stop_txid NULL, reprotect owns it), never place on the stale snapshot."""

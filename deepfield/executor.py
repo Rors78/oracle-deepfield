@@ -2573,7 +2573,19 @@ class Executor:
         # Protection is deferred one poll, never lost.
         fresh_fetched = False
         fresh_list = None            # None AFTER a fetch == unavailable this sweep
-        committed_vol = {}           # sym -> volume already claimed by resting sells
+        # Pre-seed each pair's committed volume across ALL rows BEFORE iterating.
+        # Accumulating in row order would let a low-id re-place candidate budget
+        # against volume a HIGHER-id sibling's live stop already claims — total
+        # resting-sell volume above open volume, i.e. the naked short this whole
+        # function exists to prevent. Holders = a flatten's resting close, a
+        # confirmed-resting stop, or an UNKNOWN-status stop (conservatively
+        # assumed to rest). Re-place candidates add themselves below, on success.
+        committed_vol = {}
+        for _oid, _sym, _mp, _v, _lev, _stop, _stxid, _ctxid in backed:
+            _o = stop_info.get(_stxid) if _stxid else None
+            _st = (_o or {}).get("status")
+            if _ctxid or _st in ("open", "pending") or (_o is None and _stxid):
+                committed_vol[_sym] = committed_vol.get(_sym, 0.0) + float(_v or 0)
         for oid, sym, mpair, vol, lev, stop, stop_txid, close_txid in backed:
             volf = float(vol or 0)
             if close_txid:
@@ -2581,20 +2593,17 @@ class Executor:
                 # exit. Re-placing a stop here would double the sell volume.
                 log.info("%s: %s order %d has a resting T/P close (%s) — flatten owns "
                          "it, no stop re-place", pfx, sym, oid, close_txid)
-                committed_vol[sym] = committed_vol.get(sym, 0.0) + volf
-                continue
+                continue                                   # already in committed_vol
             o = stop_info.get(stop_txid) if stop_txid else None
             status = (o or {}).get("status")
             if status in ("open", "pending"):
                 recon[sym]["resting"] += 1
-                committed_vol[sym] = committed_vol.get(sym, 0.0) + volf
-                continue                                   # stop confirmed resting -> fine
+                continue                    # stop confirmed resting (in committed_vol)
             if o is None and stop_txid:
                 # Stop status UNKNOWN (query failed) while backed: do NOT re-place
                 # blindly (it might already rest -> duplicate -> short). Retry later.
-                # Conservatively assume it rests when budgeting fresh backing below.
+                # Conservatively assumed to rest by the committed_vol pre-pass.
                 recon[sym]["unknown"] += 1
-                committed_vol[sym] = committed_vol.get(sym, 0.0) + volf
                 log.warning("%s: %s order %d stop query failed — leaving as-is, retry next restart", pfx, sym, oid)
                 continue
             if not config.PROTECTIVE_STOP:                 # stops disabled -> never place one
