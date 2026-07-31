@@ -1000,7 +1000,10 @@ function sortVal(p,k){
   } return 0;
 }
 function renderBook(){
-  const held=PAIRS.filter(p=>p.fills>0), scout=PAIRS.filter(p=>!p.fills);
+  // USDC is pegged and was pulled from SEED_PAIRS (2026-07-30) — it can never
+  // seed a ladder, so a scout row for it is a permanent dead line. Hidden here
+  // (display only); it would still surface in the book if a position ever opened.
+  const held=PAIRS.filter(p=>p.fills>0), scout=PAIRS.filter(p=>!p.fills&&p.sym!=="USDC");
   const rbad=new Set(reconBad(S.health||{}).map(b=>b.sym));
   $("book-aux").textContent=`${held.length} positions · ${S.health.bid_count??"—"} entry bids working (rungs + scouts)`;
   held.sort((a,b)=>{ const va=sortVal(a,sortKey), vb=sortVal(b,sortKey);

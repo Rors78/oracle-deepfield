@@ -32,6 +32,32 @@ def _isolate_operator_stack_knobs(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _isolate_poll_fills_clocks(monkeypatch):
+    """poll_fills gates its runtime exchange-truth sweep and the reladder/seed
+    safety nets behind MODULE-level monotonic clocks (_recon_next, _reladder_next,
+    _seed_next). In a fresh process _recon_next is 0.0, so the FIRST test to call
+    poll_fills eats the one-shot runtime sweep — its broker fake receives an
+    OpenPositions call it never faked, and pytest-randomly turned that into a
+    roaming intermittent failure (whichever ladder test the shuffle put first).
+    Default the sweep INERT and hand every test fresh backoff dicts. The runtime
+    reconcile tests call verify_open_stops() directly (no clock involved), and the
+    seed tests clear/assert _seed_next themselves — a fresh dict preserves both.
+
+    The reladder safety net (_ensure_ladder_rungs) is the same story one layer
+    down: clock-fresh it fires in EVERY live-mode poll_fills test and continues
+    the chain a step below the lowest fill (test_ladder_dedupe_skips_owned_level
+    only ever passed because an earlier test's clock stamp suppressed it). No test
+    exercises it through poll_fills, so default it INERT like the other add-on
+    behaviors above; a test that wants it monkeypatches the method back."""
+    from deepfield import executor as ex_mod
+    monkeypatch.setattr(config, "RUNTIME_RECON_SECS", 0)
+    monkeypatch.setattr(ex_mod, "_recon_next", 0.0)
+    monkeypatch.setattr(ex_mod, "_reladder_next", {})
+    monkeypatch.setattr(ex_mod, "_seed_next", {})
+    monkeypatch.setattr(ex_mod.Executor, "_ensure_ladder_rungs", lambda self: None)
+
+
+@pytest.fixture(autouse=True)
 def _bridge_query_orders_to_query_order(monkeypatch):
     """poll_fills batches its pending-order lookups through broker.query_orders
     (one 50-txid sweep per cycle — full-universe roster, 2026-07-19). The legacy
