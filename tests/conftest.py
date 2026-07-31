@@ -6,6 +6,8 @@ would masquerade as / suppress every execution test. Point HALT_FILE at a
 nonexistent temp path for every test so the suite never depends on (or is
 poisoned by) the real runtime file. Tests that WANT a halt monkeypatch it back.
 """
+import types
+
 import pytest
 
 from deepfield import config
@@ -29,6 +31,29 @@ def _isolate_operator_stack_knobs(monkeypatch):
     # behavior to poll_fills; default it inert so legacy tests test exactly what they
     # tested. The dedicated test_reverse_gear.py monkeypatches it on.
     monkeypatch.setattr(config, "REVERSE_GEAR_ENABLED", False)
+
+
+@pytest.fixture(autouse=True)
+def _mute_alerter_desktop(monkeypatch):
+    """Tests that walk recon-mismatch / unprotected / stop-fired paths fired REAL
+    desktop alerts: executor._fire_safety lazy-imports the live alerter, and only
+    test_safety_alert_routing ever mocked it. A few full-suite runs on 2026-07-31
+    buried the operator's desktop in critical 'DEEPFIELD SAFETY: recon-mismatch'
+    popups + paplay sirens that read as live incidents. Rebind alerter's OWN
+    shutil/subprocess module references to inert stubs (which() finds no binary ->
+    no sound tier, no notify-send; the real modules are untouched for everyone
+    else) and blank the Telegram creds. play_alert()/_telegram() stay REAL —
+    test_m5_ingest's bell-fallback and telegram-URL tests still exercise them,
+    and the routing tests' own leaf mocks simply land on these stubs and win.
+    _safety_last is the same module-level cross-test clock as the poll_fills
+    dicts below — fresh per test."""
+    from deepfield import alerter
+    monkeypatch.setattr(alerter, "shutil", types.SimpleNamespace(which=lambda _n: None))
+    monkeypatch.setattr(alerter, "subprocess", types.SimpleNamespace(
+        run=lambda *a, **k: types.SimpleNamespace(returncode=1)))
+    monkeypatch.setattr(alerter, "TG_TOKEN", None)
+    monkeypatch.setattr(alerter, "TG_CHAT", None)
+    monkeypatch.setattr(alerter, "_safety_last", {})
 
 
 @pytest.fixture(autouse=True)
