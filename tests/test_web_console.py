@@ -297,3 +297,73 @@ def test_strip_state_below_stop_is_loudest():
     assert "BELOW STOP" in label and "bold" in style
     label, _ = ui._strip_state(_v(1.02, 1.00), time.time())
     assert label == "NEAR-STOP"
+
+
+# ── deck mk II: sparklines, interval candles, equity windows, skim series ─────
+
+def test_state_ships_15m_sparkline(tmp_path, monkeypatch):
+    now = time.time()
+    t0 = int(now) - 3600
+    spark_candles = [("ADA/USD", 15, t0 + i * 900, 0.29 + i * 0.001) for i in range(4)]
+    st = _state(tmp_path, monkeypatch, blob=_blob(now),
+                candles=_candles_ada(now) + spark_candles)
+    ada = _pair(st, "ADA")
+    assert ada["spark"] == [0.29, 0.291, 0.292, 0.293]
+
+
+def test_state_spark_empty_when_no_15m_history(tmp_path, monkeypatch):
+    now = time.time()
+    st = _state(tmp_path, monkeypatch, blob=_blob(now), candles=_candles_ada(now))
+    assert _pair(st, "ADA")["spark"] == []
+
+
+def test_build_pair_intraday_interval(tmp_path, monkeypatch):
+    now = time.time()
+    t0 = int(now) - 7200
+    hour_candles = [("ADA/USD", 60, t0 + i * 3600, 0.30 + i * 0.01) for i in range(2)]
+    _mkdb(tmp_path, monkeypatch, blob=_blob(now),
+          candles=_candles_ada(now) + hour_candles)
+    d = server.build_pair("ADA", iv=60)
+    assert d["iv"] == 60 and len(d["days"]) == 2
+    assert d["closes"] == [0.30, 0.31]
+    # bogus interval falls back to daily, never 500s
+    d = server.build_pair("ADA", iv=7)
+    assert d["iv"] == 1440 and len(d["days"]) == 2
+
+
+def test_build_equity_windows(tmp_path, monkeypatch):
+    import sqlite3 as _sq
+    now = int(time.time())
+    db = _mkdb(tmp_path, monkeypatch, blob=_blob(now), candles=_candles_ada(now))
+    conn = _sq.connect(db)
+    conn.execute("INSERT INTO equity_history(ts,equity) VALUES(?,?)", (now - 3 * 86400, 150.0))
+    conn.execute("INSERT INTO equity_history(ts,equity) VALUES(?,?)", (now - 600, 180.0))
+    conn.commit(); conn.close()
+    assert server.build_equity(24) == [[now - 600, 180.0]]
+    assert server.build_equity(168) == [[now - 3 * 86400, 150.0], [now - 600, 180.0]]
+    assert server.build_equity(0) == [[now - 3 * 86400, 150.0], [now - 600, 180.0]]
+
+
+def _tp_rung_closed(sym, pnl, closed_iso, entry=0.20, vol=20.0):
+    return {"ts": "2026-07-29T01:00:00+00:00", "symbol": sym, "side": "buy",
+            "mode": "live", "entry": entry, "stop": 0.1, "volume": vol,
+            "leverage": 3, "notional": entry * vol, "margin": entry * vol / 3,
+            "score": 5, "required": 5, "txid": "T", "status": "closed",
+            "error": json.dumps({"exit": "tp-rung", "pnl": pnl,
+                                 "closed_ts": closed_iso})}
+
+
+def test_rung_harvest_series_and_leaderboard(tmp_path, monkeypatch):
+    now = time.time()
+    st = _state(tmp_path, monkeypatch, blob=_blob(now), candles=_candles_ada(now),
+                orders=[_tp_rung_closed("ADA/USD", 0.12, "2026-07-29T10:00:00+00:00"),
+                        _tp_rung_closed("ADA/USD", 0.10, "2026-07-30T11:00:00+00:00"),
+                        _tp_rung_closed("SHIB/USD", 0.50, "2026-07-30T12:00:00+00:00")])
+    rh = st["rung_harvest"]
+    # series is oldest-first, [ts, pnl, sym]
+    assert [x[2] for x in rh["series"]] == ["ADA", "ADA", "SHIB"]
+    assert rh["series"][0][1] == 0.12
+    assert rh["series"][0][0] < rh["series"][1][0] < rh["series"][2][0]
+    # leaderboard is total-desc: SHIB 0.50 beats ADA 0.22
+    assert rh["by_sym"][0] == {"sym": "SHIB", "total": 0.50, "n": 1}
+    assert rh["by_sym"][1] == {"sym": "ADA", "total": 0.22, "n": 2}

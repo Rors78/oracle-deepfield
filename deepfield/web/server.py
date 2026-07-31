@@ -55,6 +55,18 @@ def _series(conn, pair, interval, cols):
         (pair, interval)).fetchall()
 
 
+def _spark(conn, pair, hours=24, max_pts=48):
+    """15m closes for the book-row sparkline, downsampled. Display-only."""
+    since = int(time.time()) - hours * 3600
+    rows = conn.execute(
+        "SELECT c FROM candles WHERE pair=? AND interval=15 AND ts>=? ORDER BY ts",
+        (pair, since)).fetchall()
+    if len(rows) > max_pts:
+        step = len(rows) / max_pts
+        rows = [rows[int(i * step)] for i in range(max_pts)] + [rows[-1]]
+    return [round(r[0], 8) for r in rows]
+
+
 def _daily_closes(conn, pair, limit=365):
     rows = conn.execute(
         "SELECT ts,c FROM candles WHERE pair=? AND interval=1440 ORDER BY ts DESC LIMIT ?",
@@ -292,6 +304,7 @@ def _assemble(conn):
 
         pairs.append({
             "sym": disp, "tier": tier, "status": status, "stStyle": stStyle,
+            "spark": _spark(conn, sym),
             "price": price, "chg": chg, "score": score, "denom": denom, "req": req,
             "sig": sig, "naReason": na, "lo": lo52, "hi": hi52, "pctLow": pct_low,
             "fills": fills, "size": size, "pnl": pnl, "avg": avg, "stop": stop,
@@ -475,11 +488,37 @@ def _rung_harvest(conn, day0_iso, n=6):
             recent.append({"sym": (sym or "").replace("/USD", ""), "pnl": round(pnl or 0, 4),
                            "label": label,
                            "pct": (round(pnl / basis * 100, 1) if pnl is not None and basis > 0 else None)})
+        # full bank history (unix ts) for the cumulative skim curve — capped at the
+        # most recent 400 banks so the payload stays bounded as the ledger grows
+        series = []
+        for cts, pnl, sym in conn.execute(
+                "SELECT json_extract(error,'$.closed_ts'), "
+                "CAST(json_extract(error,'$.pnl') AS REAL), symbol FROM orders "
+                "WHERE status='closed' AND json_valid(error)=1 "
+                "AND json_extract(error,'$.exit')='tp-rung' "
+                "ORDER BY json_extract(error,'$.closed_ts') DESC LIMIT 400"):
+            try:
+                dt = datetime.datetime.fromisoformat(cts)
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=UTC)
+                series.append([int(dt.timestamp()), round(pnl or 0, 4),
+                               (sym or "").replace("/USD", "")])
+            except Exception:
+                continue
+        series.reverse()                                 # oldest-first for plotting
+        by_sym = [{"sym": (s or "").replace("/USD", ""), "total": round(t or 0, 4), "n": n}
+                  for s, t, n in conn.execute(
+                      "SELECT symbol, SUM(CAST(json_extract(error,'$.pnl') AS REAL)), "
+                      "COUNT(*) FROM orders WHERE status='closed' AND json_valid(error)=1 "
+                      "AND json_extract(error,'$.exit')='tp-rung' "
+                      "GROUP BY symbol ORDER BY 2 DESC LIMIT 6")]
         return {"total": round(total["total"], 4), "n": total["n"], "wins": total["wins"],
-                "today": round(today["total"], 4), "today_n": today["n"], "recent": recent}
+                "today": round(today["total"], 4), "today_n": today["n"], "recent": recent,
+                "series": series, "by_sym": by_sym}
     except Exception:
         # display-only block — a bad row must never take down /api/state
-        return {"total": 0.0, "n": 0, "wins": 0, "today": 0.0, "today_n": 0, "recent": []}
+        return {"total": 0.0, "n": 0, "wins": 0, "today": 0.0, "today_n": 0,
+                "recent": [], "series": [], "by_sym": []}
 
 
 def _journal(conn, n=60):
@@ -541,16 +580,21 @@ def _num(v):
         return None
 
 
-def build_pair(sym_display):
+# intraday detail intervals: minutes → row cap (payload-bounded, plot-sized)
+PAIR_IVS = {15: 240, 60: 520, 1440: 366}
+
+
+def build_pair(sym_display, iv=1440):
     ws = next((s for s in PAIR_LIST if DISPLAY[s] == sym_display), None)
     if ws is None:
         return None
+    iv = iv if iv in PAIR_IVS else 1440
     conn = _ro_conn()
     try:
-        # full daily OHLCV (candles + volume), newest-last; includes the forming bar
+        # full OHLCV (candles + volume), newest-last; includes the forming bar
         rows = conn.execute(
-            "SELECT ts,o,h,l,c,v FROM candles WHERE pair=? AND interval=1440 "
-            "ORDER BY ts DESC LIMIT 366", (ws,)).fetchall()[::-1]
+            "SELECT ts,o,h,l,c,v FROM candles WHERE pair=? AND interval=? "
+            "ORDER BY ts DESC LIMIT ?", (ws, iv, PAIR_IVS[iv])).fetchall()[::-1]
         days = [[r[0], round(r[1], 6), round(r[2], 6), round(r[3], 6),
                  round(r[4], 6), round(r[5], 4)] for r in rows]
         fills, pendings = [], []
@@ -572,9 +616,20 @@ def build_pair(sym_display):
     finally:
         conn.close()
     if not days:
-        return {"closes": [], "start_ts": None}
-    return {"closes": [d[4] for d in days], "start_ts": days[0][0],
+        return {"closes": [], "start_ts": None, "iv": iv}
+    return {"closes": [d[4] for d in days], "start_ts": days[0][0], "iv": iv,
             "days": days, "fills": fills, "pendings": pendings}
+
+
+def build_equity(hours):
+    """Equity samples for a chart window; hours=0 means the whole retained
+    history (store prunes at 90 days). Read-only, display-only."""
+    hours = max(0, min(24 * 120, hours))
+    conn = _ro_conn()
+    try:
+        return _equity_series(conn, hours=hours or 24 * 120, max_pts=300)
+    finally:
+        conn.close()
 
 
 def build_health():
@@ -632,7 +687,12 @@ class Handler(BaseHTTPRequestHandler):
         self._send(code, json.dumps(obj), "application/json; charset=utf-8")
 
     def do_GET(self):
-        path = self.path.split("?", 1)[0]
+        path, _, query = self.path.partition("?")
+        qs = {}
+        for part in query.split("&"):
+            k, _, v = part.partition("=")
+            if k:
+                qs[k] = v
         try:
             if path in ("/", "/index.html"):
                 with open(DECK_HTML, "rb") as f:
@@ -644,11 +704,21 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(build_state())
             elif path.startswith("/api/pair/"):
                 sym = path[len("/api/pair/"):]
-                data = build_pair(sym)
+                try:
+                    iv = int(qs.get("iv", "1440"))
+                except ValueError:
+                    iv = 1440
+                data = build_pair(sym, iv)
                 if data is None:
                     self._json({"error": "unknown pair"}, 404)
                 else:
                     self._json(data)
+            elif path == "/api/equity":
+                try:
+                    hours = int(qs.get("hours", "24"))
+                except ValueError:
+                    hours = 24
+                self._json(build_equity(hours))
             elif path == "/api/health":
                 self._json(build_health())
             else:

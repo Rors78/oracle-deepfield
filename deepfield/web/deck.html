@@ -140,6 +140,9 @@ main{max-width:1720px; margin:0 auto; padding:18px 26px 30px; display:grid; gap:
 .chartwrap{position:relative; margin-top:4px}
 .chartwrap svg{display:block; width:100%}
 
+.winrow.eqwin{justify-content:flex-end; margin:2px 0 0}
+.winrow .sep{width:1px; background:var(--line2); margin:2px 3px}
+
 /* ── harvest ──────────────────────────────────────────────────────────── */
 .hv-rungs{border-bottom:1px solid var(--line); padding-bottom:10px; margin-bottom:4px}
 .hv-rungstat{display:flex; gap:8px}
@@ -154,6 +157,11 @@ main{max-width:1720px; margin:0 auto; padding:18px 26px 30px; display:grid; gap:
 .hv-recent .rwhen{color:var(--ink4); flex:1}
 .hv-recent .rpct{color:var(--ink3)}
 .hv-recent .rp{font-weight:600}
+.skimwrap{margin-top:9px}
+.skimwrap svg{display:block; width:100%}
+.skim-top{display:flex; gap:10px; align-items:baseline; flex-wrap:wrap;
+  font-family:var(--mono); font-size:10px; color:var(--ink3); margin-top:3px}
+.skim-top b{color:var(--ink2); font-weight:500}
 .harvest .gaugewrap{display:flex; justify-content:center; padding:2px 0 0}
 .gauge-center{text-anchor:middle}
 .hv-nums{display:flex; justify-content:space-between; font-family:var(--mono);
@@ -195,6 +203,9 @@ main{max-width:1720px; margin:0 auto; padding:18px 26px 30px; display:grid; gap:
 .fieldwrap{overflow-x:auto}
 .fieldwrap svg{display:block; min-width:860px; width:100%}
 
+@keyframes fpulse{50%{fill-opacity:.35}}
+.fdot.danger{animation:fpulse 1.9s ease-in-out infinite}
+
 /* ── book ─────────────────────────────────────────────────────────────── */
 .book table{width:100%; border-collapse:collapse; font-family:var(--mono); font-size:12px}
 .book th{
@@ -215,6 +226,8 @@ main{max-width:1720px; margin:0 auto; padding:18px 26px 30px; display:grid; gap:
 .flash-up{animation:fup .8s} .flash-dn{animation:fdn .8s}
 @keyframes fup{15%{background:rgba(47,169,124,.14)}}
 @keyframes fdn{15%{background:rgba(216,80,107,.13)}}
+.book td.sparkcell{padding:2px 8px}
+.book .spark{display:inline-block; vertical-align:middle}
 .distbar{display:inline-block; vertical-align:middle; width:52px; height:5px;
   background:var(--inset); border:1px solid var(--line); border-radius:2.5px; overflow:hidden; margin-left:7px}
 .distbar i{display:block; height:100%}
@@ -374,12 +387,17 @@ footer .reg{color:var(--ink2)}
         <div class="eq-peak" id="eq-peak"></div>
       </div>
       <div class="chiprow" id="cap-chips"></div>
+      <div class="winrow eqwin" id="eqwin">
+        <button data-h="24" class="on">24h</button><button data-h="168">7d</button>
+        <button data-h="720">30d</button><button data-h="0">90d</button>
+      </div>
       <div class="chartwrap" id="eq-chart"></div>
     </article>
 
     <article class="card harvest rise" style="animation-delay:.07s">
       <div class="eyebrow">Harvest <span class="aux">rung +4% · book +20% backstop</span></div>
       <div class="hv-rungs" id="hv-rungs"></div>
+      <div class="skimwrap" id="hv-skim"></div>
       <div class="gaugewrap" id="hv-gauge"></div>
       <div class="hv-nums" id="hv-nums"></div>
       <div class="hv-banked"><span class="k">Banked · cycle ledger</span><span class="v" id="hv-banked">—</span></div>
@@ -444,7 +462,12 @@ footer .reg{color:var(--ink2)}
 "use strict";
 /* ═══ state ═══ */
 let S=null, PAIRS=[], PMAP={}, TPC=[], JOURNAL=[], jFilter="all";
-let sortKey="dist", sortDir=1, prevPx={}, DETAIL=null, detailSym=null, detailWin=90;
+let sortKey="dist", sortDir=1, prevPx={}, DETAIL=null, detailSym=null, detailWin=90, detailIv=1440;
+const IVS=[[1440,"1d"],[60,"1h"],[15,"15m"]];
+const IVWINS={1440:[[30,"30d"],[90,"90d"],[180,"180d"],[365,"365d"]],
+              60:[[48,"48h"],[168,"7d"],[520,"20d"]],
+              15:[[48,"12h"],[96,"24h"],[240,"60h"]]};
+const IVDEF={1440:90,60:168,15:96};
 const $=id=>document.getElementById(id);
 const esc=s=>String(s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
 const fmt$=(v,d=2)=>v==null?"—":"$"+Math.abs(v).toLocaleString("en-US",{minimumFractionDigits:d,maximumFractionDigits:d});
@@ -507,8 +530,10 @@ function renderMast(h){
 }
 
 /* ═══ capital ═══ */
+let eqHours=24, EQSER=null;   // 24h ships inside /api/state; longer windows fetch /api/equity
+function eqSeries(h){ return eqHours===24 ? (h.equity_series||[]) : (EQSER||[]); }
 function equityChart(h){
-  const ser=(h.equity_series||[]).filter(p=>p&&p[1]>0);
+  const ser=eqSeries(h).filter(p=>p&&p[1]>0);
   const W=560,H=170,PL=6,PR=52,PT=14,PB=22;
   if(ser.length<2) return "";
   let lo=Math.min(...ser.map(p=>p[1])), hi=Math.max(...ser.map(p=>p[1]));
@@ -532,10 +557,14 @@ function equityChart(h){
   const ref=(v,color,label)=> (v==null||v<lo||v>hi)?"":
     `<line x1="${PL}" x2="${W-PR}" y1="${Y(v).toFixed(1)}" y2="${Y(v).toFixed(1)}" stroke="${color}" stroke-width="1" stroke-dasharray="3 4" opacity=".55"/>
      <text x="${W-PR+7}" y="${(Y(v)+3).toFixed(1)}" fill="${color}" font-size="9" font-family="var(--mono)">${label}</text>`;
+  const longWin=(t1-t0)>50*3600;   // beyond ~2 days, clock labels lie — use dates
   const tticks=[0,.33,.66,1].map(f=>{ const t=t0+(t1-t0)*f;
-    const d=new Date(t*1000), lab=d.toLocaleTimeString("en-US",{hour12:false,hour:"2-digit",minute:"2-digit",timeZone:"America/Denver"});
+    const d=new Date(t*1000);
+    const lab=longWin
+      ?d.toLocaleDateString("en-US",{month:"short",day:"numeric",timeZone:"America/Denver"}).toLowerCase()
+      :d.toLocaleTimeString("en-US",{hour12:false,hour:"2-digit",minute:"2-digit",timeZone:"America/Denver"});
     return `<text x="${X(t).toFixed(1)}" y="${H-6}" fill="var(--ink4)" font-size="9" font-family="var(--mono)" text-anchor="${f===0?"start":f===1?"end":"middle"}">${lab}</text>`; }).join("");
-  return `<svg viewBox="0 0 ${W} ${H}" id="eqsvg" aria-label="equity, last 24 hours">
+  return `<svg viewBox="0 0 ${W} ${H}" id="eqsvg" aria-label="equity history">
     <defs><linearGradient id="eqfill" x1="0" y1="0" x2="0" y2="1">
       <stop offset="0" stop-color="#4E8FD0" stop-opacity=".28"/>
       <stop offset="1" stop-color="#4E8FD0" stop-opacity="0"/></linearGradient></defs>
@@ -552,9 +581,10 @@ function equityChart(h){
 }
 function wireEqHover(h){
   const svg=$("eqsvg"); if(!svg) return;
-  const ser=(h.equity_series||[]).filter(p=>p&&p[1]>0); if(ser.length<2) return;
+  const ser=eqSeries(h).filter(p=>p&&p[1]>0); if(ser.length<2) return;
   const hit=svg.querySelector("#eqhit"), cx=svg.querySelector("#eqcx");
   const W=560,PL=6,PR=52; const t0=ser[0][0], t1=ser[ser.length-1][0];
+  const longWin=(t1-t0)>50*3600;
   hit.addEventListener("mousemove",e=>{
     const r=svg.getBoundingClientRect(), fx=(e.clientX-r.left)/r.width*W;
     const t=t0+(fx-PL)/(W-PL-PR)*(t1-t0);
@@ -562,10 +592,27 @@ function wireEqHover(h){
     const bx=PL+(best[0]-t0)/(t1-t0)*(W-PL-PR);
     cx.setAttribute("x1",bx); cx.setAttribute("x2",bx); cx.setAttribute("opacity",".5");
     const d=new Date(best[0]*1000);
-    showTip(`<b>${fmt$(best[1])}</b><br>${String(d.getHours()).padStart(2,"0")}:${String(d.getMinutes()).padStart(2,"0")} MT`, e.clientX, e.clientY);
+    const when=longWin
+      ?d.toLocaleDateString("en-US",{month:"short",day:"numeric"}).toLowerCase()
+        +" "+String(d.getHours()).padStart(2,"0")+":"+String(d.getMinutes()).padStart(2,"0")
+      :String(d.getHours()).padStart(2,"0")+":"+String(d.getMinutes()).padStart(2,"0")+" MT";
+    showTip(`<b>${fmt$(best[1])}</b><br>${when}`, e.clientX, e.clientY);
   });
   hit.addEventListener("mouseleave",()=>{ cx.setAttribute("opacity","0"); hideTip(); });
 }
+async function refreshEq(rerender=true){
+  if(eqHours===24){ EQSER=null; if(rerender&&S) renderCapital(S.health||{}); return; }
+  try{
+    const r=await fetch("/api/equity?hours="+eqHours,{cache:"no-store"});
+    if(r.ok){ EQSER=await r.json(); if(S) renderCapital(S.health||{}); }
+  }catch(_){}
+}
+$("eqwin").addEventListener("click",e=>{
+  const b=e.target.closest("button"); if(!b) return;
+  eqHours=+b.dataset.h;
+  document.querySelectorAll("#eqwin button").forEach(x=>x.classList.toggle("on",x===b));
+  refreshEq();
+});
 function renderCapital(h){
   const eqLive=h.equity!=null, eq=eqLive?h.equity:h.peak;
   $("cap-aux").textContent=eqLive?"live · kraken tradebalance":"last known · populates next bot cycle";
@@ -625,6 +672,7 @@ function renderHarvest(h){
        ${r.pct!=null?`<span class="rpct">+${r.pct}%</span>`:""}
        <span class="rp ${cls(r.pnl)}">${fmtSigned(r.pnl)}</span></div>`).join("")}</div>`
     :`<div class="dim" style="font-size:10.5px;margin-top:7px">no rungs banked yet — first +4% rip lands here</div>`}`;
+  renderSkim(rh);
   const base=h.tp_baseline, tgt=h.tp_target, eq=h.equity!=null?h.equity:h.peak;
   const span=(tgt&&base)?tgt-base:null;
   const p=span?Math.max(0,Math.min(1,(eq-base)/span)):0;
@@ -657,6 +705,52 @@ function renderHarvest(h){
     `<div class="mlrow"><span class="d">last cycle</span><span class="arc">${c.label} · $${c.baseline.toFixed(0)} → $${c.settled.toFixed(0)}</span>
      <span class="p ${cls(c.profit)}">${fmtSigned(c.profit)}</span>
      ${c.flows==null?'<span class="fl">flows?</span>':Math.abs(c.flows)>=0.01?`<span class="fl">${c.flows>0?"+":"−"}$${Math.abs(c.flows).toFixed(0)} dep</span>`:""}</div>`).join("");
+}
+
+/* the skim curve: every rung bank, stacked into a staircase — the harvest
+   engine's cumulative output over time, next to the carry it must outrun */
+function renderSkim(rh){
+  const ser=rh.series||[], box=$("hv-skim");
+  if(ser.length<2){ box.innerHTML=""; return; }
+  const W=560,H=64,PL=4,PR=56,PT=6,PB=14;
+  const t0=ser[0][0], t1=ser[ser.length-1][0]||t0+1;
+  let cum=0; const pts=ser.map(([t,p])=>{ cum+=p; return [t,cum]; });
+  const hi=Math.max(cum,0.01), lo=Math.min(0,...pts.map(p=>p[1]));
+  const X=t=>PL+(t-t0)/(t1-t0)*(W-PL-PR), Y=v=>PT+(1-(v-lo)/(hi-lo))*(H-PT-PB);
+  // step-after staircase: each bank is a discrete event, not a slope
+  let path=`M ${X(t0).toFixed(1)} ${Y(0).toFixed(1)}`;
+  pts.forEach(([t,v])=>{ path+=` H ${X(t).toFixed(1)} V ${Y(v).toFixed(1)}`; });
+  path+=` H ${W-PR}`;
+  const days=(t1-t0)/86400;
+  const dticks=[];
+  if(days>=1){ const step=days>10?Math.ceil(days/5)*86400:86400;
+    for(let t=Math.ceil(t0/86400)*86400; t<=t1; t+=step)
+      dticks.push(`<line x1="${X(t).toFixed(1)}" x2="${X(t).toFixed(1)}" y1="${PT}" y2="${H-PB}" stroke="var(--line)" stroke-width="1"/>`); }
+  box.innerHTML=`<svg viewBox="0 0 ${W} ${H}" id="skimsvg" aria-label="cumulative rung banks over time">
+    ${dticks.join("")}
+    <line x1="${PL}" x2="${W-PR}" y1="${Y(0).toFixed(1)}" y2="${Y(0).toFixed(1)}" stroke="var(--line2)" stroke-width="1"/>
+    <path d="${path} V ${Y(0).toFixed(1)} Z" fill="rgba(217,164,91,.10)" stroke="none"/>
+    <path d="${path}" fill="none" stroke="var(--brass)" stroke-width="1.6" stroke-linejoin="round"/>
+    <circle cx="${(W-PR).toFixed(1)}" cy="${Y(cum).toFixed(1)}" r="2.6" fill="var(--brass-hi)" stroke="var(--panel)" stroke-width="1.5"/>
+    <text x="${W-PR+7}" y="${(Y(cum)+3.5).toFixed(1)}" fill="var(--brass-hi)" font-size="10" font-family="var(--mono)" font-weight="600">${fmtSigned(cum)}</text>
+    <rect id="skimhit" x="${PL}" y="0" width="${W-PL-PR}" height="${H}" fill="transparent"/>
+  </svg>
+  <div class="skim-top">
+    <span>skim curve · ${rh.n} banks</span>
+    ${(rh.by_sym&&rh.by_sym.length)?`<span style="margin-left:auto">top ${rh.by_sym.slice(0,3).map(b=>
+      `<b>${esc(b.sym)}</b> ${fmtSigned(b.total)}`).join(" · ")}</span>`:""}
+  </div>`;
+  const svg=$("skimsvg"), hit=svg.querySelector("#skimhit");
+  hit.addEventListener("mousemove",e=>{
+    const r=svg.getBoundingClientRect(), fx=(e.clientX-r.left)/r.width*W;
+    const t=t0+(fx-PL)/(W-PL-PR)*(t1-t0);
+    let bi=0; for(let i=0;i<ser.length;i++) if(Math.abs(ser[i][0]-t)<Math.abs(ser[bi][0]-t)) bi=i;
+    const [bt,bp,bsym]=ser[bi], d=new Date(bt*1000);
+    showTip(`<b>${esc(bsym)}</b> ${fmtSigned(bp)}
+      <div class="row"><span>${d.toLocaleDateString("en-US",{month:"short",day:"numeric"}).toLowerCase()} ${String(d.getHours()).padStart(2,"0")}:${String(d.getMinutes()).padStart(2,"0")}</span></div>
+      <div class="row"><span>cumulative</span><b>${fmtSigned(pts[bi][1])}</b></div>`, e.clientX, e.clientY);
+  });
+  hit.addEventListener("mouseleave",hideTip);
 }
 
 /* ═══ defense ═══ */
@@ -815,7 +909,7 @@ function renderField(){
   // every placed label — above, below, then farther out; give up to the tooltip
   objs.forEach(o=>{
     const fill=(o.p.pnl||0)>=0?"var(--gain)":"var(--loss)";
-    svg+=`<circle class="fdot" data-sym="${o.p.sym}" cx="${o.x.toFixed(1)}" cy="${o.y.toFixed(1)}" r="${o.r.toFixed(1)}"
+    svg+=`<circle class="fdot ${o.d<3?"danger":""}" data-sym="${o.p.sym}" cx="${o.x.toFixed(1)}" cy="${o.y.toFixed(1)}" r="${o.r.toFixed(1)}"
       fill="${fill}" fill-opacity=".85" stroke="var(--panel)" stroke-width="2" style="cursor:pointer"/>`;
   });
   naked.forEach((o,i)=>{
@@ -870,14 +964,27 @@ function wireFieldDots(){
 
 /* ═══ book ═══ */
 const COLS=[
-  ["sym","pair","l"],["price","price"],["chg","24h"],["pnl","p&l"],
+  ["sym","pair","l"],["price","price"],["chg","24h"],["spark","trend"],["pnl","p&l"],
   ["dist","stop dist"],["fills","rungs"],["notional","notional"],["lev","lev"],["prot","prot"]
 ];
+function sparkSVG(arr,chg){
+  if(!arr||arr.length<2) return `<span class="dim">—</span>`;
+  const W=62,H=18,P=1.5;
+  const lo=Math.min(...arr), hi=Math.max(...arr), span=(hi-lo)||1;
+  const X=i=>P+i/(arr.length-1)*(W-2*P), Y=v=>P+(1-(v-lo)/span)*(H-2*P);
+  const pts=arr.map((v,i)=>`${X(i).toFixed(1)},${Y(v).toFixed(1)}`).join(" ");
+  const up=(chg!=null)?chg>=0:arr[arr.length-1]>=arr[0];
+  const c=up?"var(--gain)":"var(--loss)";
+  return `<svg class="spark" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" aria-hidden="true">
+    <polyline points="${pts}" fill="none" stroke="${c}" stroke-width="1.3" stroke-linejoin="round" opacity=".85"/>
+    <circle cx="${X(arr.length-1).toFixed(1)}" cy="${Y(arr[arr.length-1]).toFixed(1)}" r="1.7" fill="${c}"/>
+  </svg>`;
+}
 function sortVal(p,k){
   switch(k){
     case "sym": return p.sym;
     case "price": return p.price||0;
-    case "chg": return p.chg||0;
+    case "chg": case "spark": return p.chg||0;
     case "pnl": return p.pnl||0;
     case "dist": return (p.price&&p.stop)?(p.price-p.stop)/p.stop:9e9;
     case "fills": return p.fills||0;
@@ -916,6 +1023,7 @@ function renderBook(){
       <td class="l"><span class="sym">${p.sym}</span>${p.status!=="HOLD"?` <span class="statuschip ${p.stStyle}">${p.status}</span>`:""}${hv?` <span class="statuschip" style="color:var(--brass-hi);border-color:var(--brass-dim)">HARVEST</span>`:""}${rbad.has(p.sym)?` <span class="statuschip fault" title="reconcile mismatch — ledger and exchange truth disagree on this pair">▢ MISMATCH</span>`:""}</td>
       <td>${fmtPx(p.price)}</td>
       <td class="${cls(p.chg||0)}">${p.chg==null?"—":(p.chg>=0?"+":"")+p.chg.toFixed(1)+"%"}</td>
+      <td class="sparkcell">${sparkSVG(p.spark,p.chg)}</td>
       <td class="${cls(p.pnl||0)}">${fmtSigned(p.pnl)}</td>
       <td>${d==null?"—":d.toFixed(1)+"%"}<span class="distbar"><i style="width:${dW}%;background:${dCol}"></i></span></td>
       <td>${p.fills}${p.bid?` <span class="dim">+bid ${fmtPx(p.bid)}</span>`:""}</td>
@@ -923,12 +1031,13 @@ function renderBook(){
       <td class="dim">${p.lev}×</td>
       <td>${prot}</td></tr>`;
   }).join("");
-  const scoutRows=scout.length?`<tr><td colspan="9" class="scout-head">Scouting · ${scout.length} unheld ladders</td></tr>`+
+  const scoutRows=scout.length?`<tr><td colspan="10" class="scout-head">Scouting · ${scout.length} unheld ladders</td></tr>`+
     scout.sort((a,b)=>(b.score/b.denom||0)-(a.score/a.denom||0)).map(p=>
     `<tr class="scoutrow" data-sym="${p.sym}">
       <td class="l"><span class="sym">${p.sym}</span> <span class="statuschip ${p.stStyle}">${p.status}</span></td>
       <td>${fmtPx(p.price)}</td>
       <td class="${cls(p.chg||0)}">${p.chg==null?"—":(p.chg>=0?"+":"")+p.chg.toFixed(1)+"%"}</td>
+      <td class="sparkcell">${sparkSVG(p.spark,p.chg)}</td>
       <td class="dim" colspan="2">${p.bid?`bid resting @ ${fmtPx(p.bid)}`:"no bid"}</td>
       <td class="dim">score ${p.score}/${p.denom}</td>
       <td class="dim" colspan="3">${p.pctLow!=null?p.pctLow+"% above 52w low":""}</td></tr>`).join(""):"";
@@ -980,11 +1089,18 @@ function renderFooter(r,h,v){
   $("ft-daily").innerHTML=`daily close <span class="cdbar"><i style="width:${(r.daily_pct||0)}%"></i></span> ${cdown(r.daily_left_s)}`;
   $("ft-weekly").innerHTML=`weekly <span class="cdbar"><i style="width:${(r.weekly_pct||0)}%"></i></span> ${cdown(r.weekly_left_s)}`;
   $("ft-btc").textContent=r.btc_price?`BTC ${fmt$(r.btc_price,0)} ${r.btc_chg!=null?(r.btc_chg>=0?"+":"")+r.btc_chg.toFixed(1)+"%":""}`:"";
-  $("ft-v").textContent=`deepfield v${v||"—"} · observatory deck`;
+  $("ft-v").textContent=`deepfield v${v||"—"} · observatory deck mk II`;
 }
 
 /* ═══ pair detail sheet ═══ */
-function candleChart(days, p){
+function emaArr(vals,n){
+  if(vals.length<n) return null;
+  const k=2/(n+1); let e=vals.slice(0,n).reduce((a,b)=>a+b,0)/n;
+  const out=Array(n-1).fill(null); out.push(e);
+  for(let i=n;i<vals.length;i++){ e=vals[i]*k+e*(1-k); out.push(e); }
+  return out;
+}
+function candleChart(days, p, dfills){
   if(!days||!days.length) return `<div class="dim" style="padding:30px 0">no candle history stored yet</div>`;
   const win=days.slice(-detailWin);
   const W=810,H=300,PL=8,PR=58,PT=12,PB=40,VH=34;
@@ -1016,19 +1132,48 @@ function candleChart(days, p){
     else if(t==="bid") out+=refline(v,"var(--ice)","1 5","bid");
     else out+=`<line x1="${PL}" x2="${W-PR}" y1="${Y(v)}" y2="${Y(v)}" stroke="var(--brass)" stroke-width="1" opacity=".35"/>`;
   });
-  // candles + volume
+  // candles + volume (volume wears the candle's direction, quietly)
   win.forEach((d,i)=>{
     const [ts,o,h,l,c,v]=d, x=PL+i*slot+slot/2;
     const up=c>=o, col=up?"var(--gain)":"var(--loss)";
     out+=`<line x1="${x}" x2="${x}" y1="${Y(h)}" y2="${Y(l)}" stroke="${col}" stroke-width="1"/>
       <rect x="${x-bw/2}" y="${Math.min(Y(o),Y(c))}" width="${bw}" height="${Math.max(1,Math.abs(Y(o)-Y(c)))}" fill="${col}" rx="1"/>
-      <rect x="${x-bw/2}" y="${H-PB-((v||0)/vmax)*VH}" width="${bw}" height="${((v||0)/vmax)*VH}" fill="var(--ink4)" opacity=".5"/>`;
+      <rect x="${x-bw/2}" y="${H-PB-((v||0)/vmax)*VH}" width="${bw}" height="${((v||0)/vmax)*VH}" fill="${col}" opacity=".28"/>`;
   });
-  // x labels
+  // EMA ribbons — trend context the raw candles don't carry
+  const closes=win.map(d=>d[4]);
+  [[20,"var(--ice-hi)"],[50,"var(--brass-hi)"]].forEach(([n,c])=>{
+    const e=emaArr(closes,n); if(!e) return;
+    const pts=e.map((v,i)=>v==null?null:`${(PL+i*slot+slot/2).toFixed(1)},${Y(v).toFixed(1)}`)
+      .filter(Boolean).join(" ");
+    const lastY=Y(e[e.length-1]);
+    out+=`<polyline points="${pts}" fill="none" stroke="${c}" stroke-width="1.1" opacity=".65"/>
+      <text x="${W-PR-3}" y="${(lastY-4).toFixed(1)}" fill="${c}" font-size="8" text-anchor="end" font-family="var(--mono)" opacity=".8">e${n}</text>`;
+  });
+  // rung fills stamped at their own moment (when they land inside the window)
+  const t0=win[0][0], span=detailIv*60;
+  (dfills||[]).forEach((f,fi)=>{
+    if(!f.ts||f.entry==null) return;
+    const t=Date.parse(f.ts)/1000; if(!isFinite(t)||t<t0) return;
+    let i=win.length-1;
+    for(let j=0;j<win.length;j++) if(t>=win[j][0]&&t<win[j][0]+span){ i=j; break; }
+    const x=PL+i*slot+slot/2, y=Y(f.entry);
+    out+=`<path d="M ${x.toFixed(1)} ${(y-5.5).toFixed(1)} L ${(x+4.5).toFixed(1)} ${(y+3.5).toFixed(1)} L ${(x-4.5).toFixed(1)} ${(y+3.5).toFixed(1)} Z"
+      fill="var(--brass-hi)" stroke="var(--panel)" stroke-width="1"><title>rung #${fi+1} filled @ ${fmtPx(f.entry)}</title></path>`;
+  });
+  // x labels: dates for daily; clock time intraday, flipping to a date at midnight
   const step=Math.ceil(N/6);
+  let prevDay=null;
   win.forEach((d,i)=>{ if(i%step) return;
     const dt=new Date(d[0]*1000);
-    out+=`<text x="${PL+i*slot+slot/2}" y="${H-8}" fill="var(--ink4)" font-size="9" text-anchor="middle" font-family="var(--mono)">${dt.toLocaleDateString("en-US",{month:"short",day:"numeric"}).toLowerCase()}</text>`; });
+    const dayLab=dt.toLocaleDateString("en-US",{month:"short",day:"numeric",timeZone:"America/Denver"}).toLowerCase();
+    let lab;
+    if(detailIv===1440) lab=dayLab;
+    else{ lab=(prevDay!==null&&dayLab===prevDay)
+        ?dt.toLocaleTimeString("en-US",{hour12:false,hour:"2-digit",minute:"2-digit",timeZone:"America/Denver"})
+        :dayLab;
+      prevDay=dayLab; }
+    out+=`<text x="${PL+i*slot+slot/2}" y="${H-8}" fill="var(--ink4)" font-size="9" text-anchor="middle" font-family="var(--mono)">${lab}</text>`; });
   out+=`<rect id="candlehit" x="${PL}" y="0" width="${W-PL-PR}" height="${H}" fill="transparent"/></svg>`;
   return out;
 }
@@ -1039,7 +1184,9 @@ function wireCandleHover(days){
     const r=svg.getBoundingClientRect(), fx=(e.clientX-r.left)/r.width*W;
     const i=Math.max(0,Math.min(win.length-1,Math.floor((fx-PL)/slot)));
     const [ts,o,h,l,c,v]=win[i], dt=new Date(ts*1000);
-    showTip(`<b>${dt.toLocaleDateString("en-US",{month:"short",day:"numeric"})}</b>
+    const when=dt.toLocaleDateString("en-US",{month:"short",day:"numeric"})
+      +(detailIv<1440?" "+dt.toLocaleTimeString("en-US",{hour12:false,hour:"2-digit",minute:"2-digit",timeZone:"America/Denver"}):"");
+    showTip(`<b>${when}</b>
       <div class="row"><span>open</span><b>${fmtPx(o)}</b></div>
       <div class="row"><span>high</span><b>${fmtPx(h)}</b></div>
       <div class="row"><span>low</span><b>${fmtPx(l)}</b></div>
@@ -1052,8 +1199,9 @@ function renderDetail(){
   const p=PMAP[detailSym], d=DETAIL;
   if(!p||!d){ return; }
   const dPct=(p.price&&p.stop)?((p.price-p.stop)/p.stop*100):null;
-  const lo=d.days?.length?Math.min(...d.days.slice(-365).map(x=>x[3])):null;
-  const hi=d.days?.length?Math.max(...d.days.slice(-365).map(x=>x[2])):null;
+  // 52-week bounds come from the engine card in /api/state (weekly-close truth) —
+  // recomputing them off whatever interval the chart happens to show was wrong
+  const lo=p.lo, hi=p.hi;
   $("sheet").innerHTML=`
     <div class="mastline">
       <span class="psym">${esc(detailSym)}<span style="color:var(--ink3)">/USD</span></span>
@@ -1062,9 +1210,12 @@ function renderDetail(){
       ${p.status!=="HOLD"&&p.status!=="idle"?`<span class="statuschip ${p.stStyle}">${p.status}</span>`:""}
       <button class="closebtn" id="sheetclose" aria-label="close">✕</button>
     </div>
-    <div class="winrow" id="winrow">${[30,90,180,365].map(w=>
-      `<button data-w="${w}" class="${w===detailWin?"on":""}">${w}d</button>`).join("")}</div>
-    <div id="candlebox">${candleChart(d.days,p)}</div>
+    <div class="winrow" id="winrow">
+      ${IVS.map(([v,l])=>`<button data-iv="${v}" class="${v===detailIv?"on":""}">${l}</button>`).join("")}
+      <span class="sep"></span>
+      ${IVWINS[detailIv].map(([w,l])=>`<button data-w="${w}" class="${w===detailWin?"on":""}">${l}</button>`).join("")}
+    </div>
+    <div id="candlebox">${candleChart(d.days,p,d.fills)}</div>
     ${lo!=null?`<div class="dim num" style="font-size:10.5px;margin-top:4px">52-week ${fmtPx(lo)} — ${fmtPx(hi)}${p.pctLow!=null?` · now ${p.pctLow}% above the low`:""}</div>`:""}
     <div class="subgrid">
       <div><h4>Campaign · ${p.fills||0} fills ${p.size?`· ${fmtVol(p.size)} ${esc(detailSym)}`:""}</h4>
@@ -1092,9 +1243,15 @@ function renderDetail(){
   $("sheetclose").addEventListener("click",closeDetail);
   $("winrow").addEventListener("click",e=>{
     const b=e.target.closest("button"); if(!b) return;
-    detailWin=+b.dataset.w; renderDetail();
+    if(b.dataset.iv){ detailIv=+b.dataset.iv; detailWin=IVDEF[detailIv]; fetchDetail(); }
+    else if(b.dataset.w){ detailWin=+b.dataset.w; renderDetail(); }
   });
   wireCandleHover(d.days||[]);
+}
+async function fetchDetail(){
+  const sym=detailSym; if(!sym) return;
+  try{ const r=await fetch("/api/pair/"+encodeURIComponent(sym)+"?iv="+detailIv,{cache:"no-store"});
+    if(r.ok&&sym===detailSym){ DETAIL=await r.json(); renderDetail(); } }catch(_){}
 }
 async function openDetail(sym){
   detailSym=sym; DETAIL=null;
@@ -1103,8 +1260,7 @@ async function openDetail(sym){
     <button class="closebtn" id="sheetclose">✕</button></div><div class="dim">loading candles…</div>`;
   $("sheetclose").addEventListener("click",closeDetail);
   history.replaceState(null,"","#pair="+sym);
-  try{ const r=await fetch("/api/pair/"+encodeURIComponent(sym),{cache:"no-store"});
-    if(r.ok){ DETAIL=await r.json(); renderDetail(); } }catch(_){}
+  fetchDetail();
 }
 function closeDetail(){
   detailSym=null;
@@ -1156,6 +1312,7 @@ async function fetchState(){
     const rb=$("renderbar");
     if(failed.length){ rb.textContent=`⚠ instrument fault — ${failed.join(", ")} failed to draw (data is live; this is a display bug)`; rb.classList.add("on"); }
     else rb.classList.remove("on");
+    if(eqHours!==24) refreshEq(false);   // keep long equity windows current too
   }catch(err){
     // "unreachable" is a diagnosis, and a wrong one reads as "the bot died".
     // Name the real failure: transport down vs. a live bot whose deck is throwing.
