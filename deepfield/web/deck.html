@@ -554,9 +554,15 @@ function equityChart(h){
     const y=Y(v), clash=refYs.some(ry=>Math.abs(ry-y)<11);
     return `${clash?"":`<text x="${W-PR+7}" y="${(y+3).toFixed(1)}" fill="var(--ink4)" font-size="9" font-family="var(--mono)">${v.toFixed(0)}</text>`}
      <line x1="${PL}" x2="${W-PR}" y1="${y.toFixed(1)}" y2="${y.toFixed(1)}" stroke="var(--line)" stroke-width="1"/>`; }).join("");
-  const ref=(v,color,label)=> (v==null||v<lo||v>hi)?"":
+  const ref=(v,color,label,dy=0)=> (v==null||v<lo||v>hi)?"":
     `<line x1="${PL}" x2="${W-PR}" y1="${Y(v).toFixed(1)}" y2="${Y(v).toFixed(1)}" stroke="${color}" stroke-width="1" stroke-dasharray="3 4" opacity=".55"/>
-     <text x="${W-PR+7}" y="${(Y(v)+3).toFixed(1)}" fill="${color}" font-size="9" font-family="var(--mono)">${label}</text>`;
+     <text x="${W-PR+7}" y="${(Y(v)+3+dy).toFixed(1)}" fill="${color}" font-size="9" font-family="var(--mono)">${label}</text>`;
+  // long windows compress base and t/p to a few px apart — split their labels
+  let baseDy=0, tgtDy=0;
+  if(base!=null&&tgtNear&&tgt!=null&&tgt>=lo&&tgt<=hi&&base>=lo&&base<=hi){
+    const g=Math.abs(Y(base)-Y(tgt));
+    if(g<10){ tgtDy=-(10-g)/2; baseDy=(10-g)/2; }
+  }
   const longWin=(t1-t0)>50*3600;   // beyond ~2 days, clock labels lie — use dates
   const tticks=[0,.33,.66,1].map(f=>{ const t=t0+(t1-t0)*f;
     const d=new Date(t*1000);
@@ -569,8 +575,8 @@ function equityChart(h){
       <stop offset="0" stop-color="#4E8FD0" stop-opacity=".28"/>
       <stop offset="1" stop-color="#4E8FD0" stop-opacity="0"/></linearGradient></defs>
     ${ticks}${tticks}
-    ${ref(base,"var(--brass)","base")}
-    ${tgtNear?ref(tgt,"var(--gain)","t/p")
+    ${ref(base,"var(--brass)","base",baseDy)}
+    ${tgtNear?ref(tgt,"var(--gain)","t/p",tgtDy)
       :tgt?`<text x="${W-PR}" y="${PT-4}" fill="var(--gain-ink)" font-size="9" font-family="var(--mono)" text-anchor="end">t/p ${fmt$(tgt)} ↑</text>`:""}
     <polygon points="${area}" fill="url(#eqfill)"/>
     <polyline points="${pts}" fill="none" stroke="var(--ice-hi)" stroke-width="2" stroke-linejoin="round"/>
@@ -1323,9 +1329,14 @@ async function fetchState(){
   }
 }
 fetchState(); setInterval(fetchState,4000);
-/* deep link */
-if(location.hash){ const m=location.hash.match(/pair=([A-Za-z]+)/);
-  if(m) setTimeout(()=>openDetail(m[1].toUpperCase()),600); }
+/* deep link — on load AND on later hash edits (typing #pair=X must work live) */
+function hashDetail(){
+  const m=location.hash.match(/pair=([A-Za-z]+)/);
+  if(m){ const sym=m[1].toUpperCase(); if(sym!==detailSym) openDetail(sym); }
+  else if(detailSym) closeDetail();
+}
+addEventListener("hashchange",hashDetail);
+if(location.hash) setTimeout(hashDetail,600);
 </script>
 </body>
 </html>

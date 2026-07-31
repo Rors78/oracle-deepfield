@@ -367,3 +367,27 @@ def test_rung_harvest_series_and_leaderboard(tmp_path, monkeypatch):
     # leaderboard is total-desc: SHIB 0.50 beats ADA 0.22
     assert rh["by_sym"][0] == {"sym": "SHIB", "total": 0.50, "n": 1}
     assert rh["by_sym"][1] == {"sym": "ADA", "total": 0.22, "n": 2}
+
+
+def test_pair_candles_keep_micro_price_resolution(tmp_path, monkeypatch):
+    """Decimal-place rounding quantized SHIB/PEPE-class candles onto the 1e-06
+    grid (a 4.69e-06 close became 5e-06; 90 days of candles collapsed to 4
+    distinct values). Significant-digit rounding must preserve the shape."""
+    now = time.time()
+    day = 86400
+    t0 = int(now // day * day)
+    micro = [("SHIB/USD", 1440, t0 - 2 * day, 4.69e-06),
+             ("SHIB/USD", 1440, t0 - day, 4.72e-06)]
+    _mkdb(tmp_path, monkeypatch, blob=_blob(now), candles=micro)
+    d = server.build_pair("SHIB")
+    assert d["closes"] == [4.69e-06, 4.72e-06]     # NOT [5e-06, 5e-06]
+    spark15 = [("SHIB/USD", 15, int(now) - 1800, 4.691e-06),
+               ("SHIB/USD", 15, int(now) - 900, 4.712e-06)]
+    _mkdb(tmp_path, monkeypatch, blob=_blob(now), candles=micro + spark15)
+    conn = server._ro_conn()
+    try:
+        st = server._assemble(conn)
+    finally:
+        conn.close()
+    shib = next(p for p in st["pairs"] if p["sym"] == "SHIB")
+    assert shib["spark"] == [4.691e-06, 4.712e-06]

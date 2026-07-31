@@ -55,6 +55,13 @@ def _series(conn, pair, interval, cols):
         (pair, interval)).fetchall()
 
 
+def _sig(v, digits=8):
+    """Round to significant digits, not decimal places. Decimal-place rounding
+    (round(x, 6)) quantizes micro-price pairs onto the 1e-06 grid — SHIB at
+    4.7e-06 collapsed to a flat 5e-06 line and PEPE vanished entirely."""
+    return float(f"{v:.{digits}g}") if v is not None else None
+
+
 def _spark(conn, pair, hours=24, max_pts=48):
     """15m closes for the book-row sparkline, downsampled. Display-only."""
     since = int(time.time()) - hours * 3600
@@ -64,7 +71,7 @@ def _spark(conn, pair, hours=24, max_pts=48):
     if len(rows) > max_pts:
         step = len(rows) / max_pts
         rows = [rows[int(i * step)] for i in range(max_pts)] + [rows[-1]]
-    return [round(r[0], 8) for r in rows]
+    return [_sig(r[0], 6) for r in rows]
 
 
 def _daily_closes(conn, pair, limit=365):
@@ -595,8 +602,8 @@ def build_pair(sym_display, iv=1440):
         rows = conn.execute(
             "SELECT ts,o,h,l,c,v FROM candles WHERE pair=? AND interval=? "
             "ORDER BY ts DESC LIMIT ?", (ws, iv, PAIR_IVS[iv])).fetchall()[::-1]
-        days = [[r[0], round(r[1], 6), round(r[2], 6), round(r[3], 6),
-                 round(r[4], 6), round(r[5], 4)] for r in rows]
+        days = [[r[0], _sig(r[1]), _sig(r[2]), _sig(r[3]),
+                 _sig(r[4]), round(r[5], 4)] for r in rows]
         fills, pendings = [], []
         for (oid, ts, entry, stop, stop_txid, ctxid, vol, lev, notional, margin,
              score, req, status) in conn.execute(
