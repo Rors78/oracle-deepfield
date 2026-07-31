@@ -549,7 +549,15 @@ class Executor:
             now = time.time()
             tokens = min(burst, float(b.get("tokens", burst))
                          + max(0.0, now - float(b.get("updated", now))) * rate / 3600.0)
-            return (tokens + 1e-9) < (vol * floor_price)
+            # Every rung/seed sizes at min x SIZE_MULT (conviction stacks above, so
+            # excluding it keeps this a lower bound). Without the multiplier the
+            # bound went stale the moment SIZE_MULT left 1: a bucket holding between
+            # 1x and 2x min passed the pre-gate, narrated RELADDER/SEED at INFO,
+            # burned the ticker fetch and the 600s backoff stamp — then the
+            # authoritative check refused at DEBUG. The 2026-07-31 1->2 bump made
+            # that the common case instead of a ~$0.07 corner.
+            smult = max(1.0, float(getattr(config, "SIZE_MULT", 1.0) or 1.0))
+            return (tokens + 1e-9) < (vol * floor_price * smult)
         except Exception:
             log.exception("respend pre-gate failed — proceeding (fail open)")
             return False

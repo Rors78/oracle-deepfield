@@ -1801,6 +1801,27 @@ def test_respend_pre_gate_skips_only_what_it_would_refuse(tmp_path, monkeypatch)
     conn.close()
 
 
+def test_respend_pre_gate_scales_with_size_mult(tmp_path, monkeypatch):
+    """Every rung/seed sizes at min x SIZE_MULT, so the pre-gate's lower bound
+    must carry the multiplier too. At SIZE_MULT=2 a bucket holding between 1x
+    and 2x min used to pass the pre-gate — narrating RELADDER at INFO, burning
+    the ticker fetch and the 600s backoff — only to be refused at DEBUG by the
+    authoritative check (observed live on XLM minutes after the 07-31 1->2
+    bump). Verified to FAIL on the unscaled bound."""
+    conn = _conn(tmp_path, ordermin=0.1, costmin=0.5, lot_dec=8)
+    monkeypatch.setattr(config, "RESPEND_BUDGET_USD_PER_HR", 5.0)
+    monkeypatch.setattr(config, "RESPEND_BURST_USD", 40.0)
+    monkeypatch.setattr(config, "LADDER_STEP_PCT", 0.01)
+    monkeypatch.setattr(config, "SIZE_MULT", 2.0)
+    e = _exec(conn, mode="live")
+    # smallest REAL rung at 2x = 0.1 x 99.0 x 2 = $19.80
+    _bucket(conn, tokens=15.0, age_secs=0)
+    assert e._respend_would_refuse(SYM, 100.0) is True      # $15 funds 1x, not 2x
+    _bucket(conn, tokens=25.0, age_secs=0)
+    assert e._respend_would_refuse(SYM, 100.0) is False     # $25 funds the 2x rung
+    conn.close()
+
+
 def test_respend_pre_gate_fails_open(tmp_path, monkeypatch):
     """Governor off, or no usable reference price, never suppresses a rung."""
     conn = _conn(tmp_path, ordermin=0.1, costmin=0.5, lot_dec=8)
