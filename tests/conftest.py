@@ -57,7 +57,44 @@ def _mute_alerter_desktop(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
-def _isolate_poll_fills_clocks(monkeypatch):
+def _no_real_kraken(monkeypatch):
+    """HARD WALL: no test may reach the real Kraken API. The rate limit is
+    per-ACCOUNT, so a test process's calls throttle the LIVE bot blind (it
+    happened 2026-07-19 from a scratch verification walk, and again 2026-07-30
+    from this very suite — TradeBalance/QueryOrders/OpenPositions storms while
+    the bot was mid-cycle). Both broker.private and rest_client.fetch_json go
+    through urllib.request.urlopen, resolved at call time, so one guard covers
+    the public and private surfaces. A test that trips this must mock
+    broker/rest_client at the layer it exercises — never widen this guard."""
+    import urllib.request
+
+    real_urlopen = urllib.request.urlopen
+
+    def _guarded(req, *a, **kw):
+        url = req if isinstance(req, str) else getattr(req, "full_url", str(req))
+        if "kraken.com" in url:
+            raise AssertionError(
+                f"test tried to reach the REAL Kraken API ({url}) — the rate "
+                "limit is per-account and throttles the live bot; mock "
+                "broker/rest_client instead")
+        return real_urlopen(req, *a, **kw)
+
+    monkeypatch.setattr(urllib.request, "urlopen", _guarded)
+
+    # Blocking a call must not cost wall-clock: fetch_json retries through
+    # 2s/4s backoff sleeps before giving up, which taxed every on-fill
+    # _live_last at ~6s per ladder test once the wall went up. Rebind
+    # rest_client's OWN time reference so its sleeps are free; the real time
+    # module (and every other module's sleeps) are untouched.
+    import time as _time
+
+    from deepfield import rest_client
+    monkeypatch.setattr(rest_client, "time", types.SimpleNamespace(
+        sleep=lambda _s: None, time=_time.time, monotonic=_time.monotonic))
+
+
+@pytest.fixture(autouse=True)
+def _isolate_executor_module_state(monkeypatch):
     """poll_fills gates its runtime exchange-truth sweep and the reladder/seed
     safety nets behind MODULE-level monotonic clocks (_recon_next, _reladder_next,
     _seed_next). In a fresh process _recon_next is 0.0, so the FIRST test to call
@@ -79,6 +116,8 @@ def _isolate_poll_fills_clocks(monkeypatch):
     monkeypatch.setattr(ex_mod, "_recon_next", 0.0)
     monkeypatch.setattr(ex_mod, "_reladder_next", {})
     monkeypatch.setattr(ex_mod, "_seed_next", {})
+    monkeypatch.setattr(ex_mod, "_stack_pause_since", None)
+    monkeypatch.setattr(ex_mod, "_tp_trough_noted", None)
     monkeypatch.setattr(ex_mod.Executor, "_ensure_ladder_rungs", lambda self: None)
 
 

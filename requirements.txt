@@ -3,3 +3,6 @@ websockets==16.0
 rich==15.0.0
 # dev
 pytest==9.1.1
+# shuffles test order each run — the standing guard against order-coupled tests
+# (executor module-state leaks; see tests/conftest.py _isolate_executor_module_state)
+pytest-randomly==4.1.0
