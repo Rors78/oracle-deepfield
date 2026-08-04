@@ -297,10 +297,31 @@ Three things still degrade, none of them on the money path:
   Ctrl-C to exit and the web console for everything else.
 - **Sound and desktop alerts are off.** `paplay`/`aplay`/`notify-send` are Linux; the
   chain falls back to the terminal bell. Telegram alerts work everywhere if configured.
-- **`deepfield_run` and `scripts/*.sh` are bash**, as is the `.desktop` launcher. Invoke
-  `python -m deepfield` directly instead.
+- **`deepfield_run` and `scripts/*.sh` are bash.** Invoke `python -m deepfield` directly,
+  or use the PowerShell launcher below.
 
 `--simple` and the web console are the smoothest way to run it there.
+
+**One-click launch.** `scripts/DEEPFIELD.desktop` is Linux-only; the Windows equivalent is
+`scripts/deepfield-desktop.ps1`, installed as a shortcut by:
+
+```powershell
+.\scripts\install-desktop-icon.ps1              # desktop icon
+.\scripts\install-desktop-icon.ps1 -Autostart   # + launch at every login
+.\scripts\install-desktop-icon.ps1 -Uninstall   # remove both
+```
+
+It runs hidden under `pythonw`, opens the console at `:8787`, and cold-backfills on first
+run if there is no database. **It launches in `paper`** — `-Mode live` is accepted for a
+single run but the default is deliberate, and the shortcut never arms trading.
+
+Two guards from the bash launcher had no Windows equivalent and are replaced, not dropped:
+`pgrep` becomes a probe of `/api/health`, since the bot serves the console in-process, so
+"the port answers" *is* "a bot is running" — and it is a better test than matching a
+process name, which would also match an unrelated `python`. `tmux attach` becomes the web
+console itself. The guard matters: two copies double the WebSocket and REST load and race
+each other's alerts, and the Kraken rate limit is per-**account**, so a second instance can
+throttle a bot running elsewhere on the same key.
 
 A fresh clone has no candle database (`*.db` is correctly gitignored), so run the cold
 backfill once. Until you do, two parity tests skip with "no DB (run M1 backfill)" —
