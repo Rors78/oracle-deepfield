@@ -265,7 +265,27 @@ $env:DEEPFIELD_EXEC_MODE="live"; .\venv\Scripts\python -m deepfield
 
 Credentials go in `%USERPROFILE%\.deepfield_keys`, same two-line format.
 
-Three things degrade, none of them on the money path:
+Two Windows-only defects have been found and fixed; both are in `master`, and the note
+is kept because each was invisible on Linux and would otherwise be re-introduced:
+
+- **`tzdata` is a hard dependency there.** Four modules bind
+  `ZoneInfo("America/Denver")` at import time (`ui`, `alerter`, `simple_ui`,
+  `web.server`). Linux resolves that from `/usr/share/zoneinfo`; Windows ships no
+  system tz database at all, so a fresh clone raised `ZoneInfoNotFoundError` during
+  collection and took out 15 test files before a single assertion ran. It is pinned in
+  `requirements.txt` and is a no-op on Linux, where the stdlib prefers the system
+  database.
+- **The log handlers must be told they are UTF-8.** Log messages carry box-drawing,
+  arrows and em-dashes — 1765 characters across 32 codepoints that `cp1252` cannot
+  encode. Windows opens stdout as `cp1252`, so `StreamHandler.emit` raised
+  `UnicodeEncodeError` and logging printed a stack trace *where the line should have
+  been*. It never killed the bot — logging swallows handler errors — which is exactly
+  why it went unnoticed. `FileHandler` had the same defect latent: opened with no
+  `encoding=`, it would have corrupted the same glyphs in the log file. Both are now
+  explicit in `logsetup.py`; the console falls back to `backslashreplace` rather than
+  losing a record.
+
+Three things still degrade, none of them on the money path:
 
 - **Keyboard controls are off.** `q`/`p`/`f`/`a` need POSIX terminal control (`termios`),
   which Windows has no equivalent for. The dashboard still renders and refreshes; use
@@ -364,12 +384,18 @@ the two measure different things and diverge widely at a mixed per-pair leverage
 ## Tests
 
 ```bash
-./venv/bin/python -m pytest tests/ -q      # 281 tests
+./venv/bin/python -m pytest tests/ -q      # 421 passed, 1 skipped
 ```
 
 No test touches the network; the broker is mocked throughout and `conftest.py` isolates
 the live HALT file so the operator's real kill switch can't silently suppress an entire
 execution suite.
+
+The skip count is platform- and config-dependent, so read the reasons rather than matching
+the number. Three conditions skip: one POSIX-terminal test on Windows, the two parity
+tests on any checkout with no candle database, and three margin-level tests whenever
+`MARGIN_LEVEL_ALERT_PCT` is 0. The count quoted above is Windows with a backfilled DB and
+the alert threshold armed.
 
 The suite is heavily adversarial, and most of its interesting tests are named after
 failure modes that actually happened: `test_verify_stacked_triggered_row_not_reprotected`
