@@ -13,10 +13,10 @@ else — HTTP, signing, persistence, scoring, the web console — is standard li
 
 > **This trades real money at leverage.** `EXEC_MODE` defaults to `off` and is
 > fail-closed, but when armed it places live leveraged margin orders on Kraken's
-> `:BTNL` book. The automatic circuit breakers are deliberately disabled
-> (`RAILS_ENABLED = False`) — an informed operator override, documented in
-> [`docs/RULINGS.md`](docs/RULINGS.md). Read [Risk posture](#risk-posture) before
-> arming anything.
+> `:BTNL` book. The automatic circuit breakers are armed (`RAILS_ENABLED = True`),
+> recalibrated for the ladder in `ad5097b` after a period of running with them
+> deliberately off — see [`docs/RULINGS.md`](docs/RULINGS.md). Read
+> [Risk posture](#risk-posture) before arming anything.
 
 ---
 
@@ -189,19 +189,24 @@ thresholds — they never brake an order.
 
 Stated plainly, because the defaults are not the running configuration:
 
-- **Automatic rails are off.** `RAILS_ENABLED = False`. Max-position count, the 20%
-  drawdown kill switch, and the daily/weekly loss caps are all unreachable while it stays
-  false. This is an explicit operator override, not an oversight.
+- **Automatic rails are armed.** `RAILS_ENABLED = True` since `ad5097b` (2026-07-30),
+  recalibrated for the ladder era after a documented period of running with them off.
+  Reachable again: `MAX_OPEN_POSITIONS = 300`, the `KILL_SWITCH_DD_PCT = 0.20` drawdown
+  halt, and the `DAILY_LOSS_LIMIT_USD = 15` / `WEEKLY_LOSS_LIMIT_USD = 35` caps. Setting
+  it back to `False` short-circuits `rails_ok()` and makes every one of them unreachable
+  in a single edit.
+- **The position cap is a runaway-loop backstop, not a working-set cap.** 300 is roughly
+  10-rung chains on every pair. The brakes that actually bound the working set are the
+  margin-level stack floor, the respend governor, and the `L_eff` ceiling gate — the cap
+  is there to catch a loop, not to size the book.
 - **The HALT file is always honored**, independent of that switch. `touch
   deepfield.HALT_ENTRIES` stops new entries immediately; delete it to resume.
 - **Long only.** Kraken spot-margin has no `reduce_only`, so a resting sell can net short.
   The only sells are protective stops and the take-profit flatten. Do not add resting sells.
 - **Per-pair leverage is a hardcoded maximum** and is intended to stay that way.
-- **Position count is unbounded** with rails off. Total exposure is bounded by order
-  *size* and the margin floor, not by count.
 - Containment rests on `EXEC_SIZE_MODE = "min"` — buy the smallest placeable order.
   That is a config knob, not an invariant; flipping it to `"risk"` switches to 2%-equity
-  sizing with rails still off. Treat it as load-bearing.
+  sizing. Treat it as load-bearing.
 
 ---
 
@@ -371,7 +376,7 @@ found — both mean the ledger and the exchange disagree.
 | `RUNTIME_RECON_SECS` | `900` | Ledger ↔ exchange reconcile period |
 | `ADOPT_UNTRACKED` / `ADOPT_GRACE_SECS` | `True` / `1800` | Adopt untracked exchange volume after 30 min unclaimed |
 | `REVERSE_GEAR_ENABLED` | `True` | Deleverage governor, armed by default |
-| `RAILS_ENABLED` | `False` | Automatic circuit breakers — **off by operator choice** |
+| `RAILS_ENABLED` | `True` | Automatic circuit breakers — armed; `False` disables all of them at once |
 | `HALT_FILE` | `deepfield.HALT_ENTRIES` | Always honored, regardless of the above |
 | `MARGIN_LEVEL_ALERT_PCT` | `120` | Pages when Kraken's own margin level nears the seizure band |
 

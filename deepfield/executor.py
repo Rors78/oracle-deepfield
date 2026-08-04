@@ -172,7 +172,8 @@ class Executor:
     def rails_ok(self, equity):
         """Deterministic hard limits. (ok: bool, reason: str). The manual HALT file
         is always honored (operator's hand-on-switch); the AUTOMATIC circuit
-        breakers below are gated by RAILS_ENABLED (operator override: default off)."""
+        breakers below are gated by RAILS_ENABLED, armed since ad5097b. Setting it
+        False short-circuits every check past this point, not just one."""
         if os.path.exists(config.HALT_FILE):
             return False, f"HALT file present ({config.HALT_FILE})"
         if not config.RAILS_ENABLED:
