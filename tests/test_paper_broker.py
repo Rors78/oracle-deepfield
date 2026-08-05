@@ -538,6 +538,68 @@ def test_lifecycle_book_flatten_at_tp_target(sim, monkeypatch):
         "flatten must clear its own flag once the book is confirmed flat"
 
 
+# ── the integrity audit must actually detect ─────────────────────────────────
+
+def _audit_map(db):
+    return {name: (ok, detail) for name, ok, detail in paper_broker.audit(db)}
+
+
+def test_audit_passes_on_a_healthy_book(sim, tmp_path, monkeypatch):
+    e = _armed_exec(sim, monkeypatch)
+    _fill_one(sim, e)
+    res = _audit_map(str(tmp_path / "p.db"))
+    assert res, "audit produced no findings"
+    assert all(ok for ok, _ in res.values()), \
+        "healthy book failed: " + "; ".join(f"{k}: {d}" for k, (ok, d) in res.items() if not ok)
+
+
+def test_audit_catches_a_naked_lot(sim, tmp_path, monkeypatch):
+    """An open lot whose stop is gone and which is not mid-harvest is the single
+    most dangerous state on a leveraged book."""
+    e = _armed_exec(sim, monkeypatch)
+    oid, _ = _fill_one(sim, e)
+    stx = sim.execute("SELECT stop_txid FROM orders WHERE id=?", (oid,)).fetchone()[0]
+    sim.execute("UPDATE paper_orders SET status='canceled' WHERE txid=?", (stx,))
+    sim.commit()
+    ok, detail = _audit_map(str(tmp_path / "p.db"))["every open lot has a resting stop or a resting close"]
+    assert not ok and "BTC" in detail
+
+
+def test_audit_tolerates_a_lot_mid_harvest(sim, tmp_path, monkeypatch):
+    """Stop OFF with a resting close is BY DESIGN — the sell owns the exit. The
+    naked check must not cry wolf on it, or the audit becomes noise."""
+    e = _armed_exec(sim, monkeypatch)
+    oid, entry = _fill_one(sim, e)
+    stx = sim.execute("SELECT stop_txid FROM orders WHERE id=?", (oid,)).fetchone()[0]
+    broker.cancel_order(stx)                                  # as the harvest does
+    sell = _add(entry * 1.04, otype="sell", oflags=None)
+    sim.execute("UPDATE orders SET stop_txid=NULL, close_txid=? WHERE id=?",
+                (sell["txid"][0], oid))
+    sim.commit()
+    ok, detail = _audit_map(str(tmp_path / "p.db"))["every open lot has a resting stop or a resting close"]
+    assert ok, f"mid-harvest lot wrongly flagged: {detail}"
+
+
+def test_audit_catches_volume_drift_and_bad_cash(sim, tmp_path, monkeypatch):
+    e = _armed_exec(sim, monkeypatch)
+    _fill_one(sim, e)
+    db = str(tmp_path / "p.db")
+    sim.execute("UPDATE paper_positions SET vol = vol * 2")     # exchange disagrees
+    sim.commit()
+    assert not _audit_map(db)["ledger volume equals exchange position volume"][0]
+    paper_broker._state_set("cash", 12345.0)                    # cash no longer derives
+    paper_broker._conn.commit()
+    assert not _audit_map(db)["cash equals deposits plus ledger amounts minus fees"][0]
+
+
+def test_audit_reports_cleanly_on_a_db_with_no_simulator(tmp_path):
+    conn = store.connect(str(tmp_path / "bare.db"))
+    conn.commit()
+    res = paper_broker.audit(str(tmp_path / "bare.db"))
+    assert len(res) == 1 and res[0][1] is False and "paper_" in res[0][2]
+    conn.close()
+
+
 # ── a simulated book must not page the operator ──────────────────────────────
 
 def test_paper_safety_alerts_are_forced_quiet(monkeypatch):

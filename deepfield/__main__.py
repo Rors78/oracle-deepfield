@@ -28,6 +28,8 @@ def build_parser() -> argparse.ArgumentParser:
                         "STOP THE LIVE BOT FIRST — one process per API key.")
     p.add_argument("--lots", type=int, default=None,
                    help="with --trim: shed at most N lots (largest notional first; default: the whole line)")
+    p.add_argument("--audit-paper", action="store_true",
+                   help="check the simulated exchange against the ledger (read-only) and exit")
     p.add_argument("--web", action="store_true", help="serve the read-only web console (localhost dashboard)")
     p.add_argument("--port", type=int, default=None,
                    help="web console port (with --web; default: DEEPFIELD_WEB_PORT or 8787)")
@@ -115,6 +117,15 @@ def main(argv=None) -> int:
         if res["ml_before"] is not None and res["ml_after"] is not None:
             print(f"  margin level {res['ml_before']:.0f}% -> {res['ml_after']:.0f}%")
         return 1 if res["failed"] else 0
+    if args.audit_paper:
+        from . import paper_broker, config
+        findings = paper_broker.audit()
+        for name, ok, detail in findings:
+            print(f"  {'PASS' if ok else 'FAIL'}  {name}" + (f"  — {detail}" if detail and not ok else ""))
+        bad = [f for f in findings if not f[1]]
+        print(f"\n{config.DB_PATH}\n"
+              + ("all invariants hold" if not bad else f"{len(bad)} INVARIANT(S) VIOLATED"))
+        return 1 if bad else 0
     if args.web:
         from .web import server
         from . import config

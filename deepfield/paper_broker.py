@@ -699,6 +699,85 @@ def _add_order(p, meta, cache):
                                                f"{ordertype} {price:.8g}"}}
 
 
+# ── integrity audit ──────────────────────────────────────────────────────────
+
+def audit(db_path=None):
+    """Check the simulated exchange against the bot's own ledger. Read-only, and
+    it does NOT need the simulator attached — point it at any paper DB.
+
+    A paper run goes for days. Drift between the two views — a lot with no resting
+    stop, a sell larger than the long volume backing it, cash that no longer equals
+    deposits plus realized minus fees — would otherwise stay invisible until it
+    surfaced as a nonsense number on the deck, by which point the run's conclusions
+    are already contaminated. These are the invariants the simulator is supposed to
+    make impossible; checking them is how we find out it actually does.
+
+    Returns [(name, ok, detail), ...]."""
+    conn = sqlite3.connect(f"file:{db_path or config.DB_PATH}?mode=ro", uri=True, timeout=10)
+    out = []
+    try:
+        if not conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' "
+                            "AND name='paper_orders'").fetchone():
+            return [("simulated exchange present", False, "no paper_* tables in this DB")]
+
+        rows = conn.execute("SELECT id,symbol,txid,stop_txid,close_txid,volume FROM orders "
+                            "WHERE mode='paper' AND status='open'").fetchall()
+
+        bad = [r[1] for r in rows if not conn.execute(
+            "SELECT 1 FROM paper_orders WHERE txid=? AND status='closed' AND vol_exec>0",
+            (r[2],)).fetchone()]
+        out.append(("every open ledger row has a filled exchange entry", not bad, ",".join(bad)))
+
+        # A lot mid-harvest/mid-flatten has its stop OFF by design — a resting sell
+        # owns the exit. Unprotected means neither.
+        naked = []
+        for _oid, sym, _tx, stx, ctx, _v in rows:
+            prot = stx and conn.execute("SELECT 1 FROM paper_orders WHERE txid=? AND status='open'",
+                                        (stx,)).fetchone()
+            sell = ctx and conn.execute("SELECT 1 FROM paper_orders WHERE txid=? AND status='open'",
+                                        (ctx,)).fetchone()
+            if not prot and not sell:
+                naked.append(sym)
+        out.append(("every open lot has a resting stop or a resting close", not naked, ",".join(naked)))
+
+        over = []
+        for pair, sv in conn.execute("SELECT pair,SUM(volume) FROM paper_orders "
+                                     "WHERE status='open' AND type='sell' GROUP BY pair"):
+            lv = conn.execute("SELECT COALESCE(SUM(vol-vol_closed),0) FROM paper_positions "
+                              "WHERE pair=?", (pair,)).fetchone()[0]
+            if float(sv) > float(lv) + 1e-9:
+                over.append(f"{pair} sell {sv} > long {lv}")
+        out.append(("resting sell volume never exceeds long volume", not over, "; ".join(over)))
+
+        led = conn.execute("SELECT COALESCE(SUM(volume),0) FROM orders "
+                           "WHERE mode='paper' AND status='open'").fetchone()[0]
+        sim = conn.execute("SELECT COALESCE(SUM(vol-vol_closed),0) FROM paper_positions").fetchone()[0]
+        out.append(("ledger volume equals exchange position volume",
+                    abs(float(led) - float(sim)) < 1e-8, f"ledger {led} vs exchange {sim}"))
+
+        def _st(k, d=0.0):
+            r = conn.execute("SELECT value FROM paper_state WHERE key=?", (k,)).fetchone()
+            try:
+                return float(r[0]) if r else d
+            except (TypeError, ValueError):
+                return d
+        cash, dep = _st("cash"), _st("deposits")
+        amt = conn.execute("SELECT COALESCE(SUM(amount),0) FROM paper_ledger").fetchone()[0]
+        fee = conn.execute("SELECT COALESCE(SUM(fee),0) FROM paper_ledger").fetchone()[0]
+        out.append(("cash equals deposits plus ledger amounts minus fees",
+                    abs(cash - (dep + amt - fee)) < 1e-6,
+                    f"cash {cash:.8f} vs derived {dep + amt - fee:.8f}"))
+
+        orph = conn.execute(
+            "SELECT COUNT(*) FROM paper_orders p WHERE p.status='open' AND p.type='sell' "
+            "AND NOT EXISTS(SELECT 1 FROM orders o WHERE o.mode='paper' "
+            "AND (o.stop_txid=p.txid OR o.close_txid=p.txid))").fetchone()[0]
+        out.append(("no orphan resting sells on the exchange", orph == 0, f"{orph} orphan(s)"))
+        return out
+    finally:
+        conn.close()
+
+
 # ── operator-facing summary ──────────────────────────────────────────────────
 
 def summary():
