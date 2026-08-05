@@ -582,6 +582,10 @@ def test_attach_reanchors_inherited_fee_accounting(tmp_path):
         assert float(store.meta_get(conn, "fees_epoch")) >= before   # re-anchored
         assert float(store.meta_get(conn, "fees_total")) == 0.0
         assert float(store.meta_get(conn, "fees_banked")) == 0.0
+        # the prior values must survive under backup keys — if paper is ever pointed
+        # at a LIVE ledger by mistake, that is months of rollover accounting
+        assert store.meta_get(conn, "prepaper_fees_total") == "10.579"
+        assert store.meta_get(conn, "prepaper_fees_epoch") == "1784449954.0"
     finally:
         paper_broker.detach()
     conn.close()

@@ -187,8 +187,20 @@ def _reanchor_fee_accounting():
                          ).fetchone():
         return
     now = time.time()
-    for k, v in (("fees_epoch", now), ("fees_cursor", now), ("flows_cursor", now),
-                 ("fees_banked", 0.0), ("fees_total", 0.0), ("fees_day", 0.0)):
+    keys = (("fees_epoch", now), ("fees_cursor", now), ("flows_cursor", now),
+            ("fees_banked", 0.0), ("fees_total", 0.0), ("fees_day", 0.0))
+    # Back the old values up before overwriting. Paper is meant to run from a
+    # worktree, where PROJECT_ROOT — and therefore DB_PATH — is its own; but running
+    # EXEC_MODE=paper from the MAIN checkout would point this at the live ledger,
+    # where these keys are real rollover accounting going back months. Zeroing that
+    # is not recoverable from the API (the Ledgers walk that built it cannot be
+    # repeated — see broker.rollover_fees_since). Recoverable beats gone.
+    for k, _v in keys:
+        prev = _conn.execute("SELECT value FROM meta WHERE key=?", (k,)).fetchone()
+        if prev is not None:
+            _conn.execute("INSERT INTO meta(key,value) VALUES(?,?) "
+                          "ON CONFLICT(key) DO NOTHING", (f"prepaper_{k}", prev[0]))
+    for k, v in keys:
         _conn.execute("INSERT INTO meta(key,value) VALUES(?,?) "
                       "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (k, str(v)))
     log.info("PAPER: fee accounting re-anchored to now — a simulated exchange has "
