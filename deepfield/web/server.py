@@ -354,6 +354,10 @@ def _assemble(conn):
             "bid": bid, "bids": bids, "rungs": rungs, "vols": vols,
             "fstops": fstops, "prot": prot,            # per-fill stop / protection (W3/W4)
             "fault": fault,
+            # config.EXCLUDED_PAIRS takes NO new entries. Without this the row is
+            # indistinguishable from a live scout — SHIB sat at status=WCH, which
+            # reads as "close to firing" on a pair that can never enter.
+            "excluded": sym in getattr(config, "EXCLUDED_PAIRS", ()),
             # W12: no hardcoded 10 — a 5x pair's default must be ITS max leverage
             "lev": (lad["fills"][0]["lev"] if (lad and lad["fills"])
                     else config.PER_PAIR_LEVERAGE.get(sym, 10)),

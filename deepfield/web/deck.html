@@ -229,6 +229,12 @@ main>*, .row1>*, .row3>*, .side>*{min-width:0}
 @keyframes fpulse{50%{fill-opacity:.35}}
 .fdot.danger{animation:fpulse 1.9s ease-in-out infinite}
 
+/* An excluded pair still ingests, scores and displays — it just takes no new
+   entries. It must not read as a live candidate: SHIB sat at status WCH, which
+   looks like "about to fire" on a pair that can never enter. */
+.sym.excl{color:var(--ink3)}
+.statuschip.excl{border-color:var(--line2); color:var(--ink3); background:transparent}
+
 /* ── stress · survivability ───────────────────────────────────────────────
    Every field in health.stress is denominated in the SAME unit — adverse
    basket move % — so the whole survivability question fits on one axis:
@@ -1284,14 +1290,19 @@ function renderBook(){
       <td class="dim">${p.lev}×</td>
       <td>${prot}</td></tr>`;
   }).join("");
-  const scoutRows=scout.length?`<tr><td colspan="10" class="scout-head">Scouting · ${scout.length} unheld ladders</td></tr>`+
-    scout.sort((a,b)=>(b.score/b.denom||0)-(a.score/a.denom||0)).map(p=>
+  const scoutRows=scout.length?`<tr><td colspan="10" class="scout-head">Scouting · ${scout.filter(p=>!p.excluded).length} unheld ladders${
+      scout.some(p=>p.excluded)?` · ${scout.filter(p=>p.excluded).length} excluded`:""}</td></tr>`+
+    scout.sort((a,b)=>(a.excluded?1:0)-(b.excluded?1:0)
+                      ||(b.score/b.denom||0)-(a.score/a.denom||0)).map(p=>
     `<tr class="scoutrow" data-sym="${p.sym}">
-      <td class="l"><span class="sym">${p.sym}</span> <span class="statuschip ${p.stStyle}">${p.status}</span></td>
+      <td class="l"><span class="sym${p.excluded?" excl":""}">${p.sym}</span> ${
+        p.excluded ? `<span class="statuschip excl" title="config.EXCLUDED_PAIRS — takes no new entries; existing lots stay managed">excluded</span>`
+                   : `<span class="statuschip ${p.stStyle}">${p.status}</span>`}</td>
       <td>${fmtPx(p.price)}</td>
       <td class="${cls(p.chg||0)}">${p.chg==null?"—":(p.chg>=0?"+":"")+p.chg.toFixed(1)+"%"}</td>
       <td class="sparkcell">${sparkSVG(p.spark,p.chg)}</td>
-      <td class="dim" colspan="2">${p.bid?`bid resting @ ${fmtPx(p.bid)}`:"no bid"}</td>
+      <td class="dim" colspan="2">${p.bid?`bid resting @ ${fmtPx(p.bid)}`
+        :p.excluded?`<span class="dim">no new entries</span>`:"no bid"}</td>
       <td class="dim"${naNote(p)?` title="${esc(naNote(p))}"`:""}>${
         p.denom ? `score ${p.score}/${p.denom}` : `<span class="warn">unscoreable</span>`}</td>
       <td class="dim" colspan="3">${p.pctLow!=null?p.pctLow+"% above 52w low":""}</td></tr>`).join(""):"";
