@@ -187,6 +187,19 @@ def _reanchor_fee_accounting():
                          ).fetchone():
         return
     now = time.time()
+    # A fresh book also has no EQUITY history. equity_history came along with the
+    # snapshot, so the console drew the previous book's curve and this one's as a
+    # single line — a $1000 book resetting to $200 rendered as a vertical 80% crash
+    # that never happened, and stretched the y-axis so the live book was a flat
+    # smear. Clear it for the same reason the fee anchors move: this book did not
+    # live through any of it. The live DB keeps its own.
+    try:
+        n = _conn.execute("DELETE FROM equity_history").rowcount
+        if n:
+            log.info("PAPER: cleared %d inherited equity samples — a fresh book has "
+                     "no equity history", n)
+    except Exception:
+        pass                                    # table may not exist yet; never fatal
     keys = (("fees_epoch", now), ("fees_cursor", now), ("flows_cursor", now),
             ("fees_banked", 0.0), ("fees_total", 0.0), ("fees_day", 0.0))
     # Back the old values up before overwriting. Paper is meant to run from a
