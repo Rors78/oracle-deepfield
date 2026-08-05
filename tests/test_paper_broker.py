@@ -19,6 +19,7 @@ MPAIR = "XBTUSD:BTNL"
 # keep working. Here BOTH are real and query_order is implemented ON query_orders, so
 # that bridge is infinite recursion. Captured before the autouse fixture rebinds it.
 _REAL_QUERY_ORDERS = broker.query_orders
+_REAL_PRIVATE = broker.private
 
 
 @pytest.fixture
@@ -71,6 +72,32 @@ def test_attach_rebinds_and_detach_restores(tmp_path):
     assert broker.private is not real and paper_broker.attached()
     paper_broker.detach()
     assert broker.private is real and not paper_broker.attached()
+
+
+def test_attach_refuses_in_live_mode(tmp_path, monkeypatch):
+    """A live bot with a simulated exchange attached would place orders into a
+    fantasy book while every gate, rail and reconcile believed they were real.
+    Nothing calls attach() from a live path — this makes it impossible anyway."""
+    monkeypatch.setattr(config, "EXEC_MODE", "live")
+    with pytest.raises(RuntimeError, match="LIVE"):
+        paper_broker.attach(str(tmp_path / "nope.db"))
+    assert not paper_broker.attached()
+    from deepfield import broker as _b
+    assert _b.private is _REAL_PRIVATE, "broker.private must be untouched"
+
+
+def test_armed_is_exactly_live_when_mode_is_live(tmp_path):
+    """LIVE-NEUTRALITY GUARD. Every executor gate on this branch moved from
+    `mode == "live"` to `_armed()`. That is only safe while _armed() is exactly
+    equivalent for live — if someone later loosens it, every rail on the money path
+    loosens with it, silently."""
+    conn = store.connect(str(tmp_path / "n.db"))
+    e = ex_mod.Executor(conn)
+    for mode, expected in (("live", True), ("off", False), ("validate", False),
+                           ("paper", False)):          # paper w/o simulator: inert
+        e.mode = mode
+        assert e._armed() is expected, f"{mode} armed should be {expected}"
+    conn.close()
 
 
 def test_real_private_refuses_in_paper_mode_when_unattached(monkeypatch):

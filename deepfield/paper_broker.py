@@ -130,11 +130,23 @@ def attached():
 
 
 def attach(db_path=None):
-    """Bind the simulator to broker.private(). Idempotent."""
+    """Bind the simulator to broker.private(). Idempotent.
+
+    REFUSES in live mode. Executor._armed() is true for live regardless of this
+    module, and broker.private() would by then be the simulator — so a live-mode
+    bot with a simulator attached would place orders into a fantasy book while
+    every gate, rail and reconcile believed they were real, and the operator's
+    console would show a book that does not exist. Nothing calls attach() from a
+    live path today; this makes that state impossible by construction rather than
+    by convention. off/validate are permitted (the unit tests attach there)."""
     global _conn, _real_private, _attached
     with _LOCK:
         if _attached:
             return
+        if getattr(config, "EXEC_MODE", "") == "live":
+            raise RuntimeError(
+                "refusing to attach the paper exchange in LIVE mode — a live bot "
+                "trading against a simulated book would look identical to a real one")
         from . import broker
         _conn = sqlite3.connect(db_path or config.DB_PATH, check_same_thread=False,
                                 timeout=30.0)
