@@ -1474,6 +1474,38 @@ setInterval(()=>{
 },1000);
 
 /* ═══ main loop ═══ */
+/* Every 4s poll rebuilds the book, ledger and journal with innerHTML — which
+   destroys any text selection inside them. Measured: select a symbol and it is gone
+   before you could reach the keyboard, so copying a price, a symbol or a txid out of
+   this deck was simply not possible. Skip re-rendering ONLY the container that
+   currently holds a selection; it resumes the instant the selection clears. Worst
+   case that one panel is a single poll stale while you are deliberately reading it,
+   which is the moment you least need it to move under your cursor. */
+function holdsSelection(el){
+  try{
+    const s=getSelection();
+    if(!el||!s||s.isCollapsed||!s.rangeCount) return false;
+    return el.contains(s.getRangeAt(0).commonAncestorContainer);
+  }catch(_){ return false; }
+}
+/* The hold is CAPPED. A selection left sitting — copied a txid, then got distracted —
+   would otherwise freeze that panel forever while the rest of the deck kept moving,
+   which is precisely the "stale shown as current" failure the feed-liveness work
+   above exists to prevent. After SEL_HOLD_MAX_MS the panel redraws regardless and
+   the selection is lost, because a correct number beats a copyable stale one. */
+const SEL_HOLD_MAX_MS=30000;
+const _heldSince={};
+function unlessSelected(id, fn){
+  return ()=>{
+    if(holdsSelection($(id))){
+      const t0=_heldSince[id]||(_heldSince[id]=Date.now());
+      if(Date.now()-t0 < SEL_HOLD_MAX_MS) return;      // still within the grace
+    }
+    delete _heldSince[id];
+    fn();
+  };
+}
+
 /* ── feed liveness ───────────────────────────────────────────────────────────
    The banner alone said "unreachable" without saying for HOW LONG, and a 4s blip
    and a 20-minute outage are not the same event. Track both, and after a grace
@@ -1522,9 +1554,12 @@ async function fetchState(){
     // and named on screen so the failure is visible instead of silent.
     [["mast",()=>renderMast(h)],["capital",()=>renderCapital(h)],
      ["harvest",()=>renderHarvest(h)],["defense",()=>renderDefense(h)],
-     ["field",renderField],["stress",()=>renderStress(h)],["book",renderBook],["ledger",renderLedger],
-     ["journal",renderJournal],["footer",()=>renderFooter(S.regime||{},h,S.v)],
-     ["detail",()=>{ if(detailSym&&PMAP[detailSym]&&DETAIL) renderDetail(); }]
+     ["field",renderField],["stress",()=>renderStress(h)],
+     ["book",unlessSelected("booktable",renderBook)],
+     ["ledger",unlessSelected("ledgerlist",renderLedger)],
+     ["journal",unlessSelected("jfeed",renderJournal)],
+     ["footer",()=>renderFooter(S.regime||{},h,S.v)],
+     ["detail",unlessSelected("sheet",()=>{ if(detailSym&&PMAP[detailSym]&&DETAIL) renderDetail(); })]
     ].forEach(([name,fn])=>{
       try{ fn(); }
       catch(err){ console.error(`[deck] ${name} render failed:`,err); failed.push(name); }
