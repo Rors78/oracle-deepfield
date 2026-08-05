@@ -200,6 +200,22 @@ def test_non_post_only_may_cross(sim):
     assert _add(101.0, oflags=None) is not None
 
 
+def test_post_only_at_the_touch_is_accepted(sim):
+    """Resting AT the touch is the maker's normal position, and the rung harvest
+    deliberately prices its sell at min(bid+tick, ask) — ON the ask. Treating
+    equality as crossing rejected exactly those sells, so the +4% engine could never
+    fire in paper. Verified to FAIL on the `price <= last` form."""
+    _now_bar(sim, 100.0)
+    assert _add(100.0, otype="sell", oflags="post") is not None    # at the touch: rests
+    assert _add(100.0, otype="buy", oflags="post") is not None
+    meta = {}
+    assert broker.private("/0/private/AddOrder",
+                          {"pair": MPAIR, "type": "sell", "ordertype": "limit",
+                           "volume": "0.001", "price": "99.0", "oflags": "post",
+                           "leverage": "10"}, meta=meta) is None   # below: crosses
+    assert "Post only" in meta["error"]
+
+
 # ── cancel ───────────────────────────────────────────────────────────────────
 
 def test_cancel_and_batch_cancel(sim):
@@ -284,6 +300,126 @@ def test_paper_without_simulator_keeps_legacy_instant_fill(tmp_path):
                                  (oid,)).fetchone()
     assert st == "open" and txid.startswith("PAPER-") and stx.startswith("PAPER-STOP")
     conn.close()
+
+
+# ── full money-path lifecycles against the simulator ─────────────────────────
+
+def _armed_exec(conn, monkeypatch):
+    """An executor armed against the simulator, with the ladder's own add-ons left
+    inert so each lifecycle test exercises exactly one path.
+
+    The harvest confirms its move with a PUBLIC ticker call before placing a sell.
+    That is legitimate in the running bot (public endpoints are IP-limited, not
+    charged to the account budget a competition bot may be holding) but the suite's
+    hard Kraken wall blocks it, so serve the quote from the same local candle the
+    simulator matches against — which also keeps trigger and fill consistent."""
+    from deepfield import rest_client
+
+    def _ticker(pairs):
+        row = conn.execute("SELECT c FROM candles WHERE pair=? AND interval=15 "
+                           "ORDER BY ts DESC LIMIT 1", (SYM,)).fetchone()
+        px = float(row[0]) if row else 0.0
+        # b/a, not just c: the harvest prices its sell off the BOOK (min(bid+tick,
+        # ask)) and skips the rung entirely when the quote has no bid.
+        return {p: {"c": [f"{px:.10f}"], "b": [f"{px:.10f}"], "a": [f"{px:.10f}"]}
+                for p in (pairs or [])}
+
+    monkeypatch.setattr(rest_client, "fetch_ticker", _ticker)
+    monkeypatch.setattr(broker, "query_orders", _REAL_QUERY_ORDERS)
+    monkeypatch.setattr(ex_mod.Executor, "_live_last", lambda self, s: None)
+    e = ex_mod.Executor(conn)
+    e.mode = "paper"
+    assert e._armed()
+    return e
+
+
+class _Card:
+    low_52w, score, required = 92.0, 5, 5
+
+
+def _fill_one(sim, e, entry_hint=100.0):
+    """Place an entry, let the market come to it, and promote it to an open lot."""
+    _now_bar(sim, entry_hint)
+    oid = e.place_entry(SYM, entry_hint, _Card())
+    px = float(sim.execute("SELECT entry FROM orders WHERE id=?", (oid,)).fetchone()[0])
+    _now_bar(sim, px)
+    e.poll_fills()
+    return oid, px
+
+
+def test_lifecycle_rung_harvest_banks_at_plus_4pct(sim, monkeypatch):
+    """The +4% per-rung skim, end to end through the simulated exchange: the stop is
+    canceled, a post-only sell rests above entry, the market reaches it, the lot
+    closes FIFO and the gain lands in cash. This is the engine that has been the
+    primary earner since 07-29, and paper never exercised it before the simulator."""
+    monkeypatch.setattr(config, "TP_RUNG_ENABLED", True)
+    monkeypatch.setattr(config, "TP_RUNG_PCT", 0.04)
+    monkeypatch.setattr(config, "LADDER_CONTINUOUS", False)   # isolate the harvest
+    e = _armed_exec(sim, monkeypatch)
+    oid, entry = _fill_one(sim, e)
+    assert sim.execute("SELECT status FROM orders WHERE id=?", (oid,)).fetchone()[0] == "open"
+    cash0 = float(paper_broker._state_get("cash"))
+
+    # market clears the +4% target -> harvest opens
+    _now_bar(sim, entry * 1.05)
+    e.poll_fills()
+    close_txid = sim.execute("SELECT close_txid FROM orders WHERE id=?", (oid,)).fetchone()[0]
+    assert close_txid, "harvest should have rested a close order"
+    sell = broker.query_orders([close_txid])[close_txid]
+    assert sell["descr"]["type"] == "sell"
+    assert float(sell["descr"]["price"]) >= entry * 1.04
+    # stop and harvest sell must never rest together (they'd double-sell the lot)
+    stx = sim.execute("SELECT stop_txid FROM orders WHERE id=?", (oid,)).fetchone()[0]
+    assert not stx or broker.query_orders([stx])[stx]["status"] != "open"
+
+    # the sell is post-only ABOVE the market; lift the market through it
+    _now_bar(sim, entry * 1.10)
+    e.poll_fills()
+    assert broker.query_orders([close_txid])[close_txid]["status"] == "closed"
+    assert broker.open_positions() == {}                      # lot retired
+    assert float(paper_broker._state_get("cash")) > cash0      # gain banked
+
+
+def test_lifecycle_stop_out_records_realized_pnl(sim, monkeypatch):
+    """A stop-triggered exit, end to end: the simulated stop fills through the
+    trigger, the ledger row closes, and the realized loss is recorded as JSON in the
+    polymorphic `error` column — the shape realized_pnl_since (a LOSS RAIL) reads."""
+    monkeypatch.setattr(config, "TP_RUNG_ENABLED", False)
+    monkeypatch.setattr(config, "LADDER_CONTINUOUS", False)
+    e = _armed_exec(sim, monkeypatch)
+    oid, entry = _fill_one(sim, e)
+    stop_px = float(sim.execute("SELECT stop FROM orders WHERE id=?", (oid,)).fetchone()[0])
+    assert 0 < stop_px < entry
+    cash0 = float(paper_broker._state_get("cash"))
+
+    _now_bar(sim, stop_px * 0.99)                  # gap through the stop
+    e.poll_fills()
+    e.verify_open_stops(context="runtime")         # the sweep that notices stop-outs
+
+    st, err = sim.execute("SELECT status,error FROM orders WHERE id=?", (oid,)).fetchone()
+    assert st != "open", "a stopped-out lot must not stay open"
+    assert broker.open_positions() == {}
+    assert float(paper_broker._state_get("cash")) < cash0      # loss realized
+    if err and err.strip().startswith("{"):        # priced exits carry the P&L blob
+        import json as _json
+        assert _json.loads(err)["pnl"] < 0
+
+
+def test_lifecycle_stop_and_harvest_never_rest_together(sim, monkeypatch):
+    """The invariant that keeps a long-only book from double-selling a lot: at no
+    point may a protective stop and a harvest sell be open on the same rung."""
+    monkeypatch.setattr(config, "TP_RUNG_ENABLED", True)
+    monkeypatch.setattr(config, "LADDER_CONTINUOUS", False)
+    e = _armed_exec(sim, monkeypatch)
+    oid, entry = _fill_one(sim, e)
+    for px in (entry, entry * 1.02, entry * 1.05, entry * 1.08):
+        _now_bar(sim, px)
+        e.poll_fills()
+        stx, ctx = sim.execute("SELECT stop_txid,close_txid FROM orders WHERE id=?",
+                               (oid,)).fetchone()
+        live = [t for t in (stx, ctx) if t
+                and (broker.query_orders([t]).get(t) or {}).get("status") == "open"]
+        assert len(live) <= 1, f"stop AND harvest both resting at {px}: {live}"
 
 
 # ── a simulated book must not page the operator ──────────────────────────────

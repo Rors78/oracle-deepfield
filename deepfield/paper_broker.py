@@ -604,7 +604,13 @@ def _add_order(p, meta, cache):
     # behavior the ladder's below-market clamp and the harvest's abort floor exist
     # to respect. Simulating the reject keeps those guards honest.
     if "post" in oflags and last is not None and ordertype == "limit":
-        crosses = (otype == "buy" and price >= last) or (otype == "sell" and price <= last)
+        # STRICT inequality. The simulator has one price where a real book has a
+        # bid/ask pair, and resting AT the touch is the maker's normal position —
+        # the rung harvest deliberately prices its sell at min(bid+tick, ask), i.e.
+        # ON the ask. Treating equality as crossing rejected exactly those sells, so
+        # the +4% engine could never fire in paper and the book would only ever grow:
+        # the same blind spot the simulator was built to remove.
+        crosses = (otype == "buy" and price > last) or (otype == "sell" and price < last)
         if crosses:
             if meta is not None:
                 meta["error"] = "EOrder:Post only order"
