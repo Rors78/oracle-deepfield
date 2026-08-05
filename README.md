@@ -251,9 +251,67 @@ rather than being coerced, because coercing `LIVE` → `live` would arm real mon
 | Mode | Behavior |
 |------|----------|
 | `off` | Monitor only. Default. |
-| `paper` | Simulated fills recorded to the ledger. No network. |
+| `paper` | The full live code path against a simulated exchange. Public market data only — never a private endpoint. See [Paper mode](#paper-mode). |
 | `validate` | Real `AddOrder` with `validate=true` — Kraken checks pair, leverage, precision, minimums and returns without executing. |
 | `live` | Real leveraged orders. |
+
+### Paper mode
+
+Paper is not a stub. `deepfield/paper_broker.py` is a simulated Kraken private API
+bound to `broker.private()` — the single function every private endpoint in this
+codebase reaches the network through. Swapping that one function means the *whole*
+live path runs: `poll_fills`, the protective-stop reconcile, continuous laddering,
+chain seeding, the +4% rung harvest, the stop-ratchet, take-profit, the reverse
+gear, and broker's own response parsing. Nothing downstream is special-cased.
+
+Prices come from the WS-fed `candles` table, so fills track the real market with no
+extra REST load and **no private traffic whatsoever** — the Kraken rate limit is
+per-*account*, so this matters whenever anything else holds the same keys.
+
+It is modeled deliberately unfavourably, because a simulator that flatters the
+strategy is worse than no simulator:
+
+| | |
+|---|---|
+| **No look-ahead** | A bar's high/low count only once the bar *opened* after the order was placed. Otherwise a mid-bar placement fills against a wick that already printed — inventing fills the live bot could never have won. |
+| **Stops are market** | Fill at the price gapped to, never better than the trigger, then slippage. Evaluated *before* limits within a bar: the true sequence is unknowable and this is the reading that costs the book most. |
+| **Post-only rejects crossers** | Which is exactly what the ladder's below-market clamp and the harvest's abort floor exist to respect. |
+| **Fees and financing** | Maker/taker on every fill, plus 4h margin rollover at ~33%/yr on open notional — matching the live book's measured ~$0.39/day. Financing is this strategy's largest real cost; omitting it would bias every conclusion the same way. |
+| **Long only** | A sell fills only against long volume actually held, so an orphan stop cannot invent a short. |
+
+Fills are **full**, and that is deliberate rather than a gap. `poll_fills` has
+careful partial-fill handling that never runs here, which looks like missing
+fidelity — but every entry floors up to the exchange minimum before `SIZE_MULT`, so
+a rung is a ~$4–9 order against a book with orders of magnitude more depth at any
+touched level. Modeling partial fills would make the simulator *less* faithful to
+this strategy while understating accumulation for a reason unrelated to the market.
+A partial *close* is a different thing and is supported.
+
+**Run it from a worktree, not the main checkout.** `PROJECT_ROOT` derives from the
+package location, so a worktree run gets its own `deepfield.db` and `logs/` for
+free:
+
+```bash
+git worktree add .claude/worktrees/paper -b paper
+cd .claude/worktrees/paper
+DEEPFIELD_EXEC_MODE=paper ../../../venv/bin/python -m deepfield
+```
+
+Run paper from the main checkout and it points at the **live** database. Attaching
+re-anchors the rollover-fee accounting — correct for a fresh simulated ledger,
+destructive against a real one, and the Ledgers API cannot rebuild what it clears
+(see `broker.rollover_fees_since` for why that walk can't be repeated). Prior values
+are copied to `prepaper_*` first so it is recoverable, but isolation is the fix and
+the backup is only the seatbelt. The Windows launcher runs from the repo root in
+paper by default, which is safe on a migration box with no live ledger and should be
+pointed at a worktree on one that has.
+
+Seeding from a snapshot of the live DB is the fast path — it carries the candle
+history, so there is no full re-backfill over the shared public API — and `attach()`
+re-anchors the inherited fee window for you.
+
+`attach()` refuses outright in `live` mode: a live bot trading against a simulated
+book would look identical to a real one on every gate, rail and console.
 
 ### Windows
 
@@ -410,12 +468,19 @@ the two measure different things and diverge widely at a mixed per-pair leverage
 ## Tests
 
 ```bash
-./venv/bin/python -m pytest tests/ -q      # 421 passed, 1 skipped
+./venv/bin/python -m pytest tests/ -q      # 451 passed
 ```
 
-No test touches the network; the broker is mocked throughout and `conftest.py` isolates
-the live HALT file so the operator's real kill switch can't silently suppress an entire
-execution suite.
+No test touches the network — and that is enforced, not merely intended: `conftest.py`
+installs a hard wall on `urllib.request.urlopen` that raises on any `kraken.com` URL,
+because the rate limit is per-*account* and a test process's calls throttle a live bot
+running elsewhere on the same key. It also isolates the live HALT file (so the operator's
+real kill switch can't silently suppress an entire execution suite) and mutes the desktop
+alerter (a full run once buried the operator's screen in critical popups that read as live
+incidents).
+
+**Run the suite from a worktree.** `parity.py` opens `config.DB_PATH` read-write and runs
+migrations on it, so a full run in the main checkout writes to the live database.
 
 The skip count is platform- and config-dependent, so read the reasons rather than matching
 the number. Three conditions skip: one POSIX-terminal test on Windows, the two parity
