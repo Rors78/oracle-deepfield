@@ -206,6 +206,21 @@ main{max-width:1720px; margin:0 auto; padding:18px 26px 30px; display:grid; gap:
 @keyframes fpulse{50%{fill-opacity:.35}}
 .fdot.danger{animation:fpulse 1.9s ease-in-out infinite}
 
+/* ── stress · survivability ───────────────────────────────────────────────
+   Every field in health.stress is denominated in the SAME unit — adverse
+   basket move % — so the whole survivability question fits on one axis:
+   does the liquidation line sit beyond the worst move on record? */
+.stress-card{padding-bottom:11px; overflow:hidden}
+.stress-card .eyebrow{color:var(--brass); margin-bottom:6px}
+.stresswrap{overflow-x:auto}
+.stresswrap svg{display:block; min-width:760px; width:100%}
+.verdict{font-size:11.5px; letter-spacing:.02em; margin:2px 0 9px; color:var(--ink2)}
+.verdict b{font-weight:600}
+.verdict.safe b{color:var(--gain-ink)}
+.verdict.thin b{color:var(--warn-ink)}
+.verdict.bad{color:var(--loss-ink)}
+.verdict.bad b{color:var(--loss-ink); letter-spacing:.06em}
+
 /* ── book ─────────────────────────────────────────────────────────────── */
 .book table{width:100%; border-collapse:collapse; font-family:var(--mono); font-size:12px}
 .book th{
@@ -419,6 +434,14 @@ footer .reg{color:var(--ink2)}
     <div class="eyebrow">The field · distance to stop
       <span class="aux" id="field-aux"></span></div>
     <div class="fieldwrap" id="field"></div>
+  </section>
+
+  <section class="card stress-card rise" style="animation-delay:.19s">
+    <div class="eyebrow">Stress · survivability
+      <span class="aux" id="stress-aux"></span></div>
+    <div class="stresswrap" id="stressaxis"></div>
+    <div class="verdict" id="stress-verdict"></div>
+    <div class="defgrid" id="stressgrid"></div>
   </section>
 
   <section class="row3">
@@ -703,7 +726,14 @@ function renderHarvest(h){
     <text class="gauge-center" x="${CX}" y="${CY+13}" fill="var(--ink3)" font-size="9.5" letter-spacing="2" font-family="var(--disp)">VS BASE · BOOK T/P</text>
     <text class="gauge-center" x="${CX}" y="${CY+34}" fill="var(--ink2)" font-family="var(--mono)" font-size="11">${span?fmtSigned(eq-base)+" this cycle":""}</text>
   </svg>`;
-  $("hv-nums").innerHTML=`<span>base <b>${fmt$(base)}</b></span><span>equity <b>${fmt$(eq)}</b></span><span>target <b>${fmt$(tgt)}</b></span>`;
+  // The target is trough-RATCHETED (fires at min(baseline,trough)×1.2, 07-24) while
+  // the baseline stays the ledger yardstick. So whenever the cycle has dipped, the
+  // target sits below baseline×1.2 and reads like an error unless the trough that
+  // pulled it down is on screen. Shown only when it is actually doing the work.
+  const tro=h.tp_trough, ratcheted=(tro!=null&&base!=null&&tro<base*0.999);
+  $("hv-nums").innerHTML=`<span>base <b>${fmt$(base)}</b></span><span>equity <b>${fmt$(eq)}</b></span>`
+    +`<span>target <b>${fmt$(tgt)}</b></span>`
+    +(ratcheted?`<span class="dim" title="take-profit fires at min(baseline, trough) × 1.2">↓ off trough <b>${fmt$(tro)}</b></span>`:"");
   const tot=TPC.reduce((a,c)=>a+(c.profit||0),0);
   const bk=$("hv-banked"); bk.textContent=fmtSigned(tot); bk.className="v num "+cls(tot);
   // one line only — the full history lives in the HARVEST LEDGER card, no duplication
@@ -825,6 +855,116 @@ function renderDefense(h){
         <div class="v">${lev!=null?lev.toFixed(2)+"×":"—"}</div>
         <div class="levbar" style="flex:1"><i style="width:${lev!=null?Math.min(100,lev/levC*100).toFixed(0):0}%;background:${lev!=null&&lev>levC*.85?"var(--loss)":lev>levC*.6?"var(--warn)":"var(--ice)"}"></i></div>
         <div class="s">ceiling ${levC.toFixed(1)}×</div></div></div>`;
+}
+
+/* ═══ STRESS — survivability against the moves that actually happened ═══
+   The 2026-07-16 near-margin-call taught that the danger is book-leverage
+   GEOMETRY, not hygiene: stops parked inside the liquidation zone. The Wave 1
+   telemetry that measures exactly that was computed into health.stress and then
+   never drawn — only lev_ceiling was ever read. Everything here is one unit,
+   adverse basket move %, so a single axis answers the only question that
+   matters: is the liquidation line further out than the worst move on record?
+
+   Buffer can be enormous when the book is small (a near-flat book survives any
+   move), so the axis caps at the reference moves and an off-scale liq line is
+   drawn as an arrow with its value — the chart stays readable when there is no
+   danger and precise when there is. */
+function renderStress(h){
+  const st=h.stress||{}, ref=st.ref_move_pct||{};
+  const ref1=+ref["1"]||0, ref5=+ref["5"]||0;
+  const dd=st.intraday_dd_pct, buf=st.buffer_now_pct, bufAfter=st.buffer_under_intraday_pct;
+  const lev=st.lev_now, levC=st.lev_ceiling;
+  const flat=!(h.pos_count>0);
+
+  $("stress-aux").innerHTML=ref1
+    ? `worst 1d ${ref1.toFixed(1)}% · worst 5d ${ref5.toFixed(1)}% on record`
+      +(st.intraday_bars?` · ${st.intraday_bars} intraday bars`:"")
+    : "reference moves populate on the next stress poll";
+
+  const W=1360,H=132,X0=64,X1=W-64,TY=58,TH=16;
+  // Domain always frames both reference moves; the liq line joins the scale only
+  // when it is close enough to matter. Beyond that it becomes an off-scale arrow.
+  const span=Math.max(ref5,ref1,1);
+  const inScale=buf!=null&&buf<=span*1.3;
+  const DOM=(inScale?Math.max(span,buf):span)*1.14;
+  const x=v=>X0+Math.max(0,Math.min(1,v/DOM))*(X1-X0);
+  const tick=(v,col,lab,sub,up)=>v==null?"":`
+    <line x1="${x(v)}" x2="${x(v)}" y1="${up?TY-13:TY+TH}" y2="${up?TY:TY+TH+13}" stroke="${col}" stroke-width="1.5"/>
+    <text x="${x(v)}" y="${up?TY-18:TY+TH+25}" text-anchor="middle" fill="${col}" font-size="9"
+      font-family="var(--disp)" font-weight="600" letter-spacing=".07em">${lab}</text>
+    <text x="${x(v)}" y="${up?TY-28:TY+TH+35}" text-anchor="middle" fill="var(--ink4)" font-size="8.5"
+      font-family="var(--mono)">${sub}</text>`;
+
+  let svg=`<svg viewBox="0 0 ${W} ${H}" aria-label="survivability against adverse basket moves">`;
+  if(!ref1){
+    svg+=`<text x="${W/2}" y="${H/2}" text-anchor="middle" fill="var(--ink4)" font-size="12">stress telemetry populates on the next poll (hourly)</text></svg>`;
+    $("stressaxis").innerHTML=svg; $("stress-verdict").innerHTML=""; $("stressgrid").innerHTML=""; return;
+  }
+  // Survivable stretch green, liquidation territory red. With no position there is
+  // nothing to liquidate, so the whole axis is survivable — say so rather than
+  // drawing a fake danger zone.
+  const liqX=flat?X1:(buf!=null?x(buf):X1);
+  svg+=`<rect x="${X0}" y="${TY}" width="${liqX-X0}" height="${TH}" fill="rgba(47,169,124,.16)"/>`;
+  if(!flat&&buf!=null&&inScale)
+    svg+=`<rect x="${liqX}" y="${TY}" width="${X1-liqX}" height="${TH}" fill="rgba(216,80,107,.20)"/>`;
+  svg+=`<rect x="${X0}" y="${TY}" width="${X1-X0}" height="${TH}" fill="none" stroke="var(--line2)" rx="2"/>`;
+  // axis ticks every 5% while the domain is small, coarser as it grows
+  const step=DOM>120?50:DOM>60?20:DOM>24?5:2;
+  for(let v=0;v<=DOM;v+=step)
+    svg+=`<line x1="${x(v)}" x2="${x(v)}" y1="${TY+TH}" y2="${TY+TH+4}" stroke="var(--line2)"/>
+      <text x="${x(v)}" y="${TY+TH+14}" text-anchor="middle" fill="var(--ink4)" font-size="8"
+        font-family="var(--mono)">${v}</text>`;
+  svg+=tick(ref1,"var(--brass)","WORST DAY",ref1.toFixed(1)+"%",true);
+  if(ref5>ref1*1.06) svg+=tick(ref5,"var(--brass-dim)","WORST 5D",ref5.toFixed(1)+"%",true);
+  if(dd!=null&&dd>0.05) svg+=tick(dd,"var(--ice)","TODAY",dd.toFixed(1)+"%",false);
+  if(!flat&&buf!=null){
+    if(inScale) svg+=`
+      <line x1="${liqX}" x2="${liqX}" y1="${TY-8}" y2="${TY+TH+8}" stroke="var(--loss)" stroke-width="2.5"/>
+      <text x="${liqX}" y="${TY-13}" text-anchor="middle" fill="var(--loss-ink)" font-size="9.5"
+        font-family="var(--disp)" font-weight="700" letter-spacing=".1em">LIQ ${buf.toFixed(1)}%</text>`;
+    else svg+=`
+      <path d="M ${X1-16} ${TY+TH/2} l -13 -7 l 0 14 z" fill="var(--gain)"/>
+      <text x="${X1-24}" y="${TY-6}" text-anchor="end" fill="var(--gain-ink)" font-size="9.5"
+        font-family="var(--disp)" font-weight="600" letter-spacing=".08em">LIQ ${fmtPct(buf)} — off scale</text>`;
+  }
+  svg+=`<text x="${X0}" y="${H-6}" fill="var(--ink4)" font-size="8.5" font-family="var(--disp)"
+    letter-spacing=".14em">ADVERSE BASKET MOVE →</text></svg>`;
+  $("stressaxis").innerHTML=svg;
+
+  // The verdict, stated as the decision it is.
+  const v=$("stress-verdict");
+  if(flat){ v.className="verdict safe"; v.innerHTML="book is <b>flat</b> — no leveraged exposure to liquidate."; }
+  else if(buf==null){ v.className="verdict"; v.innerHTML="liquidation buffer unavailable — equity/margin not yet read this cycle."; }
+  else if(buf>ref5&&ref5){ v.className="verdict safe";
+    // margin between two percentages is percentage POINTS — on a risk figure the
+    // distinction is not pedantry
+    v.innerHTML=`survives the <b>worst 5-day move on record</b> (${ref5.toFixed(1)}%) with ${fmtPct(buf-ref5).replace("%","pp")} to spare.`; }
+  else if(buf>ref1){ v.className="verdict thin";
+    v.innerHTML=`survives the <b>worst single day on record</b> (${ref1.toFixed(1)}%) — but a repeat of the worst 5-day stretch (${ref5.toFixed(1)}%) would liquidate.`; }
+  else { v.className="verdict bad";
+    v.innerHTML=`<b>THE WORST DAY ON RECORD WOULD LIQUIDATE THIS BOOK</b> — buffer ${buf.toFixed(1)}% against a ${ref1.toFixed(1)}% move.`; }
+
+  const cell=(k,val,s,c)=>`<div class="defcell"><div class="k">${k}</div>
+    <div class="v ${c||""}">${val}</div><div class="s">${s}</div></div>`;
+  $("stressgrid").innerHTML=
+    cell("liq buffer","<span>"+(flat?"—":fmtPct(buf))+"</span>","adverse basket move to liq",
+         flat?"":buf==null?"":buf>ref5?"gain":buf>ref1?"warn":"loss")
+   +cell("after today's dip",flat?"—":fmtPct(bufAfter),"if the 24h low extended",
+         flat||bufAfter==null?"":bufAfter>ref1?"gain":bufAfter>ref1*.6?"warn":"loss")
+   +`<div class="defcell"><div class="k">leverage vs ceiling</div>
+      <div style="display:flex;align-items:baseline;gap:10px">
+        <div class="v">${lev!=null?lev.toFixed(2)+"×":"—"}</div>
+        <div class="levbar" style="flex:1"><i style="width:${lev!=null&&levC?Math.min(100,lev/levC*100).toFixed(0):0}%;background:${
+          lev!=null&&levC&&lev>levC*.85?"var(--loss)":lev!=null&&levC&&lev>levC*.6?"var(--warn)":"var(--ice)"}"></i></div>
+      </div>
+      <div class="s">${levC?levC.toFixed(2)+"× survives the worst day":"ceiling unavailable"}</div></div>`;
+}
+
+/* Buffers run from single digits to four when the book is nearly flat; a fixed
+   decimal makes the safe case unreadable and the dangerous case imprecise. */
+function fmtPct(p){
+  if(p==null) return "—";
+  return p>=1000?Math.round(p)+"%":p>=100?p.toFixed(0)+"%":p.toFixed(1)+"%";
 }
 
 /* ═══ THE FIELD — stop-proximity orbits (signature) ═══
@@ -1311,7 +1451,7 @@ async function fetchState(){
     // and named on screen so the failure is visible instead of silent.
     [["mast",()=>renderMast(h)],["capital",()=>renderCapital(h)],
      ["harvest",()=>renderHarvest(h)],["defense",()=>renderDefense(h)],
-     ["field",renderField],["book",renderBook],["ledger",renderLedger],
+     ["field",renderField],["stress",()=>renderStress(h)],["book",renderBook],["ledger",renderLedger],
      ["journal",renderJournal],["footer",()=>renderFooter(S.regime||{},h,S.v)],
      ["detail",()=>{ if(detailSym&&PMAP[detailSym]&&DETAIL) renderDetail(); }]
     ].forEach(([name,fn])=>{
