@@ -422,6 +422,95 @@ def test_lifecycle_stop_and_harvest_never_rest_together(sim, monkeypatch):
         assert len(live) <= 1, f"stop AND harvest both resting at {px}: {live}"
 
 
+def test_multi_rung_close_is_fifo_and_partial(sim, monkeypatch):
+    """The ladder stacks SEVERAL rungs on one pair, so a close consumes lots oldest
+    -first and may retire only part of the pair's exposure. Every earlier test held a
+    single lot, where FIFO is unobservable."""
+    _armed_exec(sim, monkeypatch)
+    _now_bar(sim, 100.0)
+    # three lots at descending entries, oldest first
+    for px in (100.0, 95.0, 90.0):
+        _now_bar(sim, px + 1)
+        _add(px)
+        _now_bar(sim, px)
+        broker.open_positions()                    # settle the touch
+    pos = broker.open_positions()
+    assert len(pos) == 3
+    entries = sorted(float(p["cost"]) / float(p["vol"]) for p in pos.values())
+    assert entries == pytest.approx([90.0, 95.0, 100.0])
+
+    cash0 = float(paper_broker._state_get("cash"))
+    # sell exactly ONE lot's worth well above every entry
+    _now_bar(sim, 110.0)
+    _add(110.0, otype="sell", vol=0.001, oflags=None)
+    broker.open_positions()
+
+    left = broker.open_positions()
+    assert len(left) == 2, "only one lot should have been retired"
+    remaining = sorted(float(p["cost"]) / float(p["vol"]) for p in left.values())
+    assert remaining == pytest.approx([90.0, 95.0]), "FIFO must retire the OLDEST lot"
+    # realized on the oldest lot: entry 100 -> 110
+    assert float(paper_broker._state_get("cash")) - cash0 == pytest.approx(
+        0.001 * 10.0 - 0.001 * 110.0 * config.PAPER_FEE_MAKER_PCT, rel=1e-6)
+
+
+def test_partial_close_splits_one_lot(sim, monkeypatch):
+    """A sell smaller than the lot must retire PART of it (vol_closed advances) and
+    leave the remainder open and still countable as backing."""
+    _armed_exec(sim, monkeypatch)
+    _now_bar(sim, 101.0)
+    _add(100.0, vol=0.004)
+    _now_bar(sim, 100.0)
+    broker.open_positions()
+
+    _now_bar(sim, 110.0)
+    _add(110.0, otype="sell", vol=0.001, oflags=None)
+    pos = broker.open_positions()
+    assert len(pos) == 1
+    p = next(iter(pos.values()))
+    assert float(p["vol"]) == pytest.approx(0.004)
+    assert float(p["vol_closed"]) == pytest.approx(0.001)
+    # the executor's backing check reads vol - vol_closed
+    assert paper_broker._long_open_vol(MPAIR) == pytest.approx(0.003)
+
+
+def test_lifecycle_book_flatten_at_tp_target(sim, monkeypatch):
+    """The book-level +20% T/P backstop, end to end. Paper would need days of gains
+    to reach this naturally, so it had never run against the simulator: the flatten
+    cancels resting orders, rests limit closes sized to LIVE exchange volume, and
+    books a cycle once the book is confirmed flat."""
+    monkeypatch.setattr(config, "TP_ENABLED", True)
+    monkeypatch.setattr(config, "TP_PCT", 0.20)
+    monkeypatch.setattr(config, "TP_RUNG_ENABLED", False)
+    monkeypatch.setattr(config, "LADDER_CONTINUOUS", False)
+    e = _armed_exec(sim, monkeypatch)
+    oid, entry = _fill_one(sim, e)
+
+    # arm the baseline low enough that current equity already clears the target
+    store.meta_set(sim, "tp_baseline", 800.0)
+    store.meta_set(sim, "tp_trough", 800.0)
+    store.meta_set(sim, "tp_cycle_flows", 0.0)
+
+    _now_bar(sim, entry)
+    e.poll_fills()                                   # should START the flatten
+    assert str(store.meta_get(sim, "tp_flatten_active", "") or "") == "1", \
+        "equity over target must arm the flatten"
+    close_txid = sim.execute("SELECT close_txid FROM orders WHERE id=?", (oid,)).fetchone()[0]
+    assert close_txid, "flatten must rest a close order for the open lot"
+    # the protective stop and the flatten's close must never rest together
+    stx = sim.execute("SELECT stop_txid FROM orders WHERE id=?", (oid,)).fetchone()[0]
+    assert not stx or (broker.query_orders([stx]).get(stx) or {}).get("status") != "open"
+
+    # let the close fill, then converge
+    _now_bar(sim, entry * 1.02)
+    for _ in range(3):
+        e.poll_fills()
+    assert broker.open_positions() == {}, "book must end flat"
+    assert sim.execute("SELECT status FROM orders WHERE id=?", (oid,)).fetchone()[0] != "open"
+    assert str(store.meta_get(sim, "tp_flatten_active", "") or "") != "1", \
+        "flatten must clear its own flag once the book is confirmed flat"
+
+
 # ── a simulated book must not page the operator ──────────────────────────────
 
 def test_paper_safety_alerts_are_forced_quiet(monkeypatch):

@@ -30,6 +30,17 @@ excess is dropped (loudly) rather than opening a short. A resting orphan stop
 whose position already closed therefore cannot invent a short position — it just
 goes nowhere until the executor's reconcile cancels it, which is the behavior the
 orphan-stop guard exists to produce.
+
+FULL FILLS ARE DELIBERATE — do not "fix" this into partial fills. poll_fills has
+careful partial-fill handling ("partial N while resting — canceling remainder")
+which never runs in paper, and that absence looks like a fidelity gap. It is not.
+Every DEEPFIELD entry floors up to the EXCHANGE MINIMUM before SIZE_MULT, so a
+rung is a ~$4-9 order against a book with orders of magnitude more depth at any
+touched level. Such an order does not partially fill in practice; modeling one
+that does would make the simulator LESS faithful to this strategy, not more, and
+would understate accumulation for a reason that has nothing to do with the market.
+A partial CLOSE is a different thing and is supported — a sell smaller than a lot
+advances vol_closed and leaves the remainder open (see _close_longs).
 """
 import datetime
 import json
