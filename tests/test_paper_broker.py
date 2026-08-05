@@ -768,3 +768,16 @@ def test_rollover_is_charged_on_open_notional(sim, monkeypatch):
     assert after < before
     fees = broker.rollover_fees_since(0)
     assert fees is not None and fees[0] > 0
+
+
+def test_alerts_are_quiet_whenever_a_simulated_exchange_is_attached(sim, monkeypatch):
+    """EXEC_MODE alone was not enough. A harness that attaches the simulator and
+    drives an Executor with mode='paper' leaves EXEC_MODE at 'off' — and exactly
+    that fired three critical popups and sirens at the operator on 2026-08-05.
+    A fake counterparty means no alert from it is real, whatever the mode says."""
+    from deepfield import alerter
+    monkeypatch.setattr(alerter, "_safety_last", {})
+    monkeypatch.setattr(config, "EXEC_MODE", "off")     # the harness case
+    assert paper_broker.attached()
+    r = alerter.fire_safety("stop-fired", "*", "protective stops EXECUTED")
+    assert r["quiet"] is True and r["sound"] is None and r["notify"] is False

@@ -165,6 +165,17 @@ def test_alert(conn):
 _safety_last = {}    # (kind, symbol) -> time.monotonic() of last fired
 
 
+def _sim_exchange_attached():
+    """True when paper_broker has bound a simulated exchange. Import is lazy and
+    guarded so the alerter keeps working if that module is absent or broken —
+    an alerter must never be the thing that breaks."""
+    try:
+        from . import paper_broker
+        return paper_broker.attached()
+    except Exception:
+        return False
+
+
 def fire_safety(kind, symbol, message, loud=None):
     """Money-path safety event -> sound + notify-send (+ telegram iff configured).
     kind: unprotected | recon-mismatch | margin-level | tp | stop-fired | ...
@@ -191,7 +202,13 @@ def fire_safety(kind, symbol, message, loud=None):
         # operator to distrust the channel; a full pytest run did exactly that on
         # 2026-07-31, burying the desktop in critical recon-mismatch popups. Forced
         # quiet rather than dropped, so paper still proves the routing works.
-        if getattr(config, "EXEC_MODE", "") == "paper":
+        # Keying on EXEC_MODE alone was not enough. A scenario harness that binds the
+        # simulated exchange and drives an Executor with mode='paper' leaves
+        # EXEC_MODE at 'off' — and on 2026-08-05 exactly that fired three critical
+        # popups and sirens at the operator from a crash simulation. A SIMULATED
+        # EXCHANGE BEING ATTACHED is the unambiguous signal: if the counterparty is
+        # fake, no alert from it is real, whatever the mode string says.
+        if getattr(config, "EXEC_MODE", "") == "paper" or _sim_exchange_attached():
             loud = False
         throttle = float((getattr(config, "SAFETY_ALERT_THROTTLE_SECS", 1800) if loud
                           else getattr(config, "SAFETY_ALERT_QUIET_THROTTLE_SECS", 21600)) or 0)
