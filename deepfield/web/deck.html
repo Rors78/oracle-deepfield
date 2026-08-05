@@ -103,6 +103,14 @@ button{font:inherit; color:inherit; background:none; border:none; cursor:pointer
 .errbar{display:none; padding:7px 26px; font-size:12px; color:var(--loss-ink);
   background:rgba(216,80,107,.08); border-bottom:1px solid rgba(216,80,107,.4)}
 .errbar.on{display:block}
+/* A frozen instrument must LOOK frozen. With the feed severed, every number stayed
+   on screen at full confidence — the clocks kept ticking and the Capital eyebrow
+   still read "live" — so a glance from across the room saw a healthy deck. The
+   last-known values are worth KEEPING (they were true a moment ago, and an outage
+   is exactly when you want them), so this drains colour rather than hiding data:
+   unmistakably not-live, still perfectly readable. */
+body.feeddown main{opacity:.72; filter:saturate(.42); transition:opacity .45s ease, filter .45s ease}
+body.feeddown .clockset{opacity:.45}
 /* a display fault is not a dead feed — amber, not alarm red */
 #renderbar{color:var(--warn-ink); background:rgba(186,139,50,.10); border-bottom-color:rgba(186,139,50,.4)}
 
@@ -1466,6 +1474,31 @@ setInterval(()=>{
 },1000);
 
 /* ═══ main loop ═══ */
+/* ── feed liveness ───────────────────────────────────────────────────────────
+   The banner alone said "unreachable" without saying for HOW LONG, and a 4s blip
+   and a 20-minute outage are not the same event. Track both, and after a grace
+   window stop the deck asserting that its numbers are current. */
+let lastGoodMs=0, feedDownSince=0;
+const FEED_GRACE_MS=10000;          // one dropped 4s poll is a blip, not an outage
+const hhmmss=ms=>new Date(ms).toLocaleTimeString("en-US",{hour12:false,timeZone:"America/Denver"});
+function markFeedOk(){
+  lastGoodMs=Date.now(); feedDownSince=0;
+  $("errbar").classList.remove("on");
+  document.body.classList.remove("feeddown");
+}
+function markFeedDown(msg){
+  if(!feedDownSince) feedDownSince=Date.now();
+  const downS=Math.round((Date.now()-feedDownSince)/1000);
+  const seen=lastGoodMs?hhmmss(lastGoodMs):null;
+  $("errbar").textContent=`${msg} · down ${downS}s${seen?` · showing last good ${seen}`:""}`;
+  $("errbar").classList.add("on");
+  if(Date.now()-feedDownSince>=FEED_GRACE_MS){
+    document.body.classList.add("feeddown");
+    // renderCapital owns this line on every success, so it self-heals on recovery.
+    const ca=$("cap-aux"); if(ca) ca.textContent=`STALE · last good ${seen||"—"}`;
+  }
+}
+
 async function fetchState(){
   const failed=[];
   try{
@@ -1475,7 +1508,7 @@ async function fetchState(){
     if(!r.ok){ let d=""; try{ d=(await r.json()).error||""; }catch(_){}
                const e=new Error("server"); e.srv=`HTTP ${r.status}${d?` · ${d}`:""}`; throw e; }
     S=await r.json();
-    $("errbar").classList.remove("on");
+    markFeedOk();
     const oldPx={}; PAIRS.forEach(p=>oldPx[p.sym]=p.price); prevPx=oldPx;
     PAIRS=S.pairs||[]; PMAP=Object.fromEntries(PAIRS.map(p=>[p.sym,p]));
     TPC=S.tp_cycles||[]; JOURNAL=S.journal||[];
@@ -1503,10 +1536,9 @@ async function fetchState(){
   }catch(err){
     // "unreachable" is a diagnosis, and a wrong one reads as "the bot died".
     // Name the real failure: transport down vs. a live bot whose deck is throwing.
-    $("errbar").textContent = err && err.srv
+    markFeedDown(err && err.srv
       ? `● console fault — ${err.srv} · the BOT IS UP and answering; /api/state is throwing`
-      : "● live API unreachable — retrying";
-    $("errbar").classList.add("on");
+      : "● live API unreachable — retrying");
   }
 }
 fetchState(); setInterval(fetchState,4000);
