@@ -1234,7 +1234,8 @@ function renderBook(){
       <td class="${cls(p.chg||0)}">${p.chg==null?"—":(p.chg>=0?"+":"")+p.chg.toFixed(1)+"%"}</td>
       <td class="sparkcell">${sparkSVG(p.spark,p.chg)}</td>
       <td class="dim" colspan="2">${p.bid?`bid resting @ ${fmtPx(p.bid)}`:"no bid"}</td>
-      <td class="dim">score ${p.score}/${p.denom}</td>
+      <td class="dim"${naNote(p)?` title="${esc(naNote(p))}"`:""}>${
+        p.denom ? `score ${p.score}/${p.denom}` : `<span class="warn">unscoreable</span>`}</td>
       <td class="dim" colspan="3">${p.pctLow!=null?p.pctLow+"% above 52w low":""}</td></tr>`).join(""):"";
   $("booktable").innerHTML=head+`<tbody>${rows}${scoutRows}</tbody>`;
   document.querySelectorAll("#booktable th").forEach(th=>th.addEventListener("click",()=>{
@@ -1432,7 +1433,9 @@ function renderDetail(){
         <tr><td class="l dim">stop distance</td><td class="${dPct!=null&&dPct<3?"loss":""}">${dPct==null?"—":dPct.toFixed(1)+"%"}</td></tr>
         <tr><td class="l dim">leverage</td><td>${p.lev}×</td></tr>
         <tr><td class="l dim">protection</td><td>${p.stops}/${p.fills} lots stopped</td></tr>
-        <tr><td class="l dim">signal</td><td>${p.score}/${p.denom} <span class="dim">need ${p.req}</span></td></tr>
+        <tr><td class="l dim">signal</td><td>${p.denom?`${p.score}/${p.denom} <span class="dim">need ${p.req}</span>`
+          :`<span class="warn">unscoreable</span>`}</td></tr>
+        ${naNote(p)?`<tr><td class="l dim">why n/a</td><td class="dim" style="font-size:10.5px">${esc(naNote(p))}</td></tr>`:""}
         </tbody></table></div>
     </div>`;
   $("sheetclose").addEventListener("click",closeDetail);
@@ -1481,6 +1484,18 @@ setInterval(()=>{
    currently holds a selection; it resumes the instant the selection clears. Worst
    case that one panel is a single poll stale while you are deliberately reading it,
    which is the moment you least need it to move under your cursor. */
+/* naReason says WHY a signal component could not be scored (the v4.4 30-weekly-bar
+   gate, the 200-bar EMA warmup). It has been served in /api/state all along and
+   never rendered, so a young pair showed "score 0/0" — which reads as a DEAD signal
+   rather than an unscoreable one. That exact confusion has cost time before. */
+function naNote(p){
+  try{
+    const r=p&&p.naReason;
+    if(!r) return "";
+    return [...new Set(Object.values(r))].join(" · ");
+  }catch(_){ return ""; }
+}
+
 function holdsSelection(el){
   try{
     const s=getSelection();
