@@ -538,6 +538,18 @@ def test_lifecycle_book_flatten_at_tp_target(sim, monkeypatch):
         "flatten must clear its own flag once the book is confirmed flat"
 
 
+# ── paper starting equity ────────────────────────────────────────────────────
+
+def test_paper_equity_env_fails_safe():
+    """A typo in this env var must not stop the bot from starting. A bare float()
+    raises at IMPORT, taking the process down before logging exists to say why —
+    the same fail-safe stance as _normalize_exec_mode."""
+    assert config._paper_equity("180") == 180.0
+    assert config._paper_equity(250) == 250.0
+    for bad in ("junk", "", None, "-5", "0", "1e", []):
+        assert config._paper_equity(bad) == 1000.0, f"{bad!r} should fall back"
+
+
 # ── the integrity audit must actually detect ─────────────────────────────────
 
 def _audit_map(db):

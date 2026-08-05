@@ -189,8 +189,32 @@ WEB_PORT = int(os.environ.get("DEEPFIELD_WEB_PORT", "8787"))
 # 2% of equity off the stop (kept for later; revisit stop-vs-liquidation first).
 EXEC_SIZE_MODE = os.environ.get("DEEPFIELD_EXEC_SIZE", "min")   # min | risk
 RISK_PCT = 0.02
-PAPER_PORTFOLIO_USD = 1000.0        # equity used for sizing math in paper/off; also the
-                                    # simulated exchange's STARTING CASH (paper_broker)
+# Equity used for sizing math in paper/off, and the simulated exchange's STARTING
+# CASH (paper_broker). Env-overridable because it silently sets how long a paper run
+# takes to become REPRESENTATIVE: position sizes floor to the exchange minimum and
+# the respend governor accrues new notional at an absolute $5/hr, so neither scales
+# with equity — only the RISK ratios do. At $1000 a paper book needs ~$4.4k of
+# notional (~37 days) to reach the live book's ~226% margin level, and until then
+# the rails, reverse gear and stress panel cannot fire at all. Starting near the
+# live book's equity (~$180) reaches that regime in ~7 days instead. Takes effect
+# on a FRESH simulated book only — cash is seeded once, so an existing paper DB
+# keeps the balance it started with.
+def _paper_equity(raw, default=1000.0):
+    """Fail SAFE, like _normalize_exec_mode above: a typo in an env var must never
+    stop the bot from starting. A bare float() here raises at import time, which
+    would take the whole process down before logging exists to say why."""
+    try:
+        v = float(raw)
+    except (TypeError, ValueError):
+        _log.error("DEEPFIELD_PAPER_EQUITY=%r is not a number — using $%.0f", raw, default)
+        return default
+    if v <= 0:
+        _log.error("DEEPFIELD_PAPER_EQUITY=%r must be positive — using $%.0f", raw, default)
+        return default
+    return v
+
+
+PAPER_PORTFOLIO_USD = _paper_equity(os.environ.get("DEEPFIELD_PAPER_EQUITY", 1000.0))
 
 # ── simulated exchange (paper mode; see deepfield/paper_broker.py) ───────────
 # Costs the paper book must carry, or paper reads rosier than live and every
