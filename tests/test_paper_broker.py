@@ -781,3 +781,30 @@ def test_alerts_are_quiet_whenever_a_simulated_exchange_is_attached(sim, monkeyp
     assert paper_broker.attached()
     r = alerter.fire_safety("stop-fired", "*", "protective stops EXECUTED")
     assert r["quiet"] is True and r["sound"] is None and r["notify"] is False
+
+
+def test_market_order_fills_at_the_market_not_at_zero(sim):
+    """A market order carries no price. Treating it as a limit stored price=0, and
+    for a sell `last >= 0` is always true — so it filled at ZERO and destroyed the
+    lot's entire notional instead of realizing its P&L. The reverse gear is the only
+    caller that sends market orders, which is why this survived until the gear was
+    first simulated. Verified to FAIL before the fix."""
+    _now_bar(sim, 100.0)
+    _add(90.0)
+    _now_bar(sim, 90.0)
+    broker.open_positions()                       # a lot at 90
+    cash0 = float(paper_broker._state_get("cash"))
+
+    _now_bar(sim, 95.0)
+    r = broker.private("/0/private/AddOrder",
+                       {"pair": MPAIR, "type": "sell", "ordertype": "market",
+                        "volume": "0.001", "leverage": "10"}, idempotent=False)
+    assert r and r.get("txid")
+    broker.open_positions()                       # settle
+    q = broker.query_orders([r["txid"][0]])[r["txid"][0]]
+    assert q["status"] == "closed"
+    fill = float(q["price"])
+    assert 94.0 < fill <= 95.0, f"market sell filled at {fill}, expected ~95"
+    # closing 90 -> ~95 must GAIN, not wipe the notional
+    assert float(paper_broker._state_get("cash")) > cash0
+    assert broker.open_positions() == {}

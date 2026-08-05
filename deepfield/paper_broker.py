@@ -320,7 +320,20 @@ def _settle_one(row, cache):
     price = float(price or 0)
     # No look-ahead: a bar's extremes count only if the bar OPENED after we rested.
     usable_range = bar_ts >= float(opentm or 0)
-    is_stop = "stop" in str(ordertype).lower()
+    otype_l = str(ordertype).lower()
+    is_stop = "stop" in otype_l
+
+    # A MARKET order crosses the spread immediately at whatever is there — it has no
+    # price of its own. Treating it as a limit was catastrophic: with no price field
+    # it stored 0, and for a sell `last >= 0` is always true, so it filled at ZERO
+    # and destroyed the lot's whole notional instead of realizing its P&L. Nothing
+    # exercised this until the reverse gear (the only caller that sends market) was
+    # first simulated on 2026-08-05.
+    if otype_l == "market":
+        fill = last * ((1.0 - config.PAPER_SLIPPAGE_PCT) if otype == "sell"
+                       else (1.0 + config.PAPER_SLIPPAGE_PCT))
+        _fill(txid, fill, float(volume), taker=True, cache=cache, reason="market order")
+        return
 
     if is_stop:                                   # protective stop-loss (sell, market)
         triggered = last <= price or (usable_range and lo <= price)
@@ -662,6 +675,9 @@ def _add_order(p, meta, cache):
         if meta is not None:
             meta["error"] = "EOrder:Invalid volume"
         return None
+    # A market order legitimately carries no price; it must not be judged against one.
+    if ordertype == "market":
+        price = 0.0
 
     last = _last_price(symbol, cache)
     oflags = str(p.get("oflags", "") or "")

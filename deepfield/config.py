@@ -531,7 +531,33 @@ STRESS_LEVERAGE_ALERT_RATIO = 1.0
 # TRIGGER. Default ON so it survives a desktop relaunch; set DEEPFIELD_REVERSE_GEAR=0
 # (env) to disable without a code edit. Dormant unless the buffer is actually < TRIGGER.
 REVERSE_GEAR_ENABLED = os.environ.get("DEEPFIELD_REVERSE_GEAR", "1") != "0"
-REVERSE_GEAR_TRIGGER_PCT = 8.0      # fire when liq buffer < this (lower CAUTION band, above CRITICAL 6)
+# 2026-08-05: trigger 8 -> 16, aligning the actuator with the stack floor.
+#
+# The 8% trigger framed deleveraging as an EMERGENCY question — act only when
+# liquidation is near. Two real events say the damage lands well before that:
+#   * 2026-07-16 near-margin-call: buffer bottomed 9.6%. Gear missed by 1.6pp; the
+#     operator deleveraged BY HAND.
+#   * 2026-07-28/29: 45 of 65 lifetime stop-outs in 48h (69% of all stop losses).
+#     Replaying the measured per-pair move against a live-leverage book in the paper
+#     simulator: equity -22.7%, 8 lots stopped, buffer bottomed 15.6% — the gear
+#     missed by 7.6pp and never fired.
+# An actuator that sat out both events it was built for is not calibrated
+# conservatively; it is aimed at the wrong failure. Liquidation was never what cost
+# the money — stops firing was.
+#
+# 16 is not a fresh guess, it is the boundary the system ALREADY draws:
+# MARGIN_LEVEL_STACK_FLOOR_PCT=200 pauses seeds and rungs at ML 200%, which on an
+# all-10:1 book is exactly a 16% buffer. Below it the bot already judges the book
+# too levered to ADD to — so it was incoherent to keep judging it not levered enough
+# to SHED until 8%. One boundary now: above 16% grow, below 16% stop growing and
+# start shedding. That also removes the churn risk of a trigger set ABOVE the floor,
+# where the gear would sell into a book the seeder is still allowed to refill.
+#
+# A more PREVENTIVE trigger (~20%, ML ~240%) would have caught 07-28/29 with margin
+# to spare rather than by 0.4pp, at the cost of shedding while growth is still
+# permitted. That is a posture call, not a correctness one — the coherent boundary
+# is 16.
+REVERSE_GEAR_TRIGGER_PCT = 16.0     # fire when liq buffer < this (== the ml-200 stack floor)
 # 2026-07-19: target 12 -> 16 (operator), to land on the ml-200 stack floor rather
 # than the retired ml-160 one. Previously the gear trimmed to 12% and the floor then
 # refused to grow below 16%, so a fired gear left the book parked in a dead band it
@@ -546,7 +572,13 @@ REVERSE_GEAR_TRIGGER_PCT = 8.0      # fire when liq buffer < this (lower CAUTION
 # correct is a coherence one, and only the latter changed. MAX_LOTS_PER_PASS still
 # caps each pass, so a deeper target simply takes more passes rather than one big
 # flatten.
-REVERSE_GEAR_TARGET_PCT = 16.0      # trim until liq buffer >= this (== the ml-200 floor)
+# 2026-08-05: target 16 -> 24, forced by the trigger move. The target must clear the
+# trigger with headroom or the gear lands exactly on its own firing line and re-arms
+# on the next tick — trimming in a loop at the boundary. 24% is ML ~280%, comfortably
+# back inside growth territory (floor 200%), so a fired gear leaves the book able to
+# accumulate again rather than parked in a dead band — the same reasoning that moved
+# this from 12 to 16 on 2026-07-19, applied to the new boundary.
+REVERSE_GEAR_TARGET_PCT = 24.0      # trim until liq buffer >= this (ML ~280%)
 REVERSE_GEAR_MAX_LOTS_PER_PASS = 4  # cap lots closed per poll pass; re-evaluates next cycle (bad read can't flatten)
 REVERSE_GEAR_CANCEL_BIDS = True     # cancel resting entry bids on fire so they can't re-lever mid-trim
 
