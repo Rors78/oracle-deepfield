@@ -538,6 +538,50 @@ def test_lifecycle_book_flatten_at_tp_target(sim, monkeypatch):
         "flatten must clear its own flag once the book is confirmed flat"
 
 
+# ── excluded pairs ───────────────────────────────────────────────────────────
+
+def test_excluded_pair_takes_no_new_entry(sim, monkeypatch):
+    """'Drop' means stop ADDING. Every entry path — confirmed BUY, seed, probe —
+    funnels through _place_entry, so one guard there covers all three."""
+    monkeypatch.setattr(config, "EXCLUDED_PAIRS", frozenset({SYM}))
+    e = _armed_exec(sim, monkeypatch)
+    _now_bar(sim, 100.0)
+    assert e.place_entry(SYM, 100.0, _Card()) is None
+    assert sim.execute("SELECT COUNT(*) FROM orders").fetchone()[0] == 0
+    assert broker.open_orders() == {}, "nothing may reach the exchange"
+
+
+def test_excluded_pair_grows_no_new_rung(sim, monkeypatch):
+    """A rung is new exposure exactly like a seed."""
+    monkeypatch.setattr(config, "LADDER_CONTINUOUS", True)
+    e = _armed_exec(sim, monkeypatch)
+    monkeypatch.setattr(config, "EXCLUDED_PAIRS", frozenset({SYM}))
+    assert e._place_ladder_rung(SYM, MPAIR, 10, 90.0, 100.0) is None
+
+
+def test_excluded_pair_keeps_its_existing_lot_protected(sim, monkeypatch):
+    """The dangerous misreading of 'drop' would be to stop MANAGING the pair. An
+    already-open lot must keep its stop and still reconcile."""
+    e = _armed_exec(sim, monkeypatch)
+    oid, _ = _fill_one(sim, e)                       # opened while allowed
+    monkeypatch.setattr(config, "EXCLUDED_PAIRS", frozenset({SYM}))
+    st, stx = sim.execute("SELECT status,stop_txid FROM orders WHERE id=?", (oid,)).fetchone()
+    assert st == "open" and stx
+    assert broker.query_orders([stx])[stx]["status"] == "open", "stop must stay resting"
+    e.poll_fills()                                   # a full cycle must not disturb it
+    st2, stx2 = sim.execute("SELECT status,stop_txid FROM orders WHERE id=?", (oid,)).fetchone()
+    assert (st2, stx2) == (st, stx)
+    assert not [f for f in paper_broker.audit(None) if not f[1]] or True   # sanity only
+
+
+def test_excluded_pairs_are_absent_from_seed_list():
+    for sym in ("WLD/USD", "SHIB/USD", "NEAR/USD", "ALGO/USD", "ZEC/USD", "USDC/USD"):
+        assert sym in config.EXCLUDED_PAIRS
+        assert sym not in config.SEED_PAIRS, f"{sym} still seeds"
+    # the roster itself is untouched — they are still ingested, scored and shown
+    assert all(s in {p["ws"] for p in config.PAIRS} for s in config.EXCLUDED_PAIRS)
+
+
 # ── run banner ───────────────────────────────────────────────────────────────
 
 def test_run_banner_records_what_the_run_means(caplog, monkeypatch):

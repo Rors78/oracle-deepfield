@@ -597,6 +597,12 @@ class Executor:
         if symbol not in config.MARGIN_PAIR:
             log.error("no :BTNL margin pair for %s — cannot execute", symbol)
             return None
+        # Excluded pairs take NO new exposure — this is the one choke point every
+        # entry reaches (confirmed BUY, seed, and the exec probe). Existing lots are
+        # untouched: they keep their stops, their harvest and their reconcile.
+        if symbol in getattr(config, "EXCLUDED_PAIRS", ()):
+            log.info("EXEC %s: excluded pair — no new entries (see config.EXCLUDED_PAIRS)", symbol)
+            return None
         ok_acc, why = self._accumulation_allowed()
         if not ok_acc:
             log.info("EXEC %s: accumulation paused (regime gate) — %s", symbol, why)
@@ -2094,6 +2100,10 @@ class Executor:
         entry path is unguarded anyway (operator no-blockers stance). Fully isolated —
         never raises into poll_fills, so the fill/stop just secured is never unwound.
         NULL score -> flat 1.0x min."""
+        # An excluded pair keeps its existing chain protected but must not GROW it —
+        # rungs are new exposure exactly like a seed (see config.EXCLUDED_PAIRS).
+        if symbol in getattr(config, "EXCLUDED_PAIRS", ()):
+            return None
         try:
             if not config.LADDER_CONTINUOUS or not self._armed():
                 return

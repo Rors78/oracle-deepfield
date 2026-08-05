@@ -301,7 +301,28 @@ except ValueError:
 # Pulled from seeding 2026-07-30 — this reverses one line of the 07-19
 # full-universe dispatch; restore by deleting the exclusion. Stays in PAIRS:
 # display and signals untouched.
-SEED_PAIRS = tuple(p["ws"] for p in PAIRS if p["ws"] != "USDC/USD")
+# ── excluded pairs (no NEW exposure) ─────────────────────────────────────────
+# These are still ingested, scored and shown on the deck — only new ENTRIES are
+# refused. Existing positions keep their stops, their harvest and their reconcile:
+# "drop" means stop adding, never stop protecting.
+#
+# 2026-08-05, operator "drop the 5 worst pairs". The live ledger showed stop exits
+# (n=65, -$19.83) dominating both rollover carry (-$10.58) and rung harvest
+# (n=20, +$2.96) — 1.9x and 6.7x respectively — and FIVE pairs carried 62% of all
+# stop losses. Per-pair stop P&L / count at the time:
+#     WLD  -3.60 (10)   SHIB -2.66 (10)   NEAR -2.13 (3)
+#     ALGO -2.11 (10)   ZEC  -1.87 (4)
+# This narrows the full-universe dispatch of 2026-07-19 rather than reversing it;
+# the roster is unchanged, the exclusion is a separate, reversible list.
+#
+# USDC is here for a different reason: it is dollar-pegged, so it never dips far
+# enough to seed a ladder and a scout row for it is a permanent dead line.
+EXCLUDED_PAIRS = frozenset({
+    "USDC/USD",                                   # pegged — cannot seed a ladder
+    "WLD/USD", "SHIB/USD", "NEAR/USD", "ALGO/USD", "ZEC/USD",   # stop-churn, 08-05
+})
+
+SEED_PAIRS = tuple(p["ws"] for p in PAIRS if p["ws"] not in EXCLUDED_PAIRS)
 
 # Equity take-profit (operator 2026-07-13 "t/p out at +20%, then go again"): when
 # live equity >= tp_baseline * (1 + TP_PCT), flatten the WHOLE book — cancel every

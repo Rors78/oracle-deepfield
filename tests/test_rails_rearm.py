@@ -155,6 +155,15 @@ def test_leff_gate_fails_open_on_stale_missing_or_inf(tmp_path):
 # ── 5. USDC out of the seed roster ───────────────────────────────────────────
 
 def test_usdc_not_seeded_but_still_a_pair():
+    """USDC is pegged, so it can never dip enough to seed a ladder — but it stays in
+    the roster for display and signals.
+
+    The count was `len(PAIRS) - 1` when USDC was the ONLY pull. Exclusions are now a
+    named list (config.EXCLUDED_PAIRS — five stop-churn pairs joined it 2026-08-05),
+    so the invariant is stated against that list rather than a hardcoded one. The
+    property being pinned is unchanged: excluded pairs do not seed, and are NOT
+    removed from the roster."""
     assert "USDC/USD" not in _REAL_SEED_PAIRS
-    assert len(_REAL_SEED_PAIRS) == len(config.PAIRS) - 1   # ONLY USDC pulled
+    assert "USDC/USD" in config.EXCLUDED_PAIRS
+    assert len(_REAL_SEED_PAIRS) == len(config.PAIRS) - len(config.EXCLUDED_PAIRS)
     assert any(p["ws"] == "USDC/USD" for p in config.PAIRS)  # display/signals stay
