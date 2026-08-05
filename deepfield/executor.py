@@ -118,6 +118,15 @@ _tp_trough_noted = None
 _USERREF_RESOLVE_SECS = 300
 
 
+def _sim_attached():
+    """True when paper_broker has bound a simulated exchange to broker.private()."""
+    try:
+        from . import paper_broker
+        return paper_broker.attached()
+    except Exception:
+        return False
+
+
 class Executor:
     def __init__(self, conn):
         self.conn = conn
@@ -127,6 +136,18 @@ class Executor:
         # from a fill that has not been booked yet. In-memory by design — a restart
         # restarts the clock rather than adopting on stale evidence.
         self._surplus_seen = {}
+
+    def _armed(self):
+        """Modes that place orders against a real counterparty: `live`, or `paper`
+        with a simulated exchange attached (paper_broker). Everything downstream of
+        a fill — poll_fills, the stop reconcile, continuous laddering, seeding, the
+        rung harvest, T/P, reverse gear — gates on THIS, not on mode=='live'.
+
+        `off` and `validate` are never armed. Neither is paper WITHOUT a simulator:
+        with no counterparty there is nothing to poll, reconcile or ladder against,
+        so it keeps the legacy annotate-only behavior (entry rows written straight
+        to 'open' with a synthetic stop) that the unit tests pin down."""
+        return self.mode == "live" or (self.mode == "paper" and _sim_attached())
 
     def _journal(self, kind, symbol, text):
         """Isolated journal emit (v6 JOURNAL view). DISPLAY-ONLY narration — a
@@ -152,7 +173,7 @@ class Executor:
     # ── portfolio + rails ────────────────────────────────────────────────────
 
     def portfolio_value(self):
-        if self.mode == "live":
+        if self._armed():
             eq = broker.trade_balance()
             if eq is not None:
                 self._update_peak(eq)
@@ -180,7 +201,7 @@ class Executor:
         # Fail-safe: in live mode an unknown equity means the kill-switch cannot be
         # evaluated — do NOT trade blind (min-size sizing ignores equity, so without
         # this the drawdown halt would be silently bypassed on a TradeBalance failure).
-        if self.mode == "live" and equity is None:
+        if self._armed() and equity is None:
             return False, "equity unavailable — cannot verify kill-switch (blocking)"
         # Cap counts committed exposure: filled positions AND resting entry limits
         # (a 'pending' limit will become a position — counting only 'open' lets many
@@ -666,7 +687,11 @@ class Executor:
             "userref": _new_userref(),
         }
 
-        if self.mode == "paper":
+        # Paper with NO simulated exchange: legacy annotate-only behavior — record the
+        # order already filled with a stop that can never trigger. With a simulator
+        # attached, paper falls through to the live path below and rests a real
+        # (simulated) post-only bid that must actually be hit to fill.
+        if self.mode == "paper" and not _sim_attached():
             row["txid"] = f"PAPER-{int(datetime.datetime.now().timestamp())}"
             row["status"] = "open"
             oid = store.insert_order(self.conn, row)
@@ -719,8 +744,8 @@ class Executor:
         then rest the protective stop. A limit sits 'pending' until this sees an
         executed volume — so pos counts, P&L, stops, and re-verification never
         touch an unfilled order. Terminal-but-unfilled orders become 'canceled'.
-        LIVE only; paper simulates instant fill at placement."""
-        if self.mode != "live":
+        ARMED only (live, or paper against a simulated exchange)."""
+        if not self._armed():
             return
         # Re-protect BEFORE the T/P gate (audit 2026-07-13 M3): while an INCOMPLETE
         # flatten retries, _check_take_profit returns True every cycle — but by then
@@ -879,7 +904,7 @@ class Executor:
         stop already resting on Kraken (persist-race orphan) before placing, so a retry
         never doubles the stop. Isolated — never raises into poll_fills. No API call in
         the healthy case (early-returns when nothing is naked)."""
-        if self.mode != "live" or not config.PROTECTIVE_STOP:
+        if not self._armed() or not config.PROTECTIVE_STOP:
             return
         try:
             # close_txid rows are excluded: the T/P flatten owns them — a resting
@@ -989,7 +1014,7 @@ class Executor:
         doesn't rest a bid backs off _RELADDER_RETRY_SECS so a chain holding at its
         ladder floor stays quiet. No API call when every chain has a resting bid.
         Isolated — never raises into poll_fills."""
-        if self.mode != "live" or not config.LADDER_CONTINUOUS:
+        if not self._armed() or not config.LADDER_CONTINUOUS:
             return
         try:
             rows = self.conn.execute(
@@ -1035,7 +1060,7 @@ class Executor:
         conviction). This is also what RESTACKS the book after a T/P flatten.
         Backs off _RELADDER_RETRY_SECS per symbol so a rejecting pair stays quiet.
         Isolated — never raises into poll_fills."""
-        if self.mode != "live" or not getattr(config, "SEED_PAIRS", ()):
+        if not self._armed() or not getattr(config, "SEED_PAIRS", ()):
             return
         # Margin-stack floor (audit #2): seeds GROW the book — below the floor, stop
         # growing (signal entries stay untouched; fails open on stale/unknown level).
@@ -1208,7 +1233,7 @@ class Executor:
         trims. Capped per pass (a bad read can't flatten the book). LIVE + armed only.
         Isolated — never raises into poll_fills."""
         from . import defense
-        if self.mode != "live" or not getattr(config, "REVERSE_GEAR_ENABLED", False):
+        if not self._armed() or not getattr(config, "REVERSE_GEAR_ENABLED", False):
             return
         try:
             trigger = float(getattr(config, "REVERSE_GEAR_TRIGGER_PCT", 8.0) or 8.0)
@@ -1283,8 +1308,8 @@ class Executor:
         dict. Never raises."""
         out = {"symbol": sym, "closed": 0, "failed": 0, "bids_canceled": 0,
                "ml_before": None, "ml_after": None}
-        if self.mode != "live":
-            log.error("TRIM %s: EXEC_MODE=%s — live only", sym, self.mode)
+        if not self._armed():
+            log.error("TRIM %s: EXEC_MODE=%s — needs an armed exchange", sym, self.mode)
             return out
         rows = self.conn.execute(
             "SELECT id, symbol, margin_pair, volume, leverage, stop_txid, "
@@ -1347,7 +1372,7 @@ class Executor:
         (stops intact) or reprotectable (stop_txid NULL -> _reprotect_naked_open).
         Isolated — never raises into poll_fills."""
         global _tp_trough_noted
-        if self.mode != "live" or not getattr(config, "TP_ENABLED", False):
+        if not self._armed() or not getattr(config, "TP_ENABLED", False):
             return False
         try:
             # A started flatten OWNS the book until every pair is confirmed flat
@@ -1774,7 +1799,7 @@ class Executor:
         new ones. Runs every poll; ZERO API calls when no rung is near target and
         nothing is mid-harvest. The whole-book flatten owns the book when active —
         this never runs beside it. Isolated — never raises into poll_fills."""
-        if self.mode != "live" or not getattr(config, "TP_RUNG_ENABLED", False):
+        if not self._armed() or not getattr(config, "TP_RUNG_ENABLED", False):
             return
         try:
             if str(store.meta_get(self.conn, "tp_flatten_active", "") or "") == "1":
@@ -2069,7 +2094,7 @@ class Executor:
         never raises into poll_fills, so the fill/stop just secured is never unwound.
         NULL score -> flat 1.0x min."""
         try:
-            if not config.LADDER_CONTINUOUS or self.mode != "live":
+            if not config.LADDER_CONTINUOUS or not self._armed():
                 return
             if os.path.exists(config.HALT_FILE):
                 log.info("LADDER %s: HALT present — no next rung", symbol)
@@ -2326,7 +2351,7 @@ class Executor:
         per pair <= open volume per pair (never a naked short), while genuinely-open
         volume stays protected. Uncertainty (stop query None) still leaves the row
         untouched for the next restart."""
-        if self.mode != "live":
+        if not self._armed():
             return
         pfx = context                                      # 'startup' | 'runtime' log tag
         kr = broker.open_positions()

@@ -189,7 +189,20 @@ WEB_PORT = int(os.environ.get("DEEPFIELD_WEB_PORT", "8787"))
 # 2% of equity off the stop (kept for later; revisit stop-vs-liquidation first).
 EXEC_SIZE_MODE = os.environ.get("DEEPFIELD_EXEC_SIZE", "min")   # min | risk
 RISK_PCT = 0.02
-PAPER_PORTFOLIO_USD = 1000.0        # equity used for sizing math in paper/off
+PAPER_PORTFOLIO_USD = 1000.0        # equity used for sizing math in paper/off; also the
+                                    # simulated exchange's STARTING CASH (paper_broker)
+
+# ── simulated exchange (paper mode; see deepfield/paper_broker.py) ───────────
+# Costs the paper book must carry, or paper reads rosier than live and every
+# conclusion drawn from it is wrong in the same direction.
+PAPER_FEE_MAKER_PCT = 0.0002        # 0.02% — resting post-only entries/harvest closes
+PAPER_FEE_TAKER_PCT = 0.0005        # 0.05% — stop-loss MARKET exits take liquidity
+PAPER_SLIPPAGE_PCT = 0.0005         # 5bp worse than the trigger on a stop-market fill
+# Kraken bills margin rollover every 4h. 0.015% per 4h = 0.09%/day = ~33%/yr on open
+# notional, which is what the live book actually measured (~$0.39/day, 2026-07-15) —
+# and financing is the single largest cost this strategy carries, so it is modeled.
+PAPER_ROLLOVER_SECS = 14400.0
+PAPER_ROLLOVER_PCT = 0.00015
 
 # Per-order sanity ceiling (Finding 8): refuse any single order whose NOTIONAL
 # (volume x entry — the leveraged position size, i.e. the blast radius) exceeds this.

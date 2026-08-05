@@ -120,6 +120,18 @@ def private(endpoint, params=None, idempotent=True, meta=None):
     not execute); False means the network failed and the request MAY have landed.
     Callers that record 'rejected' must only do so on definite=True; an ambiguous
     None needs the userref recovery path, not a terminal status."""
+    # HARD WALL. In paper mode this function should have been REBOUND to the
+    # simulated exchange (paper_broker.attach) before anything could call it.
+    # Reaching the real one means the attach did not happen — refuse rather than
+    # send a paper-mode order to the live account. The rate limit is per-ACCOUNT,
+    # so this also protects any other bot holding the same keys.
+    if config.EXEC_MODE == "paper":
+        log.critical("REFUSING %s: EXEC_MODE=paper but the simulated exchange is "
+                     "not attached — nothing sent to Kraken", endpoint)
+        if meta is not None:
+            meta["definite"] = True
+            meta["error"] = "paper mode: simulated exchange not attached"
+        return None
     key, secret, _ = load_keys()
     if meta is not None:
         meta["definite"] = False

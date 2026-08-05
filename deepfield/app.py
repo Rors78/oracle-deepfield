@@ -22,6 +22,7 @@ from . import ui
 from . import simple_ui
 from . import alerter
 from . import defense
+from . import paper_broker
 from .ws_client import WSClient
 from .state import AppState
 from .keys import KeyController
@@ -97,7 +98,10 @@ def _poll_fills_threaded():
     c = store.connect(config.DB_PATH)
     try:
         e = executor_mod.Executor(c)
-        e.mode = "live"
+        # Was hardcoded 'live' back when only the live branch reached here. Paper now
+        # rides the same path against the simulated exchange, and the mode is what
+        # every order query filters on — hardcoding it would file paper fills as live.
+        e.mode = config.EXEC_MODE
         e.poll_fills()
     except Exception:
         log.exception("poll_fills failed")
@@ -524,7 +528,10 @@ async def _exec_state_refresh(appstate, conn, ing, interval=15):
             margin_used = free_margin = None
             if ex is None:
                 equity = None
-            elif mode == "live":
+            # Paper rides the SAME branch as live — but only with a simulated
+            # exchange attached. If attach ever failed, fall through to the inert
+            # branch rather than aiming these private calls at the real account.
+            elif mode == "live" or (mode == "paper" and paper_broker.attached()):
                 await asyncio.to_thread(_poll_fills_threaded)   # filled limits -> positions + stops
                 balance = await asyncio.to_thread(broker.trade_balance_full)
 
@@ -962,6 +969,11 @@ def _startup(debug, announce=False):
     from . import broker
     setup_logging(debug=debug)
     broker.setup_raw_log(config.LOG_DIR)   # RAW order req/resp -> its own audit file
+    # Paper mode runs the FULL live code path against a simulated exchange. Attach it
+    # before anything can place an order, so there is no window in which paper-mode
+    # traffic could reach the real account.
+    if config.EXEC_MODE == "paper":
+        paper_broker.attach()
     if announce:
         print("DEEPFIELD warming up — backfilling candle gap (throttled REST)...", flush=True)
     # log=print would flood stdout ahead of every --once/--simple frame; route
@@ -975,7 +987,7 @@ def _startup(debug, announce=False):
     ing.startup_sweep()
     # Persistence: on a live restart, surface any drift between our open-orders
     # ledger and what Kraken actually shows (a stop may have filled while down).
-    if config.EXEC_MODE == "live" and ing.executor is not None:
+    if (config.EXEC_MODE == "live" or paper_broker.attached()) and ing.executor is not None:
         try:
             kr = broker.open_positions()
             ours = store.open_position_count(conn)
