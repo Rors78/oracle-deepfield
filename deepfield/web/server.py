@@ -13,6 +13,7 @@ meta blob the bot persists; if it's stale/absent the dashboard still shows real
 positions, P&L (marked from last close), charts and journal — nothing is faked.
 """
 import os
+import gzip
 import json
 import time
 import sqlite3
@@ -23,6 +24,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from .. import VERSION, config
 from .. import store, engine
 from ..profiles import FULL
+
+# Below roughly one network payload, gzip's header and CPU cost more than it saves.
+_MIN_GZIP_BYTES = 1400
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CONSOLE_HTML = os.path.join(HERE, "console.html")   # v7 flight deck (kept at /v7)
@@ -683,8 +687,25 @@ class Handler(BaseHTTPRequestHandler):
     def _send(self, code, body, ctype):
         if isinstance(body, str):
             body = body.encode("utf-8")
+        # The state blob is ~37KB of highly repetitive JSON fetched every 4s by every
+        # open console, and the deck itself is ~98KB — both compress about 4x. That
+        # matters most for the phone on the LAN relay, which is a pure byte-pump and
+        # forwards the encoding untouched. Costs ~1ms of CPU in the bot's process
+        # against ~29KB saved per poll, per client.
+        gz = False
+        if (len(body) >= _MIN_GZIP_BYTES
+                and "gzip" in (self.headers.get("Accept-Encoding") or "").lower()):
+            try:
+                body, gz = gzip.compress(body, 6), True
+            except Exception:
+                gz = False                      # never fail a response over compression
         self.send_response(code)
         self.send_header("Content-Type", ctype)
+        if gz:
+            self.send_header("Content-Encoding", "gzip")
+        # Correct even though we send no-store: an intermediary that ignores that
+        # must still key any cache on the encoding.
+        self.send_header("Vary", "Accept-Encoding")
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
