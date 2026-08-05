@@ -42,7 +42,7 @@ confirmed BUY (candle close OR one-shot startup arm)
   └─ ingest._maybe_alert ─ engine.should_alert(REALERT_HOURS)   ← cooldown gate (OFF, see §3)
        └─ ingest._dispatch ─ executor.place_entry(symbol, price, card)
             ├─ portfolio_value()      live equity via broker.trade_balance()
-            ├─ rails_ok(equity)       ← risk rails (auto-brakes OFF, see §3)
+            ├─ rails_ok(equity)       ← risk rails (auto-brakes ARMED, see §3)
             ├─ compute_stop() + size()
             └─ AddOrder  post-only maker LIMIT, status='pending'   (NOT yet a position)
 app loop, every cycle:
@@ -71,13 +71,20 @@ assuming broken:
 ## 3. Intentional operator overrides — do not mistake these for bugs
 
 These are switched off/loosened **on purpose**, documented in-code at the config
-line and in `docs/RULINGS.md`. Flagging "there are no circuit breakers" is
-*expected* and correct as an observation — but please frame it as *"this is the
-stated design; here is why it is/ isn't safe,"* because that is the real question.
+line and in `docs/RULINGS.md`. Frame findings as *"this is the stated design; here
+is why it is/ isn't safe,"* because that is the real question.
+
+> **Changed 2026-07-30 (`ad5097b`):** the automatic rails are **armed** again.
+> Earlier revisions of this document — and `docs/DEEPFIELD_AUDIT_BUNDLE.md`, a
+> snapshot generated 2026-07-14 and deliberately left as a historical record —
+> describe `RAILS_ENABLED = False` as standing doctrine. That is no longer true,
+> so "there are no circuit breakers" is now a *wrong* observation rather than an
+> expected one. Read the flag in `config.py`, not the prose, before concluding
+> anything about braking behavior.
 
 | Override | Where | Effect | Why (operator) |
 |---|---|---|---|
-| **`RAILS_ENABLED = False`** | config.py:128; enforced executor.py:69 (`if not config.RAILS_ENABLED: return True`) | **Skips** the drawdown kill-switch, daily/weekly realized-loss caps, the **max-open-positions cap**, and the equity-unknown block. The bot never brakes *itself*. | "No circuit breakers, no fear." The bot should not halt its own accumulation during exactly the drawdowns it is designed to buy into. |
+| **`RAILS_ENABLED = True`** *(no longer an override — re-armed 2026-07-30, `ad5097b`)* | config.py:567; gate at executor.py:179 (`if not config.RAILS_ENABLED: return True, "ok (auto-rails disabled)"`) | Rails are **live**: drawdown kill-switch (`KILL_SWITCH_DD_PCT = 0.20`), daily/weekly realized-loss caps ($15/$35), max-open-positions (300), and the live-mode equity-unknown block all apply. The row is kept because the *gate* is the thing to scrutinize: one `False` disables all four at once. | Formerly "no circuit breakers, no fear." Superseded — the brakes were recalibrated for the ladder era rather than left off; see the config comment above the flag. |
 | **`REALERT_HOURS = 0`** | config.py:58; enforced via `engine.should_alert()` | Cooldown disabled → a symbol that stays BUY **re-fires an order on every daily/weekly close**. No separate dedupe. | Full pyramid/stack into a persistent bottom thesis. |
 | **One-shot startup arm** | ingest.py:302 `_maybe_arm_startup_buy` | On each process start, every symbol *already* at BUY fires once on its first fresh tick. Re-arms every launch → **each restart re-fires every open BUY**. | Closes the gap where a restart would otherwise wait up to 7 days for the next close. |
 | **`EXEC_SIZE_MODE = "min"`** | config.py:101; executor.py:137 | Sizes the **exchange minimum** order per pair (≥ ordermin and ≥ costmin), ignoring the 2%-risk math. | See §4 — this is the actual safety mechanism. |
@@ -94,15 +101,18 @@ stated design; here is why it is/ isn't safe,"* because that is the real questio
 
 Combine the three overrides above and the *effective* behavior is
 **unbounded pyramiding**: `REALERT_HOURS=0` re-fires each close, the one-shot arm
-re-fires every open BUY on each restart, and with `RAILS_ENABLED=False` the
-`MAX_OPEN_POSITIONS` cap (config.py:129) is **never evaluated** — it sits behind
-the `if not RAILS_ENABLED` early-return in `rails_ok()`. There is no other stacking
-limit in the code.
+re-fires every open BUY on each restart. Since `ad5097b` the `MAX_OPEN_POSITIONS`
+cap (config.py:568, now 300) **is** evaluated, counting committed exposure — filled
+positions *and* resting entry limits, so many pendings cannot rest under the cap and
+fill together. It remains behind the `if not RAILS_ENABLED` early-return in
+`rails_ok()`, so a single `False` still removes it.
 
-**This is the single most audit-worthy fact in the codebase, and it is stated here
-plainly on purpose.** The only thing bounding total exposure today is position
-*size* (§5), not position *count*. Please evaluate it as such — do not let "it's
-intentional" wave it past you.
+**This is still the most audit-worthy area in the codebase, and it is stated here
+plainly on purpose.** 300 is a runaway-loop backstop, not a working-set cap — at
+~10-rung chains across 28 seeded pairs it is not what bounds a normal book. What
+bounds exposure day to day is position *size* (§5), the margin-level stack floor,
+the respend governor, and the `L_eff` ceiling. Please evaluate it as such — do not
+let "the rails are on now" wave it past you.
 
 ---
 
@@ -118,7 +128,8 @@ That argument is only as strong as the mechanism behind it, so audit the mechani
 1. **Min-sizing is a config knob, not an invariant.** Containment lives entirely in
    `EXEC_SIZE_MODE="min"` (config.py:101). Flip it to `"risk"` and sizing becomes
    `2% equity / stop-distance`, margin-capped at 90% (executor.py:148–177) — a
-   materially different risk profile with the rails still off. The auditor should
+   materially different risk profile, and one the rails bound only loosely at a
+   300-position cap. The auditor should
    treat "min" as a **load-bearing setting**, and it's worth checking that `min`
    sizing is genuinely small for *every* pair (it depends on live
    `ordermin`/`costmin` from the `pairs` table, refreshed from AssetPairs — a stale

@@ -1,6 +1,10 @@
 # ORACLE DEEPFIELD runtime deps — exact pins (M0). See docs/SPEC.md §4.
 websockets==16.0
 rich==15.0.0
+# Windows ships no system tz database, so ZoneInfo("America/Denver") raises at
+# import time in ui/alerter/simple_ui/web.server. Pure data, no code — a no-op
+# on Linux, where zoneinfo reads /usr/share/zoneinfo instead.
+tzdata==2026.3
 # dev
 pytest==9.1.1
 # shuffles test order each run — the standing guard against order-coupled tests

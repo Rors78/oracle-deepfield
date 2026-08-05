@@ -4,6 +4,15 @@
 > then audit the source in Part 2. Everything the review needs is in this one
 > file — the live leveraged-execution path and every config knob it reads.
 > Generated 2026-07-14 12:41 UTC from the running repo.
+>
+> **HISTORICAL SNAPSHOT — do not audit the current bot from this file.** It is
+> preserved unedited as the record of what reviewers were given on 2026-07-14.
+> The code has moved since; most importantly `RAILS_ENABLED` was re-armed to
+> `True` on 2026-07-30 (`ad5097b`), so every statement below about absent circuit
+> breakers, an unevaluated `MAX_OPEN_POSITIONS`, and unbounded position count is
+> **false of the current tree**. Line numbers cited here have also drifted. For a
+> current orientation read [`AUDIT_ORIENTATION.md`](AUDIT_ORIENTATION.md); for
+> ground truth read `config.py` and `executor.rails_ok()`.
 
 ---
 

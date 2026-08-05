@@ -13,10 +13,10 @@ else — HTTP, signing, persistence, scoring, the web console — is standard li
 
 > **This trades real money at leverage.** `EXEC_MODE` defaults to `off` and is
 > fail-closed, but when armed it places live leveraged margin orders on Kraken's
-> `:BTNL` book. The automatic circuit breakers are deliberately disabled
-> (`RAILS_ENABLED = False`) — an informed operator override, documented in
-> [`docs/RULINGS.md`](docs/RULINGS.md). Read [Risk posture](#risk-posture) before
-> arming anything.
+> `:BTNL` book. The automatic circuit breakers are armed (`RAILS_ENABLED = True`),
+> recalibrated for the ladder in `ad5097b` after a period of running with them
+> deliberately off — see [`docs/RULINGS.md`](docs/RULINGS.md). Read
+> [Risk posture](#risk-posture) before arming anything.
 
 ---
 
@@ -189,19 +189,24 @@ thresholds — they never brake an order.
 
 Stated plainly, because the defaults are not the running configuration:
 
-- **Automatic rails are off.** `RAILS_ENABLED = False`. Max-position count, the 20%
-  drawdown kill switch, and the daily/weekly loss caps are all unreachable while it stays
-  false. This is an explicit operator override, not an oversight.
+- **Automatic rails are armed.** `RAILS_ENABLED = True` since `ad5097b` (2026-07-30),
+  recalibrated for the ladder era after a documented period of running with them off.
+  Reachable again: `MAX_OPEN_POSITIONS = 300`, the `KILL_SWITCH_DD_PCT = 0.20` drawdown
+  halt, and the `DAILY_LOSS_LIMIT_USD = 15` / `WEEKLY_LOSS_LIMIT_USD = 35` caps. Setting
+  it back to `False` short-circuits `rails_ok()` and makes every one of them unreachable
+  in a single edit.
+- **The position cap is a runaway-loop backstop, not a working-set cap.** 300 is roughly
+  10-rung chains on every pair. The brakes that actually bound the working set are the
+  margin-level stack floor, the respend governor, and the `L_eff` ceiling gate — the cap
+  is there to catch a loop, not to size the book.
 - **The HALT file is always honored**, independent of that switch. `touch
   deepfield.HALT_ENTRIES` stops new entries immediately; delete it to resume.
 - **Long only.** Kraken spot-margin has no `reduce_only`, so a resting sell can net short.
   The only sells are protective stops and the take-profit flatten. Do not add resting sells.
 - **Per-pair leverage is a hardcoded maximum** and is intended to stay that way.
-- **Position count is unbounded** with rails off. Total exposure is bounded by order
-  *size* and the margin floor, not by count.
 - Containment rests on `EXEC_SIZE_MODE = "min"` — buy the smallest placeable order.
   That is a config knob, not an invariant; flipping it to `"risk"` switches to 2%-equity
-  sizing with rails still off. Treat it as load-bearing.
+  sizing. Treat it as load-bearing.
 
 ---
 
@@ -265,17 +270,58 @@ $env:DEEPFIELD_EXEC_MODE="live"; .\venv\Scripts\python -m deepfield
 
 Credentials go in `%USERPROFILE%\.deepfield_keys`, same two-line format.
 
-Three things degrade, none of them on the money path:
+Two Windows-only defects have been found and fixed; both are in `master`, and the note
+is kept because each was invisible on Linux and would otherwise be re-introduced:
+
+- **`tzdata` is a hard dependency there.** Four modules bind
+  `ZoneInfo("America/Denver")` at import time (`ui`, `alerter`, `simple_ui`,
+  `web.server`). Linux resolves that from `/usr/share/zoneinfo`; Windows ships no
+  system tz database at all, so a fresh clone raised `ZoneInfoNotFoundError` during
+  collection and took out 15 test files before a single assertion ran. It is pinned in
+  `requirements.txt` and is a no-op on Linux, where the stdlib prefers the system
+  database.
+- **The log handlers must be told they are UTF-8.** Log messages carry box-drawing,
+  arrows and em-dashes — 1765 characters across 32 codepoints that `cp1252` cannot
+  encode. Windows opens stdout as `cp1252`, so `StreamHandler.emit` raised
+  `UnicodeEncodeError` and logging printed a stack trace *where the line should have
+  been*. It never killed the bot — logging swallows handler errors — which is exactly
+  why it went unnoticed. `FileHandler` had the same defect latent: opened with no
+  `encoding=`, it would have corrupted the same glyphs in the log file. Both are now
+  explicit in `logsetup.py`; the console falls back to `backslashreplace` rather than
+  losing a record.
+
+Three things still degrade, none of them on the money path:
 
 - **Keyboard controls are off.** `q`/`p`/`f`/`a` need POSIX terminal control (`termios`),
   which Windows has no equivalent for. The dashboard still renders and refreshes; use
   Ctrl-C to exit and the web console for everything else.
 - **Sound and desktop alerts are off.** `paplay`/`aplay`/`notify-send` are Linux; the
   chain falls back to the terminal bell. Telegram alerts work everywhere if configured.
-- **`deepfield_run` and `scripts/*.sh` are bash**, as is the `.desktop` launcher. Invoke
-  `python -m deepfield` directly instead.
+- **`deepfield_run` and `scripts/*.sh` are bash.** Invoke `python -m deepfield` directly,
+  or use the PowerShell launcher below.
 
 `--simple` and the web console are the smoothest way to run it there.
+
+**One-click launch.** `scripts/DEEPFIELD.desktop` is Linux-only; the Windows equivalent is
+`scripts/deepfield-desktop.ps1`, installed as a shortcut by:
+
+```powershell
+.\scripts\install-desktop-icon.ps1              # desktop icon
+.\scripts\install-desktop-icon.ps1 -Autostart   # + launch at every login
+.\scripts\install-desktop-icon.ps1 -Uninstall   # remove both
+```
+
+It runs hidden under `pythonw`, opens the console at `:8787`, and cold-backfills on first
+run if there is no database. **It launches in `paper`** — `-Mode live` is accepted for a
+single run but the default is deliberate, and the shortcut never arms trading.
+
+Two guards from the bash launcher had no Windows equivalent and are replaced, not dropped:
+`pgrep` becomes a probe of `/api/health`, since the bot serves the console in-process, so
+"the port answers" *is* "a bot is running" — and it is a better test than matching a
+process name, which would also match an unrelated `python`. `tmux attach` becomes the web
+console itself. The guard matters: two copies double the WebSocket and REST load and race
+each other's alerts, and the Kraken rate limit is per-**account**, so a second instance can
+throttle a bot running elsewhere on the same key.
 
 A fresh clone has no candle database (`*.db` is correctly gitignored), so run the cold
 backfill once. Until you do, two parity tests skip with "no DB (run M1 backfill)" —
@@ -351,7 +397,7 @@ found — both mean the ledger and the exchange disagree.
 | `RUNTIME_RECON_SECS` | `900` | Ledger ↔ exchange reconcile period |
 | `ADOPT_UNTRACKED` / `ADOPT_GRACE_SECS` | `True` / `1800` | Adopt untracked exchange volume after 30 min unclaimed |
 | `REVERSE_GEAR_ENABLED` | `True` | Deleverage governor, armed by default |
-| `RAILS_ENABLED` | `False` | Automatic circuit breakers — **off by operator choice** |
+| `RAILS_ENABLED` | `True` | Automatic circuit breakers — armed; `False` disables all of them at once |
 | `HALT_FILE` | `deepfield.HALT_ENTRIES` | Always honored, regardless of the above |
 | `MARGIN_LEVEL_ALERT_PCT` | `120` | Pages when Kraken's own margin level nears the seizure band |
 
@@ -364,12 +410,18 @@ the two measure different things and diverge widely at a mixed per-pair leverage
 ## Tests
 
 ```bash
-./venv/bin/python -m pytest tests/ -q      # 281 tests
+./venv/bin/python -m pytest tests/ -q      # 421 passed, 1 skipped
 ```
 
 No test touches the network; the broker is mocked throughout and `conftest.py` isolates
 the live HALT file so the operator's real kill switch can't silently suppress an entire
 execution suite.
+
+The skip count is platform- and config-dependent, so read the reasons rather than matching
+the number. Three conditions skip: one POSIX-terminal test on Windows, the two parity
+tests on any checkout with no candle database, and three margin-level tests whenever
+`MARGIN_LEVEL_ALERT_PCT` is 0. The count quoted above is Windows with a backfilled DB and
+the alert threshold armed.
 
 The suite is heavily adversarial, and most of its interesting tests are named after
 failure modes that actually happened: `test_verify_stacked_triggered_row_not_reprotected`

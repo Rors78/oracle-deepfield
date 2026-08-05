@@ -95,3 +95,95 @@ def test_key_controller_still_works_where_posix_is_available(monkeypatch):
             monkeypatch.delitem(sys.modules, mod, raising=False)
     keys = importlib.import_module("deepfield.keys")
     assert keys.termios is not None and keys.tty is not None
+
+
+# ── Console encoding ─────────────────────────────────────────────────────────
+# Log messages carry box-drawing, arrows and em-dashes throughout (1765 chars
+# across 30+ codepoints that cp1252 cannot encode). Windows opens stdout as
+# cp1252, so StreamHandler.emit raised UnicodeEncodeError and logging replaced
+# the intended line with a stack trace on the operator's console. Never fatal —
+# logging swallows handler errors — which is exactly why it survived unnoticed.
+# Found 2026-08-03 on the same Windows 11 machine as the termios bug above.
+
+UNENCODABLE = "web console \u2192 http://127.0.0.1:8787 \u2500\u2550 \u274c"
+
+
+def _emit_to_cp1252_stream(harden):
+    """Emit a record carrying cp1252-hostile glyphs to a simulated Windows console.
+
+    Returns (console_text, raised_traceback). Uses a private logger with
+    propagate=False so the root handlers the suite installs cannot absorb or
+    duplicate the record, and so this cannot pass or fail on test ORDER.
+
+    logging reports a failing handler by printing to the real sys.stderr rather
+    than by raising, so the failure signal must be captured THERE — reading only
+    the handler's own stream shows an empty buffer and looks like success.
+    """
+    import contextlib
+    import io
+    import logging
+
+    buf = io.BytesIO()
+    stream = io.TextIOWrapper(buf, encoding="cp1252", newline="")
+    if harden:
+        try:
+            stream.reconfigure(encoding="utf-8", errors="backslashreplace")
+        except (ValueError, OSError):
+            pass
+    handler = logging.StreamHandler(stream)
+    log = logging.getLogger("deepfield.test.console.%s" % harden)
+    log.handlers = [handler]
+    log.propagate = False
+    log.setLevel(logging.INFO)
+    complaints = io.StringIO()
+    with contextlib.redirect_stderr(complaints):
+        log.info(UNENCODABLE)
+        handler.flush()
+        stream.flush()
+    text = buf.getvalue().decode("utf-8", errors="replace")
+    noise = complaints.getvalue()
+    return text, ("Traceback" in noise or "UnicodeEncodeError" in noise)
+
+
+def test_cp1252_console_swallows_the_record_without_the_guard():
+    """Here is the bug: an unhardened cp1252 console loses the line to a traceback."""
+    text, raised = _emit_to_cp1252_stream(harden=False)
+    assert raised, "expected UnicodeEncodeError on a raw cp1252 stream, got: %r" % text[:200]
+
+
+def test_hardened_console_renders_the_record_intact():
+    """Here is the guard: reconfigured to UTF-8, the real message survives."""
+    text, raised = _emit_to_cp1252_stream(harden=True)
+    assert not raised, "console still raised: %r" % text[:200]
+    assert "web console \u2192 http://127.0.0.1:8787" in text
+
+
+def test_harden_is_a_noop_on_streams_that_cannot_reconfigure(monkeypatch):
+    """pytest capture and pipes replace stdout with objects that have no
+    reconfigure(). Logging setup must not be the thing that stops the bot."""
+    import io
+
+    from deepfield import logsetup
+
+    monkeypatch.setattr(sys, "stdout", io.StringIO(), raising=False)
+    monkeypatch.setattr(sys, "stderr", io.StringIO(), raising=False)
+    logsetup._harden_console_encoding()      # must not raise
+
+
+def test_file_handler_is_utf8_not_platform_default(tmp_path):
+    """The log FILE had the same defect: FileHandler with no encoding= inherits
+    cp1252 on Windows, corrupting the same glyphs it is meant to preserve."""
+    import logging
+
+    from deepfield import logsetup
+
+    handler = logsetup.setup_logging(log_dir=str(tmp_path))
+    try:
+        logging.getLogger().info(UNENCODABLE)
+        handler.flush()
+        written = (tmp_path / "deepfield.log").read_text(encoding="utf-8")
+    finally:
+        logging.getLogger().removeHandler(handler)
+        handler.close()
+    assert (handler.encoding or "").lower().replace("-", "") == "utf8"
+    assert "\u2192" in written and "\u2500" in written
