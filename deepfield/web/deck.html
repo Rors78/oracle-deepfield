@@ -979,6 +979,30 @@ function renderStress(h){
     svg+=`<line x1="${x(v)}" x2="${x(v)}" y1="${TY+TH}" y2="${TY+TH+4}" stroke="var(--line2)"/>
       <text x="${x(v)}" y="${TY+TH+14}" text-anchor="middle" fill="var(--ink4)" font-size="8"
         font-family="var(--mono)">${v}</text>`;
+  // THE STOP CASCADE, on the same axis as the liquidation line.
+  //
+  // This panel answered "would a big move liquidate me". The ledger says that is
+  // not the failure mode that costs money: on 2026-08-05 stop exits ran -$19.83
+  // (n=65) against -$10.58 of carry and +$2.96 of harvest, and 69% of those stops
+  // landed inside 48 hours on a basket that only dipped ~2.6%. The book stops out
+  // LONG before it liquidates, and both are denominated in adverse basket move —
+  // so they belong on one axis, where the gap between them is visible.
+  //
+  // Uniform-move approximation: every pair falls together. Basket correlation is
+  // ~0.60, so this is a reasonable first cut and errs toward showing the cascade
+  // as tighter than reality, which is the safe direction for a risk read.
+  const lots=PAIRS.filter(p=>(p.fills||0)>0&&p.price&&p.stop)
+    .map(p=>({d:(p.price-p.stop)/p.stop*100, n:(p.size||0)*p.price}))
+    .filter(o=>o.d>0).sort((a,b)=>a.d-b.d);
+  const totN=lots.reduce((s,o)=>s+o.n,0);
+  let halfAt=null, allAt=null, run=0;
+  for(const o of lots){ run+=o.n;
+    if(halfAt===null&&run>=totN*0.5) halfAt=o.d;
+    if(run>=totN-1e-9){ allAt=o.d; break; } }
+  if(halfAt!=null) svg+=tick(halfAt,"var(--loss-ink)","HALF STOPPED",halfAt.toFixed(1)+"%",false);
+  if(allAt!=null&&Math.abs(allAt-halfAt)>DOM*0.03)
+    svg+=tick(allAt,"var(--loss-ink)","ALL STOPPED",allAt.toFixed(1)+"%",false);
+
   svg+=tick(ref1,"var(--brass)","WORST DAY",ref1.toFixed(1)+"%",true);
   if(ref5>ref1*1.06) svg+=tick(ref5,"var(--brass-dim)","WORST 5D",ref5.toFixed(1)+"%",true);
   if(dd!=null&&dd>0.05) svg+=tick(dd,"var(--ice)","TODAY",dd.toFixed(1)+"%",false);
@@ -996,14 +1020,29 @@ function renderStress(h){
     letter-spacing=".14em">ADVERSE BASKET MOVE →</text></svg>`;
   $("stressaxis").innerHTML=svg;
 
-  // The verdict, stated as the decision it is.
+  // The verdict reports the BINDING constraint — whichever happens first.
+  //
+  // It used to report only the liquidation buffer, which for this strategy is
+  // almost never what binds: the book stops out several times over before it comes
+  // near liquidation (live 2026-08-05: whole book stopped by an ~11% basket move,
+  // liquidation 858% away). Saying "survives the worst 5-day move with 832pp to
+  // spare" while every lot is stopped out at 11% is true and useless.
   const v=$("stress-verdict");
+  const cascade=allAt;                       // basket move that stops out the WHOLE book
   if(flat){ v.className="verdict safe"; v.innerHTML="book is <b>flat</b> — no leveraged exposure to liquidate."; }
+  else if(cascade!=null&&ref1&&cascade<ref1){
+    v.className="verdict bad";
+    v.innerHTML=`the <b>worst day on record</b> (${ref1.toFixed(1)}%) would stop out the ENTIRE book — `
+      +`the cascade starts at ${halfAt.toFixed(1)}% and completes by ${cascade.toFixed(1)}%. `
+      +`Liquidation sits far past it${buf!=null?` (${fmtPct(buf)})`:""} and is not what binds here.`; }
+  else if(cascade!=null&&ref5&&cascade<ref5){
+    v.className="verdict thin";
+    v.innerHTML=`survives the worst single day (${ref1.toFixed(1)}%) without a full stop-out, `
+      +`but the worst 5-day stretch (${ref5.toFixed(1)}%) clears the book — cascade completes at ${cascade.toFixed(1)}%.`; }
   else if(buf==null){ v.className="verdict"; v.innerHTML="liquidation buffer unavailable — equity/margin not yet read this cycle."; }
   else if(buf>ref5&&ref5){ v.className="verdict safe";
-    // margin between two percentages is percentage POINTS — on a risk figure the
-    // distinction is not pedantry
-    v.innerHTML=`survives the <b>worst 5-day move on record</b> (${ref5.toFixed(1)}%) with ${fmtPct(buf-ref5).replace("%","pp")} to spare.`; }
+    v.innerHTML=`survives the <b>worst 5-day move on record</b> (${ref5.toFixed(1)}%) with ${fmtPct(buf-ref5).replace("%","pp")} to spare`
+      +`${cascade!=null?`, and no stop cascade before ${cascade.toFixed(1)}%`:""}.`; }
   else if(buf>ref1){ v.className="verdict thin";
     v.innerHTML=`survives the <b>worst single day on record</b> (${ref1.toFixed(1)}%) — but a repeat of the worst 5-day stretch (${ref5.toFixed(1)}%) would liquidate.`; }
   else { v.className="verdict bad";
