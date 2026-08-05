@@ -14,6 +14,7 @@ positions, P&L (marked from last close), charts and journal — nothing is faked
 """
 import os
 import gzip
+import hashlib
 import json
 import time
 import sqlite3
@@ -27,6 +28,11 @@ from ..profiles import FULL
 
 # Below roughly one network payload, gzip's header and CPU cost more than it saves.
 _MIN_GZIP_BYTES = 1400
+
+# path -> ((mtime_ns, size), body, etag). Keyed on the stat so a live edit is
+# picked up without a restart, which is how deck.html is actually developed.
+_static_cache = {}
+_static_lock = threading.Lock()
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CONSOLE_HTML = os.path.join(HERE, "console.html")   # v7 flight deck (kept at /v7)
@@ -684,7 +690,7 @@ def build_health():
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
-    def _send(self, code, body, ctype):
+    def _send(self, code, body, ctype, cache="no-store", extra=None):
         if isinstance(body, str):
             body = body.encode("utf-8")
         # The state blob is ~37KB of highly repetitive JSON fetched every 4s by every
@@ -707,12 +713,50 @@ class Handler(BaseHTTPRequestHandler):
         # must still key any cache on the encoding.
         self.send_header("Vary", "Accept-Encoding")
         self.send_header("Content-Length", str(len(body)))
-        self.send_header("Cache-Control", "no-store")
+        for k, v in (extra or ()):
+            self.send_header(k, v)
+        self.send_header("Cache-Control", cache)
         self.end_headers()
-        self.wfile.write(body)
+        if self.command != "HEAD":
+            self.wfile.write(body)
 
     def _json(self, obj, code=200):
         self._send(code, json.dumps(obj), "application/json; charset=utf-8")
+
+    def _send_static(self, path_on_disk, ctype):
+        """Serve a console page with revalidation.
+
+        The deck is ~98KB (31KB gzipped) and was sent in full on every load, with
+        Cache-Control: no-store forbidding the browser from even keeping a copy to
+        revalidate against. It changes only when the file does, so hash it and let
+        an unchanged reload cost 0 bytes — this is the page reloaded after every
+        bot restart, and on a phone over wifi. no-cache (not no-store) is the
+        correct directive: keep it, but always check with us first.
+
+        The body is cached in-process keyed on (mtime, size), so a reload does not
+        re-read 98KB from disk either. A file edited in place is picked up because
+        its mtime moves — deck.html is edited live during development."""
+        try:
+            st = os.stat(path_on_disk)
+            key = (st.st_mtime_ns, st.st_size)
+            with _static_lock:
+                hit = _static_cache.get(path_on_disk)
+                if not hit or hit[0] != key:
+                    with open(path_on_disk, "rb") as f:
+                        body = f.read()
+                    hit = (key, body, '"%s"' % hashlib.sha1(body).hexdigest()[:16])
+                    _static_cache[path_on_disk] = hit
+            _key, body, etag = hit
+        except OSError:
+            self._send(404, "not found", "text/plain")
+            return
+        if (self.headers.get("If-None-Match") or "").strip() == etag:
+            self.send_response(304)
+            self.send_header("ETag", etag)
+            self.send_header("Cache-Control", "no-cache")
+            self.end_headers()
+            return
+        self._send(200, body, ctype, cache="no-cache", extra=(("ETag", etag),))
 
     def do_GET(self):
         path, _, query = self.path.partition("?")
@@ -723,11 +767,9 @@ class Handler(BaseHTTPRequestHandler):
                 qs[k] = v
         try:
             if path in ("/", "/index.html"):
-                with open(DECK_HTML, "rb") as f:
-                    self._send(200, f.read(), "text/html; charset=utf-8")
+                self._send_static(DECK_HTML, "text/html; charset=utf-8")
             elif path == "/v7":
-                with open(CONSOLE_HTML, "rb") as f:
-                    self._send(200, f.read(), "text/html; charset=utf-8")
+                self._send_static(CONSOLE_HTML, "text/html; charset=utf-8")
             elif path == "/api/state":
                 self._json(build_state())
             elif path.startswith("/api/pair/"):
