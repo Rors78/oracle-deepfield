@@ -105,7 +105,7 @@ main{max-width:1720px; margin:0 auto; padding:18px 26px 30px; display:grid; gap:
 .card{
   background:linear-gradient(180deg,var(--panel2) 0%, var(--panel) 55px);
   border:1px solid var(--line); border-radius:var(--r);
-  padding:16px 18px 15px; position:relative;
+  padding:16px 18px 15px; position:relative; min-width:0;
 }
 .card.rise{animation:rise .5s cubic-bezier(.22,.9,.3,1) backwards}
 @keyframes rise{from{opacity:0; transform:translateY(9px)}}
@@ -121,6 +121,13 @@ main{max-width:1720px; margin:0 auto; padding:18px 26px 30px; display:grid; gap:
 
 .row1{display:grid; grid-template-columns:minmax(430px,1.35fr) minmax(300px,.85fr) minmax(360px,1fr); gap:16px}
 .row3{display:grid; grid-template-columns:minmax(0,1fr) 380px; gap:16px; align-items:start}
+/* Grid and flex children default to min-width:auto, so they refuse to shrink below
+   their own min-content — one wide table or fixed-width SVG then pushes its whole
+   track past the viewport and the PAGE scrolls sideways, clipping every card at the
+   same edge. Measured on a phone-width viewport: document 838px inside 485px.
+   Wide content still scrolls, but inside its own container (see .fieldwrap,
+   .stresswrap, the book's overflow wrapper) — never the body. */
+main>*, .row1>*, .row3>*, .side>*{min-width:0}
 
 /* ── capital ──────────────────────────────────────────────────────────── */
 .eq-line{display:flex; align-items:baseline; gap:16px; flex-wrap:wrap}
@@ -188,7 +195,9 @@ main{max-width:1720px; margin:0 auto; padding:18px 26px 30px; display:grid; gap:
 .tier-CAUTION{color:var(--warn-ink); border-color:rgba(186,139,50,.55); background:rgba(186,139,50,.08)}
 .tier-CRITICAL{color:var(--loss-ink); border-color:rgba(216,80,107,.6); background:rgba(216,80,107,.08); animation:breathe 1.6s infinite}
 .runway{margin:6px 0 12px}
-.defgrid{display:grid; grid-template-columns:repeat(3,1fr); gap:8px}
+/* auto-fit, not repeat(3,1fr): three fixed columns squeeze each cell to ~110px on a
+   phone, wrapping "price-space to forced liq" into four lines. Reflows 3 -> 2 -> 1. */
+.defgrid{display:grid; grid-template-columns:repeat(auto-fit,minmax(132px,1fr)); gap:8px}
 .defcell{border:1px solid var(--line); background:var(--inset); border-radius:7px; padding:7px 10px 6px}
 .defcell .k{font-size:8.5px; letter-spacing:.16em; text-transform:uppercase; color:var(--ink3)}
 .defcell .v{font-family:var(--mono); font-size:14px; margin-top:2px; color:var(--ink)}
@@ -354,6 +363,9 @@ footer .reg{color:var(--ink2)}
   .row1{grid-template-columns:1fr}
   .mast{flex-wrap:wrap; gap:12px} .clockset{margin-left:auto}
   main{padding:14px 14px 24px}
+  /* 132px keeps three columns on the desktop card; on a phone that same floor packs
+     three ~130px cells and the labels wrap. Raise the floor so it settles on two. */
+  .defgrid{grid-template-columns:repeat(auto-fit,minmax(150px,1fr))}
 }
 @media (prefers-reduced-motion:reduce){
   *,*::before,*::after{animation:none!important; transition:none!important}
@@ -649,7 +661,11 @@ $("eqwin").addEventListener("click",e=>{
 });
 function renderCapital(h){
   const eqLive=h.equity!=null, eq=eqLive?h.equity:h.peak;
-  $("cap-aux").textContent=eqLive?"live · kraken tradebalance":"last known · populates next bot cycle";
+  // Never assert Kraken provenance for a number Kraken did not produce: in paper the
+  // equity comes from the simulated exchange, and a deck that mislabels its own
+  // source is worse than one that shows nothing.
+  const src=h.mode==="paper"?"simulated · paper exchange":"kraken tradebalance";
+  $("cap-aux").textContent=eqLive?`live · ${src}`:"last known · populates next bot cycle";
   tween($("eq-big"), eq||0, v=>{ const s=fmt$(v); const i=s.indexOf(".");
     return i<0?s:s.slice(0,i)+"."+s.slice(i+1); });
   $("eq-peak").innerHTML=`peak ${fmt$(h.peak)}<br><span class="dim">t/p at <span style="color:var(--gain-ink)">${fmt$(h.tp_target)}</span>${eqLive&&h.tp_target?` · ${((h.tp_target/eq-1)*100).toFixed(1)}% away`:""}</span>`;
