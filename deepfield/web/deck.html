@@ -747,8 +747,17 @@ function renderHarvest(h){
     :`<div class="dim" style="font-size:10.5px;margin-top:7px">no rungs banked yet — first +4% rip lands here</div>`}`;
   renderSkim(rh);
   const base=h.tp_baseline, tgt=h.tp_target, eq=h.equity!=null?h.equity:h.peak;
-  const span=(tgt&&base)?tgt-base:null;
-  const p=span?Math.max(0,Math.min(1,(eq-base)/span)):0;
+  // The target is TROUGH-ratcheted (fires at min(baseline,trough)x1.2), so after a
+  // drawdown it sits BELOW the baseline. Measuring the arc from the baseline then
+  // makes span NEGATIVE and inverts the fraction: on 2026-08-05 the live console
+  // drew a FULL green ring while the book was 8.8% UNDER its baseline
+  // (span -1.50, raw p +12, clamped to 1). Anchor the arc where the target is
+  // actually derived from — min(baseline, trough) — so it reads "how far from the
+  // trough toward the target", which is what the ratchet means. The centre figure
+  // stays VS BASE: that is the profit yardstick and it is honestly negative here.
+  const anchor=(h.tp_trough!=null&&base!=null)?Math.min(base,h.tp_trough):base;
+  const span=(tgt!=null&&anchor!=null&&tgt>anchor)?tgt-anchor:null;
+  const p=span?Math.max(0,Math.min(1,(eq-anchor)/span)):0;
   const A0=Math.PI*0.78, A1=Math.PI*2.22;         // 260° gauge
   const W=250,H=170,CX=125,CY=118,R=88;
   const prog=A0+(A1-A0)*p;
