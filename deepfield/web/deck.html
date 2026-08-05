@@ -18,7 +18,13 @@
 :root{
   --sky:#070A12; --panel:#0D1220; --panel2:#111828; --inset:#0A0F1B;
   --line:#1C2434; --line2:#28324A;
-  --ink:#EAF0FA; --ink2:#93A0B8; --ink3:#54607A; --ink4:#39435C;
+  /* Measured against --panel: every other token in this palette clears WCAG AA text
+     (4.5:1), but the two dim tones did not — ink3 2.96:1 and ink4 1.90:1 — and ink4
+     carries the SMALLEST type on the deck (8-9px chart axis labels, 22 uses). Worst
+     pairing there is. The ramp shifts up one step: ink4 inherits ink3's exact former
+     value (2.96 -> the 3.0 graphical-object floor) and ink3 takes a new tone at
+     4.46:1, so the hierarchy between them is preserved rather than collapsed. */
+  --ink:#EAF0FA; --ink2:#93A0B8; --ink3:#6E7C9B; --ink4:#56627C;
   --brass:#D9A45B; --brass-hi:#EFC98A; --brass-dim:#8A6A3B;
   --ice:#4E8FD0; --ice-hi:#7FB3E8;
   --gain:#2FA97C; --gain-ink:#4CC996;
