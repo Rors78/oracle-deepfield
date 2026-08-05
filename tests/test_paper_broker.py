@@ -538,6 +538,33 @@ def test_lifecycle_book_flatten_at_tp_target(sim, monkeypatch):
         "flatten must clear its own flag once the book is confirmed flat"
 
 
+# ── run banner ───────────────────────────────────────────────────────────────
+
+def test_run_banner_records_what_the_run_means(caplog, monkeypatch):
+    """The log is append-only and never rotated, so one file holds every restart.
+    The banner is what lets a grep be scoped to a single run — and what says which
+    build produced the lines."""
+    from deepfield import app
+    monkeypatch.setattr(config, "EXEC_MODE", "paper")
+    monkeypatch.setattr(config, "PAPER_PORTFOLIO_USD", 200.0)
+    monkeypatch.setattr(config, "SIZE_MULT", 2.0)
+    with caplog.at_level("WARNING"):
+        app._run_banner()
+    line = "\n".join(r.getMessage() for r in caplog.records)
+    assert "RUN START" in line
+    for expect in ("exec=paper", "paper_equity=$200", "size_mult=2", "rails=", "db=", "pid="):
+        assert expect in line, f"banner missing {expect}: {line}"
+
+
+def test_run_banner_survives_a_broken_git(monkeypatch):
+    """_code_sha is best-effort. A banner must never be the thing that stops a
+    trading process from starting."""
+    from deepfield import app
+    monkeypatch.setattr(config, "PROJECT_ROOT", "/nonexistent/path/xyz")
+    assert app._code_sha() is None
+    app._run_banner()                       # must not raise
+
+
 # ── paper starting equity ────────────────────────────────────────────────────
 
 def test_paper_equity_env_fails_safe():

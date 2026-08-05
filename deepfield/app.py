@@ -969,10 +969,43 @@ async def _hourly_reconciler(ing):
             log.exception("hourly reconcile pass failed (will retry next hour)")
 
 
+def _code_sha():
+    """Short commit of the code actually running, or None. Best-effort and never
+    raises — this is a log banner, not a rail."""
+    try:
+        import subprocess
+        r = subprocess.run(["git", "-C", config.PROJECT_ROOT, "rev-parse", "--short", "HEAD"],
+                           capture_output=True, timeout=3, text=True)
+        return r.stdout.strip() or None if r.returncode == 0 else None
+    except Exception:
+        return None
+
+
+def _run_banner():
+    """Mark the start of a run, with the parameters that decide what it means.
+
+    The log is append-only and NEVER rotated (operator's standing rule), so one
+    file holds every restart. Without a boundary you cannot scope a grep to a run —
+    counting 'PAPER FILL' across a restart silently mixes two different books, and
+    with the code changing under it you cannot tell which build produced which
+    lines. One WARNING line per boot buys both, and costs nothing between them."""
+    bits = [f"exec={config.EXEC_MODE}", f"pid={os.getpid()}"]
+    sha = _code_sha()
+    if sha:
+        bits.append(f"code={sha}")
+    if config.EXEC_MODE != "live":
+        bits.append(f"paper_equity=${config.PAPER_PORTFOLIO_USD:g}")
+    bits += [f"size_mult={config.SIZE_MULT:g}",
+             f"rails={'on' if config.RAILS_ENABLED else 'OFF'}",
+             f"db={config.DB_PATH}"]
+    log.warning("═══ RUN START · deepfield v%s · %s", VERSION, " · ".join(bits))
+
+
 def _startup(debug, announce=False):
     """Shared by run_live and run_once: warm backfill -> DB -> startup sweep."""
     from . import broker
     setup_logging(debug=debug)
+    _run_banner()                          # first line of the run, before any work
     broker.setup_raw_log(config.LOG_DIR)   # RAW order req/resp -> its own audit file
     # Paper mode runs the FULL live code path against a simulated exchange. Attach it
     # before anything can place an order, so there is no window in which paper-mode
@@ -1152,6 +1185,8 @@ async def run_live(simple=False, debug=False):
         await asyncio.gather(*tasks, return_exceptions=True)
         _sys_journal(conn, "process stop — clean shutdown")
         conn.close()
+        # Pairs with the RUN START banner so a grep can bracket exactly one run.
+        log.warning("═══ RUN END · pid=%s · clean shutdown", os.getpid())
         log.info("DEEPFIELD stopped cleanly")
 
 
