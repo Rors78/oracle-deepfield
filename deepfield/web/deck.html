@@ -713,19 +713,29 @@ function arcPath(cx,cy,r,a0,a1){
   return `M ${x0.toFixed(2)} ${y0.toFixed(2)} A ${r} ${r} 0 ${large} 1 ${x1.toFixed(2)} ${y1.toFixed(2)}`;
 }
 function carryRow(h,rh){
-  // Rollover carry vs the rung harvest — the daily race that decides whether the
-  // book skims net-positive. fees_day is Kraken-ledger truth (hourly poll), not an
-  // estimate; fees_total accrues from fees_epoch (accounting anchor), NOT all-time.
-  if(h.fees_day==null) return "";
-  const net=(rh.today||0)-h.fees_day;
-  const since=h.fees_epoch
-    ?` since ${new Date(h.fees_epoch*1000).toLocaleDateString("en-US",{month:"short",day:"numeric"}).toLowerCase()}`
-    :"";
-  return `<div class="hv-carry" title="margin rollover paid (Kraken ledger truth) vs rungs banked — net skim today">
+  // The THREE terms that decide whether this strategy makes money, together.
+  //
+  // This row used to show carry vs harvest and stop there — two thirds of the
+  // picture, and it flattered the wrong comparison. On 2026-08-05 the live ledger
+  // read harvest +$2.96 (n=20), carry -$10.58, stops -$19.83 (n=65): stop churn was
+  // 6.7x the harvest and 1.9x the carry, i.e. the dominant cost, and the console
+  // never showed it. A "harvest vs carry" verdict computed off this row was being
+  // asked about the second- and third-largest terms.
+  const sl = S.stop_losses || {total:0, n:0, today:0, today_n:0};
+  const hasCarry = h.fees_day != null;
+  if(!hasCarry && !sl.n && !rh.n) return "";
+  const netToday = (rh.today||0) - (hasCarry?h.fees_day:0) + (sl.today||0);  // stops are already negative
+  const since = h.fees_epoch
+    ? ` since ${new Date(h.fees_epoch*1000).toLocaleDateString("en-US",{month:"short",day:"numeric"}).toLowerCase()}`
+    : "";
+  return `<div class="hv-carry" title="the three P&L terms: rungs banked, rollover paid, and stops taken — net today">
     <span class="ck">carry</span>
-    <span class="loss">−${fmt$(h.fees_day)}</span><span class="dim">today</span>
+    <span class="loss">${hasCarry?"−"+fmt$(h.fees_day):"—"}</span><span class="dim">today</span>
     ${h.fees_total!=null?`<span class="dim">· −${fmt$(h.fees_total)}${since}</span>`:""}
-    <span class="cnet ${cls(net)}">net ${fmtSigned(net)}</span></div>`;
+    <span class="ck" style="margin-left:6px">stops</span>
+    <span class="${sl.today<0?"loss":"dim"}">${sl.today_n?fmtSigned(sl.today):"—"}</span><span class="dim">today</span>
+    ${sl.n?`<span class="dim">· ${fmtSigned(sl.total)} · ${sl.n} lot${sl.n>1?"s":""}</span>`:""}
+    <span class="cnet ${cls(netToday)}">net ${fmtSigned(netToday)}</span></div>`;
 }
 function renderHarvest(h){
   // per-rung harvest strip (the primary engine since 07-29) — cycle gauge below

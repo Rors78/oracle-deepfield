@@ -451,7 +451,8 @@ def _assemble(conn):
     }
     return {"health": health, "regime": regime, "pairs": pairs,
             "journal": _journal(conn), "tp_cycles": _tp_cycles(conn),
-            "rung_harvest": _rung_harvest(conn, day0, mode), "v": VERSION,
+            "rung_harvest": _rung_harvest(conn, day0, mode),
+            "stop_losses": _stop_losses(conn, day0, mode), "v": VERSION,
             # W1: the client must KNOW when market data is frozen. data_age_s is
             # always sent (null only when no blob has ever been written).
             "data_stale": not fresh,
@@ -495,6 +496,24 @@ def _tp_cycles(conn, n=30):
                     "flows": (round(flows, 2) if flows is not None else None),
                     "profit": round(profit, 2), "note": note})
     return out
+
+
+def _stop_losses(conn, day0_iso, mode=None):
+    """Realized STOP losses — the third and largest term in this strategy's P&L.
+
+    The Harvest card showed banked rungs and rollover carry and stopped there, which
+    is two thirds of the picture and flatters the wrong comparison: on 2026-08-05 the
+    live ledger read harvest +$2.96 (n=20), carry -$10.58, and stop exits -$19.83
+    (n=65). Stops were 6.7x the harvest and 1.9x the carry — the dominant cost, and
+    the one the console never showed. Same shape and the same mode scoping as the
+    harvest aggregate beside it."""
+    try:
+        tot = store.realized_ledger_since(conn, "1970-01-01", kind="stop", mode=mode)
+        day = store.realized_ledger_since(conn, day0_iso, kind="stop", mode=mode)
+        return {"total": round(tot["total"], 4), "n": tot["n"],
+                "today": round(day["total"], 4), "today_n": day["n"]}
+    except Exception:
+        return {"total": 0.0, "n": 0, "today": 0.0, "today_n": 0}
 
 
 def _rung_harvest(conn, day0_iso, mode=None, n=6):
