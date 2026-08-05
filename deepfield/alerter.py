@@ -185,6 +185,14 @@ def fire_safety(kind, symbol, message, loud=None):
         quiet_kinds = tuple(getattr(config, "SAFETY_ALERT_QUIET_KINDS", ()) or ())
         if loud is None:
             loud = kind not in quiet_kinds
+        # A SIMULATED book must never page the operator. Paper safety events stay in
+        # the log and the journal — where the deck shows them — but make no sound and
+        # raise no popup. A phantom incident on a book that is not real trains the
+        # operator to distrust the channel; a full pytest run did exactly that on
+        # 2026-07-31, burying the desktop in critical recon-mismatch popups. Forced
+        # quiet rather than dropped, so paper still proves the routing works.
+        if getattr(config, "EXEC_MODE", "") == "paper":
+            loud = False
         throttle = float((getattr(config, "SAFETY_ALERT_THROTTLE_SECS", 1800) if loud
                           else getattr(config, "SAFETY_ALERT_QUIET_THROTTLE_SECS", 21600)) or 0)
         key = (kind, symbol or "*")

@@ -286,6 +286,31 @@ def test_paper_without_simulator_keeps_legacy_instant_fill(tmp_path):
     conn.close()
 
 
+# ── a simulated book must not page the operator ──────────────────────────────
+
+def test_paper_safety_alerts_are_forced_quiet(monkeypatch):
+    """Paper safety events stay in the log and journal but make no sound and raise
+    no popup — a phantom incident on a book that is not real trains the operator to
+    distrust the channel."""
+    from deepfield import alerter
+    monkeypatch.setattr(alerter, "_safety_last", {})
+    monkeypatch.setattr(config, "EXEC_MODE", "paper")
+    # 'unprotected' is a LOUD kind — the one most likely to fire during a paper run
+    r = alerter.fire_safety("unprotected", "BTC/USD", "naked leveraged long")
+    assert r["quiet"] is True and r["sound"] is None and r["notify"] is False
+
+
+def test_live_safety_alerts_stay_loud(monkeypatch):
+    """The mute is scoped to paper — live must still page exactly as before."""
+    from deepfield import alerter
+    monkeypatch.setattr(alerter, "_safety_last", {})
+    monkeypatch.setattr(config, "EXEC_MODE", "live")
+    fired = {}
+    monkeypatch.setattr(alerter, "play_alert", lambda: fired.setdefault("sound", "tier1"))
+    r = alerter.fire_safety("unprotected", "BTC/USD", "naked leveraged long")
+    assert r.get("quiet") is not True and fired.get("sound") == "tier1"
+
+
 # ── financing ────────────────────────────────────────────────────────────────
 
 def test_rollover_is_charged_on_open_notional(sim, monkeypatch):

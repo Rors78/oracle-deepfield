@@ -636,10 +636,15 @@ async def _exec_state_refresh(appstate, conn, ing, interval=15):
                 "AND stop_txid<>'' THEN 1 ELSE 0 END),0) FROM orders WHERE status='open'"
             ).fetchone()
             # Defense buffer engine (Wave 1): price-space liq telemetry +
-            # edge-triggered escalation. Live only (needs the real TradeBalance
-            # notional `v`); display/alert only, never gates or sizes an order.
+            # edge-triggered escalation. Needs a TradeBalance for the notional `v` —
+            # which the paper simulator now supplies, so the gate is the BALANCE, not
+            # the mode. It was `mode == "live"` from when only live reached here, and
+            # that left the Defense card's liq buffer / call buffer / effective
+            # leverage reading "—" for the entire paper session. Display/alert only,
+            # never gates or sizes an order; paper alerts are forced quiet in the
+            # alerter, so a simulated book cannot page anyone.
             defense_blob = None
-            if mode == "live" and balance:
+            if balance:
                 defense_blob = _run_defense(conn, balance, equity, margin_used, _t.time())
                 # Ratio-space watch alongside the price-space tiers above: the two
                 # measure different failure modes and can disagree (see docstring).

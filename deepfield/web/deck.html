@@ -573,9 +573,14 @@ function equityChart(h){
   const area=`${PL},${H-PB} ${pts} ${X(t1).toFixed(1)},${H-PB}`;
   const last=ser[ser.length-1][1];
   const refYs=[base,tgt].filter(v=>v!=null&&v>=lo&&v<=hi).map(Y);
+  // Whole dollars hide a quiet book: on a flat span every tick rounds to the same
+  // number and the axis reads "1000 / 1000 / 1000" — three identical labels that
+  // look broken and say nothing. That is the NORMAL state after any restart. Scale
+  // the precision to the span the axis actually covers.
+  const span=hi-lo, eqDec=span>=50?0:span>=5?1:span>=0.5?2:3;
   const ticks=[lo+pad, (lo+hi)/2, hi-pad].map(v=>{
     const y=Y(v), clash=refYs.some(ry=>Math.abs(ry-y)<11);
-    return `${clash?"":`<text x="${W-PR+7}" y="${(y+3).toFixed(1)}" fill="var(--ink4)" font-size="9" font-family="var(--mono)">${v.toFixed(0)}</text>`}
+    return `${clash?"":`<text x="${W-PR+7}" y="${(y+3).toFixed(1)}" fill="var(--ink4)" font-size="9" font-family="var(--mono)">${v.toFixed(eqDec)}</text>`}
      <line x1="${PL}" x2="${W-PR}" y1="${y.toFixed(1)}" y2="${y.toFixed(1)}" stroke="var(--line)" stroke-width="1"/>`; }).join("");
   const ref=(v,color,label,dy=0)=> (v==null||v<lo||v>hi)?"":
     `<line x1="${PL}" x2="${W-PR}" y1="${Y(v).toFixed(1)}" y2="${Y(v).toFixed(1)}" stroke="${color}" stroke-width="1" stroke-dasharray="3 4" opacity=".55"/>
@@ -835,9 +840,11 @@ function renderDefense(h){
   const st=h.stress||{};
   const lev=h.eff_leverage, levC=(st.lev_ceiling||4);
   const cells=[
-    ["liq buffer", h.buffer_liq_pct!=null?h.buffer_liq_pct.toFixed(1)+"%":"—",
+    // fmtPct, not toFixed(1): a light book pushes these into four digits, where a
+    // trailing decimal is noise ("2734.9%" reads worse than "2735%").
+    ["liq buffer", fmtPct(h.buffer_liq_pct),
       "price-space to forced liq", h.buffer_liq_pct==null?"":h.buffer_liq_pct>30?"gain":h.buffer_liq_pct>12?"warn":"loss"],
-    ["call buffer", h.buffer_call_pct!=null?h.buffer_call_pct.toFixed(1)+"%":"—",
+    ["call buffer", fmtPct(h.buffer_call_pct),
       "to margin call (ml 80)", h.buffer_call_pct==null?"":h.buffer_call_pct>25?"gain":h.buffer_call_pct>10?"warn":"loss"],
     ["stops", `${h.stops_covered??"—"}${h.harvesting?`+${h.harvesting}◆`:""}/${h.stops_total??"—"}`,
       h.harvesting?`protected · ${h.harvesting} harvesting`:"open lots protected",
