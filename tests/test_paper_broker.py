@@ -449,6 +449,46 @@ def test_live_safety_alerts_stay_loud(monkeypatch):
 
 # ── financing ────────────────────────────────────────────────────────────────
 
+def test_attach_reanchors_inherited_fee_accounting(tmp_path):
+    """A paper run is normally seeded by snapshotting the live DB (for its candle
+    history), which drags the LIVE fee-accounting anchors along. Left alone the deck
+    reports "carry since jul 19" for a ledger that started minutes ago. Attaching a
+    FRESH simulated book must re-anchor them to now."""
+    db = str(tmp_path / "seeded.db")
+    conn = store.connect(db)
+    store.meta_set(conn, "fees_epoch", "1784449954.0")     # 2026-07-19, from live
+    store.meta_set(conn, "fees_total", "10.579")
+    store.meta_set(conn, "fees_banked", "10.579")
+    conn.commit()
+    before = time.time()
+    paper_broker.attach(db)
+    try:
+        assert float(store.meta_get(conn, "fees_epoch")) >= before   # re-anchored
+        assert float(store.meta_get(conn, "fees_total")) == 0.0
+        assert float(store.meta_get(conn, "fees_banked")) == 0.0
+    finally:
+        paper_broker.detach()
+    conn.close()
+
+
+def test_reattach_does_not_rewrite_accumulated_paper_accounting(tmp_path):
+    """The re-anchor is guarded by the cash seed, so a RESTART must not wipe carry
+    the paper run has legitimately accumulated."""
+    db = str(tmp_path / "again.db")
+    conn = store.connect(db)
+    conn.commit()
+    paper_broker.attach(db); paper_broker.detach()
+    store.meta_set(conn, "fees_total", "3.25")             # accrued during the run
+    anchor = store.meta_get(conn, "fees_epoch")
+    paper_broker.attach(db)                                 # restart
+    try:
+        assert store.meta_get(conn, "fees_total") == "3.25"
+        assert store.meta_get(conn, "fees_epoch") == anchor
+    finally:
+        paper_broker.detach()
+    conn.close()
+
+
 def test_rollover_is_charged_on_open_notional(sim, monkeypatch):
     """Financing (~33%/yr) is the strategy's largest real cost — paper must carry
     it or every conclusion drawn from paper is wrong in the same direction."""

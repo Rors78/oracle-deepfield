@@ -133,6 +133,7 @@ def attach(db_path=None):
         if _state_get("cash") is None:
             _state_set("cash", float(config.PAPER_PORTFOLIO_USD))
             _state_set("deposits", float(config.PAPER_PORTFOLIO_USD))
+            _reanchor_fee_accounting()
         _conn.commit()
         _real_private = broker.private
         broker.private = _dispatch
@@ -140,6 +141,35 @@ def attach(db_path=None):
         log.warning("PAPER EXCHANGE attached — broker.private() is simulated; "
                     "no private Kraken endpoint will be contacted. cash=$%.2f",
                     _cash())
+
+
+def _reanchor_fee_accounting():
+    """A simulated exchange has NO history before it existed.
+
+    The normal way to seed a paper run is to snapshot the live DB, because that
+    carries hundreds of thousands of candles and saves re-backfilling the whole
+    roster over the shared public API. But the snapshot also carries `meta`, and the
+    rollover-fee accounting there is anchored to when LIVE accounting began. Left
+    alone the console reports "carry since jul 19" for a ledger that started
+    minutes ago — claiming weeks the simulation never lived through, and anchoring
+    every net-skim figure to a window that does not exist.
+
+    Re-anchor the whole fee/flow cursor set to now, once, when the exchange is first
+    seeded. Only ever runs on a FRESH simulated book (guarded by the cash seed), so a
+    restart never rewrites accounting the paper run has legitimately accumulated."""
+    # `meta` belongs to the bot, not the simulator. Attaching to a bare DB (unit
+    # tests, a scratch file) means there is no accounting to re-anchor — skip rather
+    # than assume the bot's schema exists.
+    if not _conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='meta'"
+                         ).fetchone():
+        return
+    now = time.time()
+    for k, v in (("fees_epoch", now), ("fees_cursor", now), ("flows_cursor", now),
+                 ("fees_banked", 0.0), ("fees_total", 0.0), ("fees_day", 0.0)):
+        _conn.execute("INSERT INTO meta(key,value) VALUES(?,?) "
+                      "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (k, str(v)))
+    log.info("PAPER: fee accounting re-anchored to now — a simulated exchange has "
+             "no carry history before it existed")
 
 
 def detach():
