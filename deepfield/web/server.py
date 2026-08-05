@@ -120,7 +120,29 @@ def _web_live(conn):
 
 # ── the ladder, straight from the orders table (same rows the TUI reads) ─────
 
-def _ladder(conn):
+
+def _active_mode(conn, live=None):
+    """Which book is this console showing?
+
+    A paper run is normally seeded by snapshotting the LIVE db (for its candle
+    history), so one file legitimately holds a live P&L ledger AND live paper rows.
+    Every aggregate below therefore has to say which one it means: on 2026-08-05 the
+    deck showed a $200 simulated book a harvest total of +$2.96 and a cycle ledger of
+    +$51.93 — every cent of it real-money history from a different book.
+
+    Prefer the bot's own persisted value, then infer from the most recent working
+    order, then the env. Same ladder the display badge already used; it is simply
+    resolved once now and applied to the queries too."""
+    live = live if live is not None else _web_live(conn)
+    mode = live.get("mode") if live.get("_fresh") else None
+    if not mode:
+        row = conn.execute("SELECT mode FROM orders WHERE status IN('open','pending') "
+                           "ORDER BY id DESC LIMIT 1").fetchone()
+        mode = (row[0] if row and row[0] else None) or config.EXEC_MODE
+    return mode
+
+
+def _ladder(conn, mode=None):
     by = {}
     # one shape for every symbol, whether it entered here via a fill or via a bare
     # resting bid — a pair whose last fill closed still has bids, and a half-built
@@ -132,7 +154,7 @@ def _ladder(conn):
     for oid, sym, vol, lev, entry, stop, txid, ctxid in conn.execute(
             "SELECT id,symbol,volume,leverage,entry,COALESCE(stop_prot,stop),"
             "stop_txid,close_txid FROM orders "
-            "WHERE status='open' ORDER BY symbol,id"):
+            "WHERE status='open' AND (? IS NULL OR mode=?) ORDER BY symbol,id", (mode, mode)):
         d = by.setdefault(sym, blank())
         # close_txid on an open row = mid-harvest (tp-rung) or mid-flatten: the
         # stop is OFF because a resting sell owns the exit — a deliberate state
@@ -144,7 +166,8 @@ def _ladder(conn):
         elif ctxid:
             d["harvesting"] += 1
     for sym, entry, vol in conn.execute(
-            "SELECT symbol,entry,volume FROM orders WHERE status='pending' ORDER BY symbol,id"):
+            "SELECT symbol,entry,volume FROM orders WHERE status='pending' "
+            "AND (? IS NULL OR mode=?) ORDER BY symbol,id", (mode, mode)):
         d = by.setdefault(sym, blank())
         d["pendings"].append({"price": entry, "vol": vol})   # every resting bid is real state
     for sym, d in by.items():
@@ -211,7 +234,8 @@ def _assemble(conn):
     # W7: per-pair tick ages (new blob key — absent in old blobs, degrade silently).
     # Ages were captured at blob-write time; add the blob's own age on top.
     tick_ages = live.get("tick_ages") or {}
-    ladder = _ladder(conn)
+    mode = _active_mode(conn, live)
+    ladder = _ladder(conn, mode)
     # Kraken ground-truth open P/L (written by the bot loop): per-pair `net`/`avg` marked
     # by Kraken itself. Freshness-gated like prices — a stale blob falls back to the
     # ledger recompute below. DISPLAY[sym]-keyed by our own sym, same as PAIR_LIST.
@@ -342,16 +366,17 @@ def _assemble(conn):
     wk0 = (now_utc - datetime.timedelta(days=now_utc.weekday())).replace(
         hour=0, minute=0, second=0, microsecond=0).isoformat()
     try:
-        rday = store.realized_pnl_since(conn, day0)
-        rweek = store.realized_pnl_since(conn, wk0)
+        rday = store.realized_pnl_since(conn, day0, mode)
+        rweek = store.realized_pnl_since(conn, wk0, mode)
     except Exception:
         rday = rweek = 0.0
     scov = conn.execute(
         "SELECT COUNT(*),COALESCE(SUM(CASE WHEN stop_txid IS NOT NULL AND stop_txid<>'' "
         "THEN 1 ELSE 0 END),0),COALESCE(SUM(CASE WHEN (stop_txid IS NULL OR stop_txid='') "
         "AND close_txid IS NOT NULL THEN 1 ELSE 0 END),0) "
-        "FROM orders WHERE status='open'").fetchone()
-    bid_count = conn.execute("SELECT COUNT(*) FROM orders WHERE status='pending'").fetchone()[0]
+        "FROM orders WHERE status='open' AND (? IS NULL OR mode=?)", (mode, mode)).fetchone()
+    bid_count = conn.execute("SELECT COUNT(*) FROM orders WHERE status='pending' "
+                             "AND (? IS NULL OR mode=?)", (mode, mode)).fetchone()[0]
     peak = _num(store.meta_get(conn, "peak_equity"))
     equity = live.get("equity") if live.get("_fresh") else None
     # daily SWING = equity now − equity at the day's first read (baseline written by the
@@ -369,11 +394,6 @@ def _assemble(conn):
     ghost = sorted(s for s, d in ladder.items() if d["fills"] and s not in DISPLAY)
     # exec mode: the web process doesn't inherit the bot's env var, so prefer the
     # bot's persisted value, then infer from what the live orders were placed under.
-    mode = live.get("mode") if live.get("_fresh") else None
-    if not mode:
-        row = conn.execute("SELECT mode FROM orders WHERE status IN('open','pending') "
-                           "ORDER BY id DESC LIMIT 1").fetchone()
-        mode = row[0] if row and row[0] else config.EXEC_MODE
 
     now_local = datetime.datetime.now(DENVER)
     dl, dp = _bar_countdown(conn, 1440)
@@ -431,7 +451,7 @@ def _assemble(conn):
     }
     return {"health": health, "regime": regime, "pairs": pairs,
             "journal": _journal(conn), "tp_cycles": _tp_cycles(conn),
-            "rung_harvest": _rung_harvest(conn, day0), "v": VERSION,
+            "rung_harvest": _rung_harvest(conn, day0, mode), "v": VERSION,
             # W1: the client must KNOW when market data is frozen. data_age_s is
             # always sent (null only when no blob has ever been written).
             "data_stale": not fresh,
@@ -477,7 +497,7 @@ def _tp_cycles(conn, n=30):
     return out
 
 
-def _rung_harvest(conn, day0_iso, n=6):
+def _rung_harvest(conn, day0_iso, mode=None, n=6):
     """Per-rung harvest aggregates + the most recent banks (exit='tp-rung',
     operator 2026-07-29 'build it at 4%'). KEPT SEPARATE from the tp_cycles
     ledger on purpose: a cycle's profit is settled-minus-baseline, so rung banks
@@ -485,15 +505,15 @@ def _rung_harvest(conn, day0_iso, n=6):
     ledgers would double-count. `pct` is the price-space gain on the rung's own
     basis (pnl / entry*vol), the number the 4% target is set in."""
     try:
-        total = store.realized_ledger_since(conn, "1970-01-01", kind="tp-rung")
-        today = store.realized_ledger_since(conn, day0_iso, kind="tp-rung")
+        total = store.realized_ledger_since(conn, "1970-01-01", kind="tp-rung", mode=mode)
+        today = store.realized_ledger_since(conn, day0_iso, kind="tp-rung", mode=mode)
         recent = []
         for sym, pnl, cts, entry, vol in conn.execute(
                 "SELECT symbol, CAST(json_extract(error,'$.pnl') AS REAL), "
                 "json_extract(error,'$.closed_ts'), entry, volume FROM orders "
                 "WHERE status='closed' AND json_valid(error)=1 "
-                "AND json_extract(error,'$.exit')='tp-rung' "
-                "ORDER BY json_extract(error,'$.closed_ts') DESC LIMIT ?", (n,)):
+                "AND json_extract(error,'$.exit')='tp-rung' AND (? IS NULL OR mode=?) "
+                "ORDER BY json_extract(error,'$.closed_ts') DESC LIMIT ?", (mode, mode, n)):
             try:
                 dt = datetime.datetime.fromisoformat(cts)
                 if dt.tzinfo is None:
@@ -512,8 +532,8 @@ def _rung_harvest(conn, day0_iso, n=6):
                 "SELECT json_extract(error,'$.closed_ts'), "
                 "CAST(json_extract(error,'$.pnl') AS REAL), symbol FROM orders "
                 "WHERE status='closed' AND json_valid(error)=1 "
-                "AND json_extract(error,'$.exit')='tp-rung' "
-                "ORDER BY json_extract(error,'$.closed_ts') DESC LIMIT 400"):
+                "AND json_extract(error,'$.exit')='tp-rung' AND (? IS NULL OR mode=?) "
+                "ORDER BY json_extract(error,'$.closed_ts') DESC LIMIT 400", (mode, mode)):
             try:
                 dt = datetime.datetime.fromisoformat(cts)
                 if dt.tzinfo is None:
@@ -527,8 +547,8 @@ def _rung_harvest(conn, day0_iso, n=6):
                   for s, t, n in conn.execute(
                       "SELECT symbol, SUM(CAST(json_extract(error,'$.pnl') AS REAL)), "
                       "COUNT(*) FROM orders WHERE status='closed' AND json_valid(error)=1 "
-                      "AND json_extract(error,'$.exit')='tp-rung' "
-                      "GROUP BY symbol ORDER BY 2 DESC LIMIT 6")]
+                      "AND json_extract(error,'$.exit')='tp-rung' AND (? IS NULL OR mode=?) "
+                      "GROUP BY symbol ORDER BY 2 DESC LIMIT 6", (mode, mode))]
         return {"total": round(total["total"], 4), "n": total["n"], "wins": total["wins"],
                 "today": round(today["total"], 4), "today_n": today["n"], "recent": recent,
                 "series": series, "by_sym": by_sym}

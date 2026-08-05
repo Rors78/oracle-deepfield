@@ -221,8 +221,8 @@ class Executor:
         day0 = now.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
         wk0 = (now - datetime.timedelta(days=now.weekday())).replace(
             hour=0, minute=0, second=0, microsecond=0).isoformat()
-        dpl = store.realized_pnl_since(self.conn, day0)
-        wpl = store.realized_pnl_since(self.conn, wk0)
+        dpl = store.realized_pnl_since(self.conn, day0, self.mode)
+        wpl = store.realized_pnl_since(self.conn, wk0, self.mode)
         if dpl <= -config.DAILY_LOSS_LIMIT_USD:
             return False, f"daily loss limit (${dpl:.2f} <= -${config.DAILY_LOSS_LIMIT_USD})"
         if wpl <= -config.WEEKLY_LOSS_LIMIT_USD:

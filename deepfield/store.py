@@ -345,7 +345,7 @@ def has_pending_entry(conn, symbol, mode=None):
     ).fetchone() is not None
 
 
-def realized_pnl_since(conn, since_iso):
+def realized_pnl_since(conn, since_iso, mode=None):
     """Realized P&L for positions CLOSED since `since_iso`. Buckets by the close time
     (error.closed_ts), NOT the entry ts — the daily/weekly loss caps ask "how much did
     I lose since day0/wk0", a realization-date question (a trade entered days ago and
@@ -359,6 +359,13 @@ def realized_pnl_since(conn, since_iso):
     a plain-text row is simply skipped — matching the documented 'contributes
     nothing' intent instead of exploding.
 
+
+    MODE-SCOPED (2026-08-05). A paper run is normally seeded by snapshotting the live
+    DB, so one file holds a live P&L ledger AND live paper rows — and this feeds the
+    LOSS RAILS. Unscoped, a paper book's daily cap would count real-money stop losses
+    (and vice versa). Default None keeps the old unscoped behaviour for any caller
+    that has not opted in.
+
     STOP EXITS ONLY, deliberately. This feeds the daily/weekly loss-limit rails, whose
     question is "how much did the stops take out of me" — the flatten is a harvest, not
     a loss event, and the tp_cycles ledger already books it against the baseline. Once
@@ -368,13 +375,14 @@ def realized_pnl_since(conn, since_iso):
     row = conn.execute(
         "SELECT COALESCE(SUM(CAST(json_extract(error,'$.pnl') AS REAL)),0) FROM orders "
         "WHERE status='closed' AND json_valid(error)=1 "
-        "AND json_extract(error,'$.exit')='stop' AND json_extract(error,'$.closed_ts') >= ?",
-        (since_iso,),
+        "AND json_extract(error,'$.exit')='stop' AND json_extract(error,'$.closed_ts') >= ? "
+        "AND (? IS NULL OR mode=?)",
+        (since_iso, mode, mode),
     ).fetchone()
     return row[0] if row else 0.0
 
 
-def realized_ledger_since(conn, since_iso, kind=None):
+def realized_ledger_since(conn, since_iso, kind=None, mode=None):
     """The per-lot realized track record: every priced exit (stop AND tp-flatten), the
     thing win-rate / expectancy / profit-factor are computed from. `kind` filters to one
     exit type; None means all. Returns {'n','total','wins','losses','avg'} — zeros on an
@@ -389,8 +397,9 @@ def realized_ledger_since(conn, since_iso, kind=None):
         "FROM orders WHERE status='closed' AND json_valid(error)=1 "
         "  AND json_extract(error,'$.pnl') IS NOT NULL "
         "  AND json_extract(error,'$.closed_ts') >= ? "
-        "  AND (? IS NULL OR json_extract(error,'$.exit') = ?)",
-        (since_iso, kind, kind),
+        "  AND (? IS NULL OR json_extract(error,'$.exit') = ?) "
+        "  AND (? IS NULL OR mode = ?)",
+        (since_iso, kind, kind, mode, mode),
     ).fetchone()
     n, total, wins = (row[0] or 0), (row[1] or 0.0), (row[2] or 0)
     return {"n": n, "total": total, "wins": wins, "losses": n - wins,
