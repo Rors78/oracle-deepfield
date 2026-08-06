@@ -581,7 +581,10 @@ async def _exec_state_refresh(appstate, conn, ing, interval=15):
             else:
                 equity = config.PAPER_PORTFOLIO_USD
                 free_margin, margin_used = equity, 0.0
-            rails_ok, reason = ex.rails_ok(equity) if ex else (True, "")
+            rails_detail = ex.rails_detail(equity) if ex else None
+            rails_ok, reason = ((rails_detail["ok"], rails_detail["reason"])
+                                if rails_detail else (True, ""))
+            rails_block_since = _track_rails_block(conn, rails_ok, reason)
             positions = [
                 {"symbol": r[0], "entry": r[1], "stop": r[2], "volume": r[3],
                  "leverage": r[4], "margin": r[5], "mode": r[6]}
@@ -649,10 +652,14 @@ async def _exec_state_refresh(appstate, conn, ing, interval=15):
                 # Ratio-space watch alongside the price-space tiers above: the two
                 # measure different failure modes and can disagree (see docstring).
                 _check_margin_level(conn, balance)
+                # Did equity move because the book moved, or because money changed
+                # POCKETS? The kill switch cannot tell the difference (2026-08-05).
+                _check_collateral_shift(conn, balance)
             appstate.exec = {
                 "mode": mode, "equity": equity, "open_count": len(positions),
                 "positions": positions, "pending": pending,
                 "rails_ok": rails_ok, "rails_reason": reason,
+                "rails_detail": rails_detail, "rails_block_since": rails_block_since,
                 "halt": os.path.exists(config.HALT_FILE), "updated": _t.time(),
                 "balance": balance, "margin_used": margin_used, "free_margin": free_margin,
                 "by_pair": _build_by_pair(conn, appstate),
@@ -765,6 +772,132 @@ def _run_defense(conn, balance, equity, margin_used, now):
 
 
 _ml_worst_bucket = None   # worst 5-point margin-level bucket paged since the last recovery
+
+
+def _track_rails_block(conn, rails_ok, reason):
+    """Put a CLOCK on a blocking rail, and announce the moment the bot goes inert.
+
+    2026-08-05: two consecutive boots ran with the kill switch down. Every entry and
+    every ladder rung was refused for the whole of both runs, and the only trace was
+    an INFO line per symbol per cycle — indistinguishable, in a busy log, from the
+    bot working normally. The operator restarted twice into a frozen bot.
+
+    A standing block is a chronic STATE and re-paging it on a timer is the exact
+    habit SAFETY_ALERT_QUIET_KINDS exists to break. But CROSSING INTO inert is an
+    event, and nothing announced it. So this fires once, only after the block has
+    stood for RAILS_INERT_ALERT_MINS — short blocks are ordinary (MAX_OPEN breathes
+    as rungs fill and close) and a one-cycle block is not news. The ordinary
+    per-kind throttle governs everything after.
+
+    The clock is persisted in `meta`, not held in memory, so it survives the
+    restarts — which matters more than usual here, because restarting is precisely
+    what the operator does when the bot looks wrong. An in-memory clock would have
+    reset on both of those boots and never reached the threshold.
+
+    Returns the ISO instant the current block began, or None when rails are clear.
+    NEVER raises into the poll loop."""
+    try:
+        if rails_ok:
+            if store.meta_get(conn, "rails_block_since", None):
+                store.meta_set(conn, "rails_block_since", "")
+                store.meta_set(conn, "rails_block_alerted", "")
+                log.warning("RAILS CLEAR — entries and ladder rungs live again")
+            return None
+
+        since = store.meta_get(conn, "rails_block_since", None) or ""
+        now = datetime.datetime.now(datetime.timezone.utc)
+        if not since:
+            store.meta_set(conn, "rails_block_since", now.isoformat())
+            log.warning("RAILS BLOCKING — no new entries, no ladder rungs: %s", reason)
+            return now.isoformat()
+
+        try:
+            started = datetime.datetime.fromisoformat(since)
+            if started.tzinfo is None:
+                started = started.replace(tzinfo=datetime.timezone.utc)
+            mins = (now - started).total_seconds() / 60.0
+        except (TypeError, ValueError):
+            # Unparseable stamp: re-anchor rather than alerting off a bad clock.
+            store.meta_set(conn, "rails_block_since", now.isoformat())
+            return now.isoformat()
+
+        if (mins >= float(getattr(config, "RAILS_INERT_ALERT_MINS", 30))
+                and not store.meta_get(conn, "rails_block_alerted", None)):
+            store.meta_set(conn, "rails_block_alerted", now.isoformat())
+            hrs = mins / 60.0
+            span = f"{mins:.0f} min" if mins < 90 else f"{hrs:.1f}h"
+            alerter.fire_safety(
+                "rails-inert", "—",
+                f"bot has bought NOTHING for {span} — {reason}")
+            log.warning("RAILS INERT %s — %s", span, reason)
+        return since
+    except Exception:
+        log.exception("rails block tracking failed (non-fatal)")
+        return None
+
+
+def _check_collateral_shift(conn, balance):
+    """Name a PHANTOM DRAWDOWN: equity falling because money changed pockets.
+
+    2026-08-05, the incident behind this. Kraken reported eb $225.30 (the whole
+    account) against tb $173.83 (the margin-collateral subset). Equity is derived
+    from tb, so it read $173.87 — a $51.47 fall with no trade, no loss and no
+    ledger flow. The kill switch measures equity against peak and cannot tell those
+    apart, so it fired, and the bot bought nothing for two entire boots.
+
+    The existing flow-shift (external_flows_since) does not cover this. It walks
+    Ledgers for `deposit` and `withdrawal` ONLY, and a collateral-composition change
+    is neither: the money never left the account, it merely stopped being accepted
+    as margin. So peak_equity is never shifted and the drop reads as pure drawdown.
+
+    REPORTS, DOES NOT CORRECT — deliberately. Auto-shifting peak by the collateral
+    delta would be wrong and dangerous: tb also moves when a non-USD collateral
+    holding is REVALUED, and that is a genuine drawdown. Silently absorbing it would
+    disarm the kill switch exactly when it should fire. So this makes the operator's
+    invisible problem visible and leaves the decision (clear peak_equity or not)
+    with him.
+
+    Quiet by design: a standing gap is a chronic STATE. Only a CHANGE in the gap is
+    news, and only one worth more than a dollar. Never raises into the poll loop."""
+    try:
+        def _f(k):
+            try:
+                v = balance.get(k) if balance else None
+                return float(v) if v not in (None, "") else None
+            except (TypeError, ValueError, AttributeError):
+                return None
+        eb, tb = _f("eb"), _f("tb")
+        if eb is None or tb is None:
+            return None
+        gap = eb - tb
+        prev = store.meta_get(conn, "collateral_gap", None)
+        try:
+            prev = float(prev) if prev not in (None, "") else None
+        except (TypeError, ValueError):
+            prev = None
+        store.meta_set(conn, "collateral_gap", round(gap, 4))
+        if prev is None or abs(gap - prev) < 1.0:
+            return round(gap, 2)
+
+        delta = gap - prev
+        if delta > 0:
+            # Money left the collateral pool: equity drops, the book did nothing.
+            msg = (f"${delta:,.2f} left MARGIN COLLATERAL — equity falls by that much "
+                   f"with no trade and no loss. Account ${eb:,.2f}, collateral "
+                   f"${tb:,.2f}. The kill switch reads this as drawdown.")
+        else:
+            msg = (f"${abs(delta):,.2f} returned to margin collateral — equity rises "
+                   f"with no trading gain. Account ${eb:,.2f}, collateral ${tb:,.2f}.")
+        log.warning("COLLATERAL SHIFT: %s", msg)
+        try:
+            store.journal(conn, "collateral-shift", "—", msg)
+        except Exception:
+            pass                      # journaling is a nicety; the log line is the record
+        alerter.fire_safety("collateral-shift", "—", msg, loud=False)
+        return round(gap, 2)
+    except Exception:
+        log.exception("collateral shift check failed (non-fatal)")
+        return None
 
 
 def _check_margin_level(conn, balance):
@@ -963,6 +1096,11 @@ def _persist_web_live(conn, appstate, equity, margin_used, free_margin, balance)
         # per-pair map so the dashboard shows what Kraken shows, not a ledger recompute.
         "open_pnl": _finite(appstate.exec.get("open_pnl")),
         "kr_pos": appstate.exec.get("kr_pos") or {},
+        # Per-rail headroom + the clock on a standing block. The deck could always
+        # have read rails_ok from appstate; it never did, and a bot frozen on the
+        # kill switch for two boots looked perfectly healthy (2026-08-05).
+        "rails": appstate.exec.get("rails_detail"),
+        "rails_block_since": appstate.exec.get("rails_block_since"),
     }
     store.meta_set(conn, "web_live", _json.dumps(blob))
     if equity is not None:

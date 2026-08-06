@@ -208,6 +208,47 @@ main>*, .row1>*, .row3>*, .side>*{min-width:0}
 .tier-NOMINAL{color:var(--gain-ink); border-color:rgba(47,169,124,.5); background:rgba(47,169,124,.07)}
 .tier-CAUTION{color:var(--warn-ink); border-color:rgba(186,139,50,.55); background:rgba(186,139,50,.08)}
 .tier-CRITICAL{color:var(--loss-ink); border-color:rgba(216,80,107,.6); background:rgba(216,80,107,.08); animation:breathe 1.6s infinite}
+/* ── THE RAILS ────────────────────────────────────────────────────────────────
+   Can the bot buy at all? On 2026-08-05 the answer was NO for two entire boots
+   and this console said nothing — rails_ok reached appstate the whole time and
+   the deck simply never read it. The operator restarted twice into a frozen bot.
+
+   Deliberately ASYMMETRIC. Clear is the overwhelmingly common case and gets one
+   quiet line that a reader can skip; a rail closing goes amber; blocking goes red,
+   breathes, and opens the per-rail detail unasked. A strip that looked the same
+   either way would just be the old silence in a nicer font. */
+.railstrip{
+  display:flex; align-items:center; gap:10px; flex-wrap:wrap;
+  border:1px solid var(--line); background:var(--inset); border-radius:var(--r);
+  padding:7px 12px; margin-bottom:12px; font-size:11.5px;
+}
+.railstrip.clear{opacity:.72}
+.railstrip.tight{border-color:rgba(186,139,50,.45); background:rgba(186,139,50,.05)}
+.railstrip.blocked{border-color:rgba(216,80,107,.55); background:rgba(216,80,107,.06);
+  animation:breathe 1.6s infinite; opacity:1}
+.railbadge{
+  font-family:var(--mono); font-size:9.5px; letter-spacing:.22em; padding:3px 9px 2px;
+  border-radius:5px; border:1px solid; flex:none; white-space:nowrap;
+}
+.rb-CLEAR{color:var(--gain-ink); border-color:rgba(47,169,124,.45); background:rgba(47,169,124,.06)}
+.rb-TIGHT{color:var(--warn-ink); border-color:rgba(186,139,50,.5); background:rgba(186,139,50,.07)}
+.rb-BLOCKED,.rb-HALTED{color:var(--loss-ink); border-color:rgba(216,80,107,.6); background:rgba(216,80,107,.08)}
+.railwhy{flex:1; min-width:0; color:var(--ink2)}
+.railwhy b{color:var(--ink)}
+.railsince{font-family:var(--mono); font-size:10.5px; color:var(--loss-ink); flex:none}
+/* Per-rail headroom. auto-fit so four rails reflow to two and then one on a phone
+   rather than crushing "open positions" into a column of single characters. */
+.railbars{display:grid; grid-template-columns:repeat(auto-fit,minmax(148px,1fr));
+  gap:7px; width:100%; margin-top:2px}
+.railbar{border:1px solid var(--line); background:var(--panel); border-radius:6px; padding:5px 8px 6px}
+.railbar .rn{font-size:8.5px; letter-spacing:.16em; text-transform:uppercase; color:var(--ink3)}
+.railbar .rv{font-family:var(--mono); font-size:11px; color:var(--ink); margin-top:1px}
+.railbar .rt{height:3px; border-radius:2px; background:rgba(255,255,255,.07); margin-top:4px; overflow:hidden}
+.railbar .rf{height:100%; border-radius:2px; background:var(--gain); transition:width .4s}
+.railbar.tight .rf{background:var(--warn)}
+.railbar.firing .rf{background:var(--loss)}
+.railbar.firing .rv{color:var(--loss-ink)}
+.railbar .rd{font-family:var(--mono); font-size:9px; color:var(--ink4); margin-top:3px}
 .runway{margin:6px 0 12px}
 /* auto-fit, not repeat(3,1fr): three fixed columns squeeze each cell to ~110px on a
    phone, wrapping "price-space to forced liq" into four lines. Reflows 3 -> 2 -> 1. */
@@ -435,6 +476,13 @@ footer .reg{color:var(--ink2)}
 <div class="errbar" id="renderbar" role="alert"></div>
 
 <main>
+  <div class="railstrip clear" id="railstrip" style="display:none">
+    <span class="railbadge rb-CLEAR" id="railbadge">CLEAR</span>
+    <span class="railwhy" id="railwhy"></span>
+    <span class="railsince" id="railsince"></span>
+    <div class="railbars" id="railbars" style="display:none"></div>
+  </div>
+
   <section class="row1">
     <article class="card capital rise" style="animation-delay:.02s">
       <div class="eyebrow">Capital <span class="aux" id="cap-aux"></span></div>
@@ -688,6 +736,85 @@ $("eqwin").addEventListener("click",e=>{
   document.querySelectorAll("#eqwin button").forEach(x=>x.classList.toggle("on",x===b));
   refreshEq();
 });
+// ── THE RAILS ────────────────────────────────────────────────────────────────
+// Answers the one question this console could not answer on 2026-08-05: can the
+// bot buy anything at all? It ran two full boots with the kill switch down —
+// every entry and every ladder rung refused — while every card here looked fine.
+function railAge(iso){
+  if(!iso) return null;
+  const t=Date.parse(iso);
+  if(!isFinite(t)) return null;
+  const m=(Date.now()-t)/60000;
+  if(m<0) return null;                       // clock skew — say nothing, not a lie
+  if(m<90) return `${Math.round(m)} min`;
+  const hrs=m/60;
+  return hrs<48 ? `${hrs.toFixed(1)}h` : `${(hrs/24).toFixed(1)}d`;
+}
+function renderRails(h){
+  const strip=$("railstrip"), bars=$("railbars"), r=h.rails;
+  // An OLD bot blob has no `rails` key. Hide the strip rather than inventing a
+  // verdict — a green CLEAR badge fabricated from missing data is precisely the
+  // false reassurance this whole instrument exists to remove.
+  if(!r){ strip.style.display="none"; return; }
+  strip.style.display="flex";
+
+  const halted=!!(r.halt||h.halt), blocked=!r.ok;
+  const rails=Array.isArray(r.rails)?r.rails:[];
+  const RAILS_TIGHT_PCT=(typeof r.tight_pct==="number")?r.tight_pct:15;
+  // "Tight" only means something when the rails are actually being applied; with
+  // RAILS_ENABLED off there are no measurements at all (rails[] is empty).
+  const tight=!blocked && rails.some(x=>x.pct!=null && x.pct<=RAILS_TIGHT_PCT);
+  const state=halted?"HALTED":blocked?"BLOCKED":tight?"TIGHT":"CLEAR";
+  $("railbadge").textContent=state;
+  $("railbadge").className="railbadge rb-"+(state==="HALTED"?"HALTED":state);
+  strip.className="railstrip "+(blocked||halted?"blocked":tight?"tight":"clear");
+
+  const why=$("railwhy");
+  if(halted)
+    why.innerHTML=`<b>halted by hand</b> — the HALT file is present; no entries, no ladder rungs`;
+  else if(blocked)
+    why.innerHTML=`<b>buying nothing</b> — ${esc(r.reason||"rails blocking")}`;
+  else if(!r.enabled)
+    why.innerHTML=`<span class="dim">auto-rails disabled — only the HALT file can stop entries</span>`;
+  else if(tight){
+    const n=rails.filter(x=>x.pct!=null&&x.pct<=RAILS_TIGHT_PCT)
+                 .sort((a,b)=>a.pct-b.pct)[0];
+    why.innerHTML=`clear to buy — but <b>${esc(n.name)}</b> is `
+      +`${n.pct.toFixed(1)}% from firing`;
+  } else why.innerHTML=`<span class="dim">clear to buy — all rails green</span>`;
+
+  const age=railAge(h.rails_block_since);
+  $("railsince").textContent=(blocked&&age)?`frozen ${age}`:"";
+
+  // Per-rail headroom, opened unasked when it matters. The kill switch sat 2.6%
+  // from firing before it fired; these bars are where that would have shown.
+  if(!rails.length || (!blocked && !halted && !tight)){ bars.style.display="none"; return; }
+  bars.style.display="grid";
+  bars.innerHTML=rails.map(x=>{
+    const pct=x.pct==null?null:Math.max(0,Math.min(100,x.pct));
+    const cls=x.blocking?"firing":(pct!=null&&pct<=RAILS_TIGHT_PCT?"tight":"");
+    // Counts are integers; every other rail is money. The loss rails carry a
+    // NEGATIVE limit, and fmt$ is absolute — rendering "-$12.40 / $15.00" through
+    // it would print "$12.40 / $15.00" and quietly turn a loss into a gain, so
+    // signed money goes through fmtSigned. Unmeasurable stays "—".
+    const count=(x.name==="open positions");
+    const signed=(x.limit!=null&&x.limit<0);
+    const num=v=>v==null?"—":count?String(v):(signed?fmtSigned(v):fmt$(v));
+    const val=num(x.used), lim=num(x.limit);
+    // Blocking outranks unmeasurable: the equity-unreadable case is a RED bar that
+    // would otherwise read "not measurable" while being the very rail stopping the
+    // bot. It is not FIRING on a threshold either — it blocks without a number.
+    const head=x.blocking
+      ? (pct==null?"BLOCKING":"FIRING")
+      : (pct==null?`<span class="dim">not measurable</span>`:`${pct.toFixed(1)}% headroom`);
+    return `<div class="railbar ${cls}">
+      <div class="rn">${esc(x.name)}</div>
+      <div class="rv">${val} <span class="dim">/ ${lim}</span></div>
+      <div class="rt"><div class="rf" style="width:${pct==null?0:pct}%"></div></div>
+      <div class="rd">${head}${x.note?" · "+esc(x.note):""}</div>
+    </div>`;
+  }).join("");
+}
 function renderCapital(h){
   const eqLive=h.equity!=null, eq=eqLive?h.equity:h.peak;
   // Never assert Kraken provenance for a number Kraken did not produce: in paper the
@@ -880,7 +1007,12 @@ function mlX(v){ // piecewise: 40→4% · 80→16% · 120→34% · 200→50% · 
 function renderDefense(h){
   const tier=h.defense_tier||"—";
   const tb=$("tierbadge"); tb.textContent=tier; tb.className="tierbadge tier-"+(tier||"NOMINAL");
-  $("tiernote").textContent=tier==="NOMINAL"?"all rails green":tier==="CAUTION"?"buffer thinning":tier==="CRITICAL"?"deleverage territory":"";
+  // NOT "all rails green" any more. Defense measures PRICE-SPACE distance to
+  // liquidation; the rails strip measures whether the executor may buy at all, and
+  // the two genuinely disagree — during the 2026-08-05 freeze the buffer was wide
+  // open while every entry was refused. Two instruments both claiming "rails" left
+  // the deck contradicting itself in adjacent cards. Defense speaks of the buffer.
+  $("tiernote").textContent=tier==="NOMINAL"?"liq buffer healthy":tier==="CAUTION"?"buffer thinning":tier==="CRITICAL"?"deleverage territory":"";
   // recon is three-state truth: ✓, MISMATCH (named per pair), or UNVERIFIED.
   // A null must read as amber doubt — a blank badge is indistinguishable from ✓.
   const rbad=reconBad(h);
@@ -1645,7 +1777,7 @@ async function fetchState(){
     // others, and must NEVER be reported as "API disconnected" — that banner
     // means the feed is unreachable, nothing else. A thrown render is logged
     // and named on screen so the failure is visible instead of silent.
-    [["mast",()=>renderMast(h)],["capital",()=>renderCapital(h)],
+    [["mast",()=>renderMast(h)],["rails",()=>renderRails(h)],["capital",()=>renderCapital(h)],
      ["harvest",()=>renderHarvest(h)],["defense",()=>renderDefense(h)],
      ["field",renderField],["stress",()=>renderStress(h)],
      ["book",unlessSelected("booktable",renderBook)],

@@ -661,6 +661,24 @@ WEEKLY_LOSS_LIMIT_USD = 35.0
 KILL_SWITCH_DD_PCT = 0.20           # halt at 20% drawdown from peak equity (manual reset)
 HALT_FILE = os.path.join(PROJECT_ROOT, "deepfield.HALT_ENTRIES")  # touch to halt / rm to resume
 
+# 2026-08-05: a rail that blocks is INVISIBLE, and that is its own hazard. The bot
+# ran two consecutive boots with the kill switch down — every entry and every rung
+# refused — while the console showed a perfectly healthy book. The operator restarted
+# twice into a frozen bot because nothing said "frozen". `rails_ok` had the answer the
+# whole time and it reached appstate.exec; the deck simply never read it.
+#
+# A blocked rail is a STATE, so re-paging it on a timer is exactly the training-to-
+# ignore problem SAFETY_ALERT_QUIET_KINDS exists to prevent. But GOING inert is an
+# EVENT, and that event was never announced. So: one loud alert after the block has
+# persisted this long (short blocks are normal — MAX_OPEN breathes as rungs fill and
+# close, and a one-cycle block is not news), then the ordinary throttle takes over.
+RAILS_INERT_ALERT_MINS = 30
+
+# Headroom below which a rail is "closing" on the deck. The kill switch sat 2.6% from
+# firing before it fired; at 15% the strip would have been amber for days beforehand.
+# Warning-only — nothing in the money path reads this.
+RAILS_TIGHT_PCT = 15.0
+
 # Per-pair leverage — a FIXED hardcoded value Kraken must accept verbatim (it must
 # be present in the pair's leverage_buy array). Sent exactly as-is on every order,
 # hydra-style. Verified 2026-07-04 == max Kraken leverage_buy per pair. HARDCODED TO

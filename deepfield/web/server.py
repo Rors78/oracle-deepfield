@@ -429,6 +429,12 @@ def _assemble(conn):
         "balance_total": live.get("balance_total") if live.get("_fresh") else None,
         "balance_trade": live.get("balance_trade") if live.get("_fresh") else None,
         "margin_level": live.get("margin_level") if live.get("_fresh") else None,
+        # Whether the bot can buy AT ALL, per-rail headroom, and how long a block has
+        # stood. NOT gated on _fresh: a stale block is still a block, and blanking it
+        # would restore exactly the silence this was built to end. The deck ages the
+        # reading off `updated` instead.
+        "rails": live.get("rails"),
+        "rails_block_since": live.get("rails_block_since"),
         "capacity": live.get("capacity") if live.get("_fresh") else None,
         "equity_series": _equity_series(conn),
         "recon_ok": recon.get("ok"), "recon_time": recon.get("time"),

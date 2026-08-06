@@ -229,6 +229,93 @@ class Executor:
             return False, f"weekly loss limit (${wpl:.2f} <= -${config.WEEKLY_LOSS_LIMIT_USD})"
         return True, "ok"
 
+    def rails_detail(self, equity):
+        """Every rail's HEADROOM, not just the verdict — telemetry for the console.
+
+        `rails_ok` answers one question ("may I trade?") and short-circuits on the
+        first rail that says no, which is right for the money path and useless for
+        watching. It cannot tell you that the kill switch is 2.6% away, or which of
+        the four rails is nearest, or that a block has been standing for two hours.
+        On 2026-08-05 the bot ran two entire boots inert on the kill switch and the
+        console showed a healthy book throughout.
+
+        DELIBERATELY NOT a refactor of `rails_ok`. That method decides whether real
+        money moves; this one draws a picture. Folding them together would put a
+        display concern in the trade path and make every future display tweak a
+        money-path change. The cost of two implementations is drift, so
+        test_rails_detail_agrees_with_rails_ok pins them across a scenario matrix —
+        if they ever disagree on the verdict, the suite fails.
+
+        Returns {ok, reason, halt, enabled, tight_pct, rails:[...]} where each rail
+        carries used/limit/headroom/pct and `blocking`. `pct` is headroom as a
+        percentage of the limit: 100 = untouched, 0 = firing. None where a rail is
+        unmeasurable (no peak yet, equity unknown) — a missing measurement must
+        never render as a comfortable one."""
+        halt = os.path.exists(config.HALT_FILE)
+        ok, reason = self.rails_ok(equity)
+        detail = {"ok": ok, "reason": reason, "halt": halt,
+                  "enabled": bool(config.RAILS_ENABLED), "rails": [],
+                  # Travels WITH the data so the console never keeps its own copy of
+                  # the threshold to drift out of step with config.
+                  "tight_pct": float(getattr(config, "RAILS_TIGHT_PCT", 15.0))}
+        if halt or not config.RAILS_ENABLED:
+            # Both short-circuit every automatic rail in rails_ok, so reporting
+            # per-rail headroom here would describe limits that are not being
+            # applied. Say that plainly instead of drawing four reassuring bars.
+            return detail
+
+        def _rail(name, used, limit, note, blocking, invert=False):
+            """headroom: how much room is left before this rail fires. `invert` is
+            for rails measured as a FLOOR (equity, P&L) rather than a ceiling."""
+            head = pct = None
+            if used is not None and limit is not None:
+                head = (used - limit) if invert else (limit - used)
+                span = abs(limit) if limit else None
+                pct = max(0.0, min(100.0, 100.0 * head / span)) if span else None
+            detail["rails"].append({
+                "name": name, "used": used, "limit": limit, "headroom": head,
+                "pct": pct, "note": note, "blocking": bool(blocking)})
+
+        # 1. kill switch — equity vs a floor under peak. The rail that fired.
+        try:
+            peak = float(store.meta_get(self.conn, "peak_equity", 0) or 0)
+        except (TypeError, ValueError):
+            peak = 0.0
+        floor = peak * (1 - config.KILL_SWITCH_DD_PCT) if peak > 0 else None
+        # An unreadable equity is a BLOCK (rails_ok's fail-safe: it will not trade
+        # when the kill switch cannot be evaluated) and it belongs to this rail —
+        # rails_ok says so in as many words. Without this the strip goes red with
+        # four untroubled bars and nothing owning the block, which is a worse kind
+        # of confusing than silence.
+        blind = self._armed() and equity is None
+        _rail("kill switch", equity, floor,
+              "equity unreadable — cannot verify" if blind else
+              (f"peak ${peak:,.2f} · floor {(1-config.KILL_SWITCH_DD_PCT)*100:.0f}%"
+               if peak > 0 else "no peak recorded yet"),
+              blocking=(blind or (floor is not None and equity is not None
+                                  and equity < floor)),
+              invert=True)
+
+        # 2. committed exposure — open positions AND resting bids (both become size)
+        n = store.committed_position_count(self.conn, mode=self.mode)
+        _rail("open positions", n, config.MAX_OPEN_POSITIONS, "filled + resting bids",
+              blocking=(n >= config.MAX_OPEN_POSITIONS))
+
+        # 3/4. realized loss limits — same UTC boundaries rails_ok uses.
+        now = datetime.datetime.now(datetime.timezone.utc)
+        day0 = now.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+        wk0 = (now - datetime.timedelta(days=now.weekday())).replace(
+            hour=0, minute=0, second=0, microsecond=0).isoformat()
+        for label, since, cap in (("daily loss", day0, config.DAILY_LOSS_LIMIT_USD),
+                                  ("weekly loss", wk0, config.WEEKLY_LOSS_LIMIT_USD)):
+            pl = store.realized_pnl_since(self.conn, since, self.mode)
+            # Sign OUTSIDE the dollar sign: f"${-1.2:,.2f}" renders "$-1.20", which
+            # reads as a typo on a card the operator is scanning for red.
+            _rail(label, pl, -float(cap),
+                  f"realized {'-' if pl < 0 else ''}${abs(pl):,.2f}",
+                  blocking=(pl <= -cap), invert=True)
+        return detail
+
     # ── sizing ───────────────────────────────────────────────────────────────
 
     def compute_stop(self, symbol, entry, card):

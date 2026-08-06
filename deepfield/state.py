@@ -66,6 +66,8 @@ class AppState:
     exec: dict = field(default_factory=lambda: {
         "mode": "off", "equity": None, "open_count": 0, "positions": [],
         "rails_ok": True, "rails_reason": "", "halt": False, "updated": 0.0,
+        # Per-rail headroom + how long a block has stood (2026-08-05 inert-bot fix)
+        "rails_detail": None, "rails_block_since": None,
         # v6 SURVEY read-only plumbing (populated by _exec_state_refresh)
         "pending": [], "by_pair": {}, "journal_tail": [],
         "realized_day": 0.0, "realized_week": 0.0, "capacity": None,
