@@ -423,6 +423,11 @@ def _assemble(conn):
         "harvesting": scov[2],                         # lots whose exit is a resting harvest sell
         "margin_used": live.get("margin_used") if live.get("_fresh") else None,
         "free_margin": live.get("free_margin") if live.get("_fresh") else None,
+        # Kraken's account-wide balance vs the margin-collateral subset. equity is the
+        # latter — correct for sizing and the rails, but it does NOT match the number
+        # on Kraken's balances page when some holding is not accepted as collateral.
+        "balance_total": live.get("balance_total") if live.get("_fresh") else None,
+        "balance_trade": live.get("balance_trade") if live.get("_fresh") else None,
         "margin_level": live.get("margin_level") if live.get("_fresh") else None,
         "capacity": live.get("capacity") if live.get("_fresh") else None,
         "equity_series": _equity_series(conn),

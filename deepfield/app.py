@@ -925,8 +925,24 @@ def _persist_web_live(conn, appstate, equity, margin_used, free_margin, balance)
             return round(x, 2) if x == x and abs(x) != float("inf") else None
         except (TypeError, ValueError):
             return None
+    # Kraken reports TWO balances and they are not the same money. `eb` is the
+    # equivalent balance — every currency in the account, i.e. the figure the operator
+    # sees on Kraken's balances page. `tb`/`e` is the TRADE balance: only what counts
+    # as margin collateral, which is what sizing, the rails and the margin level must
+    # use. Persisting only `e` meant the deck could never reconcile with Kraken: on
+    # 2026-08-05 it read $173.90 against an account holding $225.30, a $51.47 gap the
+    # console had no way to explain. Carry `eb` so the deck can name it.
+    def _bal(k):
+        try:
+            v = float(balance[k]) if balance else None
+            return round(v, 2) if v is not None else None
+        except (TypeError, ValueError, KeyError):
+            return None
+
     blob = {
         "equity": equity, "margin_used": margin_used, "free_margin": free_margin,
+        "balance_total": _bal("eb"),          # all currencies — matches Kraken's UI
+        "balance_trade": _bal("tb"),          # the margin-collateral subset
         "margin_level": round(lvl) if lvl else None,
         "capacity": appstate.exec.get("capacity"),
         "prices": prices, "chg": chg, "links": links,

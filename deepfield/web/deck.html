@@ -697,7 +697,16 @@ function renderCapital(h){
   $("cap-aux").textContent=eqLive?`live · ${src}`:"last known · populates next bot cycle";
   tween($("eq-big"), eq||0, v=>{ const s=fmt$(v); const i=s.indexOf(".");
     return i<0?s:s.slice(0,i)+"."+s.slice(i+1); });
-  $("eq-peak").innerHTML=`peak ${fmt$(h.peak)}<br><span class="dim">t/p at <span style="color:var(--gain-ink)">${fmt$(h.tp_target)}</span>${eqLive&&h.tp_target?` · ${((h.tp_target/eq-1)*100).toFixed(1)}% away`:""}</span>`;
+  // The big number is EQUITY — trade balance plus unrealized — because that is what
+  // sizing, the rails and the margin level run on. It is NOT what Kraken's balances
+  // page shows when some holding is not accepted as margin collateral, and with no
+  // way to see the difference the deck simply looked wrong: $173.90 against an
+  // account holding $225.30. Name the gap rather than leave it to be discovered.
+  const offColl = (h.balance_total!=null && eqLive) ? h.balance_total - eq : null;
+  const offLine = (offColl!=null && offColl > 0.01)
+    ? `<br><span class="dim" title="in the account but not accepted as margin collateral — the bot cannot size against it">`
+      + `account ${fmt$(h.balance_total)} · <b>${fmt$(offColl)} off-collateral</b></span>` : "";
+  $("eq-peak").innerHTML=`peak ${fmt$(h.peak)}<br><span class="dim">t/p at <span style="color:var(--gain-ink)">${fmt$(h.tp_target)}</span>${eqLive&&h.tp_target?` · ${((h.tp_target/eq-1)*100).toFixed(1)}% away`:""}</span>${offLine}`;
   const chips=[
     ["open p&l", h.open_pnl, cls(h.open_pnl||0), fmtSigned(h.open_pnl)],
     ["today · swing", h.swing_day, cls(h.swing_day||0), h.swing_day==null?"—":fmtSigned(h.swing_day)],
