@@ -843,7 +843,15 @@ function renderCapital(h){
   // page shows when some holding is not accepted as margin collateral, and with no
   // way to see the difference the deck simply looked wrong: $173.90 against an
   // account holding $225.30. Name the gap rather than leave it to be discovered.
-  const offColl = (h.balance_total!=null && eqLive) ? h.balance_total - eq : null;
+  // eb MINUS tb — NOT eb minus equity. Equity is tb PLUS unrealized P&L, so the
+  // subtraction I wrote first folded open P/L into the "off-collateral" figure and
+  // reported a fully-collateralised paper account as "$0.31 off-collateral" when
+  // the only difference was a 30-cent unrealized loss. eb and tb are both
+  // pre-unrealized balances, so their difference is exactly the money Kraken is
+  // not accepting as collateral — the same quantity app._check_collateral_shift
+  // watches. Caught by running it, not by a test.
+  const offColl = (h.balance_total!=null && h.balance_trade!=null)
+    ? h.balance_total - h.balance_trade : null;
   const offLine = (offColl!=null && offColl > 0.01)
     ? `<br><span class="dim" title="in the account but not accepted as margin collateral — the bot cannot size against it">`
       + `account ${fmt$(h.balance_total)} · <b>${fmt$(offColl)} off-collateral</b></span>` : "";

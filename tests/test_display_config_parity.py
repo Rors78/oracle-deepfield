@@ -119,3 +119,57 @@ def test_thresholds_survive_a_json_round_trip(tmp_path):
         assert v is None or isinstance(v, (int, float)), f"{k} is {type(v).__name__}"
         if isinstance(v, float):
             assert v == v and abs(v) != float("inf"), f"{k} is not finite"
+
+
+# ── the two balances (2026-08-05) ────────────────────────────────────────────
+
+def test_both_balances_ship_together(tmp_path):
+    """The deck computes the off-collateral gap as balance_total - balance_trade.
+    Ship one without the other and it silently cannot compute — so they are pinned
+    as a pair, not individually.
+
+    Kraken reports two different pots: `eb` (every currency, the balances-page
+    figure) and `tb` (only what counts as margin collateral)."""
+    import time
+    from deepfield import store as st
+    conn = st.connect(str(tmp_path / "b.db"))
+    try:
+        st.meta_set(conn, "web_live", json.dumps({
+            "updated": time.time(), "mode": "live",
+            "equity": 173.79, "balance_total": 225.30, "balance_trade": 173.83,
+        }))
+        h = server._assemble(conn)["health"]
+        assert h["balance_total"] == 225.30
+        assert h["balance_trade"] == 173.83
+    finally:
+        conn.close()
+
+
+def test_off_collateral_is_not_unrealized_pnl():
+    """The bug this pins, found by RUNNING it rather than by any test: the deck
+    first computed the gap as balance_total - EQUITY. Equity already contains
+    unrealized P&L, so a fully-collateralised paper account with a 30-cent open
+    loss was reported as "$0.31 off-collateral" — an entirely fabricated figure.
+
+    Both eb and tb are pre-unrealized, so their difference is exactly the money
+    Kraken will not accept as collateral, whatever the book is doing."""
+    eb, tb = 225.2995, 173.8278
+    gap = round(eb - tb, 2)
+    assert gap == 51.47
+    for equity in (tb - 40.0, tb + 40.0):            # open loss, open gain
+        assert round(eb - equity, 2) != gap, \
+            "eb - equity drifts with open P/L; eb - tb does not"
+
+    # The paper case that exposed it: no gap at all, only an unrealized loss.
+    assert 199.97 - 199.97 < 0.01, "fully collateralised -> no line"
+    assert round(199.97 - 199.67, 2) == 0.30, "the old formula's phantom 30 cents"
+
+
+def test_deck_reads_the_two_balances_not_equity():
+    """Guards the deck source itself: the subtraction must be between the two
+    balances. A future edit back to `- eq` reintroduces the phantom gap."""
+    src = _decommented(DECK.read_text())
+    assert "h.balance_total - h.balance_trade" in src, \
+        "off-collateral must be eb - tb"
+    assert "h.balance_total - eq" not in src, \
+        "eb - equity folds unrealized P/L into the collateral gap"
