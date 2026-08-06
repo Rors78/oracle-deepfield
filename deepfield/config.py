@@ -72,7 +72,6 @@ PAIRS = [
     {"rest": "SHIBUSD",     "wsname": "SHIB/USD",     "ws": "SHIB/USD",     "display": "SHIB",     "ordermin": 770000,   "costmin": 0.5},
     {"rest": "TRXUSD",      "wsname": "TRX/USD",      "ws": "TRX/USD",      "display": "TRX",      "ordermin": 16,       "costmin": 0.5},
     {"rest": "XZECZUSD",    "wsname": "ZEC/USD",      "ws": "ZEC/USD",      "display": "ZEC",      "ordermin": 0.01,     "costmin": 0.5},
-    {"rest": "USDCUSD",     "wsname": "USDC/USD",     "ws": "USDC/USD",     "display": "USDC",     "ordermin": 5,        "costmin": 0.5},
     {"rest": "HYPEUSD",     "wsname": "HYPE/USD",     "ws": "HYPE/USD",     "display": "HYPE",     "ordermin": 0.1,      "costmin": 0.5},
     {"rest": "PAXGUSD",     "wsname": "PAXG/USD",     "ws": "PAXG/USD",     "display": "PAXG",     "ordermin": 0.001,    "costmin": 0.5},
     {"rest": "NEARUSD",     "wsname": "NEAR/USD",     "ws": "NEAR/USD",     "display": "NEAR",     "ordermin": 4,        "costmin": 0.5},
@@ -229,13 +228,27 @@ PAPER_ROLLOVER_PCT = 0.00015
 # deliberately move to larger risk-mode sizing.
 EXEC_MAX_ORDER_NOTIONAL_USD = 50.0
 
-# Stop: weekly support (bottom-thesis invalidation), clamped to a sane band so a
-# razor-thin stop can't blow up position size and a far one can't dust it.
-STOP_MODE = "support"               # support | pct
-STOP_PCT = 0.10                     # used when STOP_MODE="pct"
-STOP_MIN_PCT = 0.05
-STOP_MAX_PCT = 0.15
+# Stop distance is VOLATILITY-SCALED (operator ruling 2026-08-06) — see deepfield/vol.py.
+# STOP_MODE / STOP_PCT / STOP_MIN_PCT / STOP_MAX_PCT are DELETED, not defaulted: the
+# whole point of the ruling is that one number cannot serve a roster spanning a 260x
+# volatility range, and a leftover constant is exactly how a deleted rule keeps running.
+# The stop is now clamp(1.5 x ATR14(1d), 1.5%, 22%), further clamped inside the pair's
+# liquidation distance so it can actually fire. Resolver: vol.distances(conn, symbol).
 PROTECTIVE_STOP = True              # rest a real stop on the exchange (kill-safe)
+
+# Volatility table (deepfield/vol.py).
+VOL_LIQ_CLAMP = True                # keep SL inside the pair's liquidation distance.
+                                    # Operator gate #2: "SL INSIDE LIQ = N ... do not ship
+                                    # them". Measured 2026-08-06 this binds on ADA (7.83%
+                                    # vs a 6.0% liq distance at 10x) and AVAX (6.78%), and
+                                    # comes within a quarter-point on SUI and LINK. False
+                                    # ships the raw 1.5x and lets those stops be decorative.
+VOL_LIQ_SAFETY_FRAC = 0.70          # GATE A: SL may use at most this much of the
+                                    # liq distance (operator ruling 2026-08-06)
+VOL_REFRESH_SECS = 86400            # daily ATR recompute; staggered off the poll loop
+VOL_MIGRATE_ENABLED = True          # one-shot cutover of the EXISTING book to the new
+                                    # distances on first armed poll (ruling §h/§i). Runs
+                                    # once, then a meta marker makes it a no-op forever.
 
 ENTRY_ORDERTYPE = "limit"           # post-only maker ONLY (no market entries). A resting
                                     # limit is recorded status='pending' and promoted to
@@ -249,14 +262,22 @@ ENTRY_TTL_SECS = 86400              # cancel a still-unfilled post-only entry bi
                                     # (Finding 5). Fills are unaffected (a filled bid is 'open',
                                     # not 'pending'), so stacking still works. 0 = never expire.
 # Continuous laddering: when a resting entry FILLS, immediately drop the next rung one
-# LADDER_STEP_PCT below the fill (post-only, min-fill, SAME support stop) so accumulation
+# PER-PAIR ladder step below the fill (post-only, min-fill, same stop) so accumulation
 # continues down toward the stop without waiting for a candle close or a restart. Bounded
 # by a NATURAL FLOOR — a rung that would land at/under the stop is not placed — so a full
 # descent is ~ (entry-stop)/step rungs (~8 at 1% over an ~8% stop), never a runaway. One
 # resting rung per symbol at a time; a gap-down that puts the rung above market is rejected
 # by post-only (ladder pauses, safe) until the next fill/close. LIVE mode only.
 LADDER_CONTINUOUS = True
-LADDER_STEP_PCT = 0.01              # next rung this far below the fill (1% ~= 8 rungs to an 8% stop)
+# Rung spacing is VOLATILITY-SCALED (operator ruling 2026-08-06): clamp(0.5 x ATR14, 0.5%,
+# 7.0%), from deepfield/vol.py. LADDER_STEP_PCT is DELETED rather than left as a default —
+# flat 1% let ZEC cross its whole ladder in an hour (fastest observed: 1h) while PAXG never
+# reached rung two (7% never traversed in 48 days of hourly data). Measured effect of the
+# change: per-rung cadence normalises from 3-49h across the roster to 15-40h.
+# NOTE the geometry this implies: SL/rung = 1.5xATR / 0.5xATR = 3.0 exactly, at every
+# volatility, so a full ladder is 2 placeable rungs on EVERY pair (the third lands on the
+# stop and is refused) against 5-14 before. Reported to the operator 2026-08-06 and shipped
+# on their instruction; the ratios, not the ATR scaling, are what fix the rung count.
 LADDER_STOP_BUFFER = 0.0            # extra margin ABOVE the stop below which no rung is placed
 MARGIN_CAP_PCT = 0.90               # a single position may post at most this frac of free margin
 
@@ -285,14 +306,14 @@ except ValueError:
 # no signal gate" across the entire margin universe — min-fill rungs; the
 # margin cost of the lower-leverage tiers is operator-accepted). Regime gate,
 # HALT, stack floor and all rung guards still apply per placement.
-# USDC/USD is a PEGGED pair: 731 daily bars close 0.9995–1.0001 — the +4% rung
-# harvest can never print, the 5%-minimum stop can never trigger, and a filled
-# lot would pay rollover forever for zero expected move. Seeding it only cycles
-# a structurally-unfillable ~$5 bid through the respend bucket (bids rest 0.1%
-# below a peg that doesn't dip; 7 lifetime bids, 7 TTL cancels, 0 fills).
-# Pulled from seeding 2026-07-30 — this reverses one line of the 07-19
-# full-universe dispatch; restore by deleting the exclusion. Stays in PAIRS:
-# display and signals untouched.
+# USDC/USD was REMOVED FROM THE ROSTER ENTIRELY (operator ruling 2026-08-06) — not
+# seeded, not laddered, no resting orders, and no longer ingested or scored. A
+# deliberate carve-out from the 2026-07-19 "every Kraken margin pair" dispatch: do
+# NOT re-add it on the next roster probe. It is dollar-pegged (measured ATR14 0.03%
+# /day against a 260x-wide roster), so no volatility-scaled distance can rescue it:
+# even pinned to the 1.0% TP floor the target is ~33x a normal day's range. It had
+# been pulled from SEEDING on 2026-07-30 and kept in PAIRS for display; the 08-06
+# ruling removes the row. At removal: 0 open lots, 0 resting rungs, $0.00 margin.
 # ── excluded pairs (no NEW exposure) ─────────────────────────────────────────
 # These are still ingested, scored and shown on the deck — only new ENTRIES are
 # refused. Existing positions keep their stops, their harvest and their reconcile:
@@ -307,10 +328,10 @@ except ValueError:
 # This narrows the full-universe dispatch of 2026-07-19 rather than reversing it;
 # the roster is unchanged, the exclusion is a separate, reversible list.
 #
-# USDC is here for a different reason: it is dollar-pegged, so it never dips far
-# enough to seed a ladder and a scout row for it is a permanent dead line.
+# USDC/USD is NOT listed here any more: it left the roster entirely on 2026-08-06.
+# An exclusion entry for a pair that no longer exists is a dead line that reads as
+# protection — the removal above is what stops it, not this list.
 EXCLUDED_PAIRS = frozenset({
-    "USDC/USD",                                   # pegged — cannot seed a ladder
     "WLD/USD", "SHIB/USD", "NEAR/USD", "ALGO/USD", "ZEC/USD",   # stop-churn, 08-05
 })
 
@@ -345,7 +366,7 @@ TP_PCT = 0.20
 TP_TARGET_FLOOR_BASELINE = True
 
 # Per-RUNG take-profit harvest (operator 2026-07-29 "build it at 4%"): each open
-# lot banks itself at entry*(1+TP_RUNG_PCT) instead of waiting for the whole-book
+# lot banks itself at entry*(1 + its OWN frozen tp_pct) instead of waiting for the whole-book
 # equity target above (which stays armed as the melt-up backstop). Backtest over
 # the 446 live rungs 07-13..07-28: realized net peaks at 4% (+$45, 69% win rate,
 # median 1.5 days fill->bank); 20% per-rung fired 7 times in 446. The trigger
@@ -361,8 +382,14 @@ TP_TARGET_FLOOR_BASELINE = True
 # amendment as the flatten: an event-triggered close of a long, resting until
 # filled. One harvest per pair at a time; new starts capped per pass (API budget).
 TP_RUNG_ENABLED = True
-TP_RUNG_PCT = 0.04
-TP_RUNG_FLOOR_PCT = 0.02
+# TP_RUNG_PCT is DELETED (operator ruling 2026-08-06). The per-rung harvest target is
+# now clamp(1.0 x ATR14(1d), 1.0%, 15.0%), resolved per pair by deepfield/vol.py and
+# FROZEN onto the order row at fill time (orders.tp_pct). A flat 4% was structurally
+# negative on the slow end — PAXG's 4% takes longer to reach than rollover carry costs
+# — and capped winners at half a day's range on the fast end.
+TP_RUNG_FLOOR_PCT = 0.02            # abort floor: a started harvest never banks below
+                                    # entry*(1+this). NOT a target — deliberately left
+                                    # flat, it is a fee/round-trip floor, not a distance.
 TP_RUNG_MAX_PER_PASS = 4
 
 # Stop RATCHET on a proved rung (operator 2026-07-29, off the same night's audit).
@@ -698,7 +725,6 @@ PER_PAIR_LEVERAGE = {
     "SHIB/USD": 5,
     "TRX/USD": 5,
     "ZEC/USD": 5,
-    "USDC/USD": 10,
     "HYPE/USD": 5,
     "PAXG/USD": 5,
     "NEAR/USD": 3,
@@ -730,7 +756,9 @@ MARGIN_PAIR = {
     "SHIB/USD": "SHIBUSD:BTNL",
     "TRX/USD": "TRXUSD:BTNL",
     "ZEC/USD": "ZECUSD:BTNL",
-    "USDC/USD": "USDCUSD:BTNL",
+    # USDC/USD deliberately absent (roster removal 2026-08-06). Leaving a margin-pair
+    # mapping behind would let a future roster probe re-enable it SILENTLY; without
+    # one, _place_entry refuses at its first gate and says so.
     "HYPE/USD": "HYPEUSD:BTNL",
     "PAXG/USD": "PAXGUSD:BTNL",
     "NEAR/USD": "NEARUSD:BTNL",
@@ -765,7 +793,6 @@ MARGIN_TICK_DECIMALS = {
     "SHIB/USD": 8,
     "TRX/USD": 6,
     "ZEC/USD": 2,
-    "USDC/USD": 4,
     "HYPE/USD": 2,
     "PAXG/USD": 2,
     "NEAR/USD": 3,

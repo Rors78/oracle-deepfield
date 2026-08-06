@@ -911,13 +911,27 @@ function carryRow(h,rh){
     ${sl.n?`<span class="dim">· ${fmtSigned(sl.total)} · ${sl.n} lot${sl.n>1?"s":""}</span>`:""}
     <span class="cnet ${cls(netToday)}">net ${fmtSigned(netToday)}</span></div>`;
 }
+/* Per-pair harvest targets, summarised. The deck must not invent a distance: this
+   reads deepfield/vol.py's persisted table verbatim and only chooses how to draw it. */
+function rungTargetRange(){
+  const vt=S.health&&S.health.vol_table;
+  if(!vt||!vt.pairs) return "pending";
+  const v=Object.values(vt.pairs).map(p=>p.tp_pct).filter(x=>x!=null).sort((a,b)=>a-b);
+  if(!v.length) return "pending";
+  const lo=v[0], hi=v[v.length-1];
+  return (Math.abs(hi-lo)<0.05) ? `+${lo.toFixed(1)}%`
+                                : `+${lo.toFixed(1)}–${hi.toFixed(1)}% (ATR-scaled)`;
+}
+
 function renderHarvest(h){
   // per-rung harvest strip (the primary engine since 07-29) — cycle gauge below
   // is the book-level backstop. Ledgers stay separate: cycle profit is settled
   // minus baseline, so rung banks inside a completed cycle are already in it.
-  // Was hardcoded "rung +4% · book +20% backstop". Both are config knobs the
-  // operator has moved before, and a stale label on a live number is a lie.
-  $("hv-aux").textContent=`rung +${pctLabel(thr("tp_rung_pct",0.04))}`
+  // Was hardcoded "rung +4% · book +20% backstop", then read a single tp_rung_pct.
+  // Since the 2026-08-06 volatility ruling the rung target is PER PAIR, so there is
+  // no one number to print: show the live range from the same table the executor
+  // resolves against, and let the per-pair rows carry the individual values.
+  $("hv-aux").textContent=`rung ${rungTargetRange()}`
     +` · book +${pctLabel(thr("tp_pct",0.20))} backstop`;
   const rh=S.rung_harvest||{total:0,n:0,today:0,today_n:0,recent:[]};
   $("hv-rungs").innerHTML=`

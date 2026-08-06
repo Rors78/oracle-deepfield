@@ -33,6 +33,10 @@ from . import store
 from . import broker
 from . import config
 from . import engine
+# `vol` is a local name for order VOLUME all through this module, so the volatility
+# table is imported under a distinct alias rather than shadowed inside every method
+# that sizes an order.
+from . import vol as volatility
 from . import rest_client
 
 log = logging.getLogger("deepfield.exec")
@@ -341,18 +345,39 @@ class Executor:
 
     # ── sizing ───────────────────────────────────────────────────────────────
 
-    def compute_stop(self, symbol, entry, card):
-        """Stop price. STOP_MODE=support uses the 52w-low/W-support from the
-        scorecard (bottom-thesis invalidation); clamped to [MIN,MAX]% of entry
-        so it's never absurdly tight or wide."""
-        support = getattr(card, "low_52w", None) if card is not None else None
-        if config.STOP_MODE == "support" and support and 0 < support < entry:
-            stop = support
-        else:
-            stop = entry * (1 - config.STOP_PCT)
-        min_stop = entry * (1 - config.STOP_MAX_PCT)   # widest allowed (lowest price)
-        max_stop = entry * (1 - config.STOP_MIN_PCT)   # tightest allowed (highest price)
-        return max(min_stop, min(stop, max_stop))
+    def compute_stop(self, symbol, entry, card, sl_pct=None):
+        """Stop price, VOLATILITY-SCALED (operator ruling 2026-08-06).
+
+        entry x (1 - clamp(1.5 x ATR14(1d), 1.5%, 22%)), further clamped inside the
+        pair's liquidation distance — one rule from vol.distances(), never a constant
+        here. The old 52w-low support stop clamped to a flat [5%, 15%] band is gone:
+        the band, not the support level, was doing the work on most pairs (the live
+        book sat at 7.9-9.9% — the clamp — across every pair regardless of its
+        volatility), so a 2.4%-ATR BTC and a 7.9%-ATR WLD got the same stop.
+
+        `sl_pct` lets a caller pass the distance already FROZEN on an order row, so a
+        rung re-protects at the stop it was born with rather than at today's table."""
+        pct = sl_pct
+        if pct is None:
+            pct = self._distances(symbol).get("sl_pct")
+        return entry * (1 - float(pct) / 100.0)
+
+    def _distances(self, symbol):
+        """Per-pair TP / SL / rung spacing. THE resolver — every distance decision in
+        the executor routes through this, so the three can never drift apart."""
+        return volatility.distances(self.conn, symbol)
+
+    def _row_tp_pct(self, symbol, frozen):
+        """A row's harvest distance: the value FROZEN on it at fill, else today's
+        table. Rows written before the 2026-08-06 ruling carry NULL — they must not be
+        stranded (the flat constant they used is deleted), and they must not silently
+        read as 0% either, which would harvest the entire pre-ruling book at market."""
+        try:
+            if frozen is not None and float(frozen) > 0:
+                return float(frozen)
+        except (TypeError, ValueError):
+            pass
+        return float(self._distances(symbol).get("tp_pct"))
 
     def _min_volume(self, ordermin, costmin, entry, lot_dec):
         """Smallest placeable order: >= ordermin AND cost >= costmin, on the lot
@@ -667,7 +692,7 @@ class Executor:
         a step below anything: it opens the chain at live.
 
         That distinction is the whole bug this signature exists to prevent. This
-        method used to apply `* (1 - LADDER_STEP_PCT)` internally, which is right for
+        method used to apply `* (1 - the ladder step)` internally, which is right for
         one caller and wrong for the other — one rule, two meanings. The seed's bound
         came out a full ladder step (1%) under its real notional, and because the
         bucket is chronically starved it always crosses a threshold from BELOW: the
@@ -743,7 +768,13 @@ class Executor:
         if not leverage:
             log.error("no leverage for %s", symbol)
             return None
-        stop = self.compute_stop(symbol, entry_price, card)
+        # FREEZE AT FILL (operator ruling 2026-08-06 §c): resolve the pair's distances
+        # ONCE here and carry them onto the row. The daily ATR refresh then moves the
+        # table for NEW entries only — an open position keeps what it was born with,
+        # because a live-recomputed target widens away from the price it is chasing
+        # when ATR spikes mid-position: the target would run from you.
+        dist = self._distances(symbol)
+        stop = self.compute_stop(symbol, entry_price, card, sl_pct=dist.get("sl_pct"))
         sizing = self.size(symbol, entry_price, stop, leverage, equity, card=card)
         if sizing is None:
             log.warning("EXEC %s: sizing produced nothing (equity=%s)", symbol, equity)
@@ -820,6 +851,10 @@ class Executor:
             # Persist the entry conviction so continuous laddering can size each
             # rung the same (the fill->rung chain flows through the DB).
             "score": getattr(card, "score", None), "required": getattr(card, "required", None),
+            # Frozen distances (ruling §c) — this row's targets for life, so a later
+            # ATR refresh cannot move a target out from under an open position.
+            "tp_pct": dist.get("tp_pct"), "sl_pct": dist.get("sl_pct"),
+            "rung_pct": dist.get("rung_pct"),
             "txid": None, "stop_txid": None,
             "status": "pending", "error": None,
             # Client order id (audit C3): sent on the live AddOrder so an order whose
@@ -880,6 +915,137 @@ class Executor:
         row["error"] = "no txid from AddOrder"
         return store.insert_order(self.conn, row)
 
+    def _migrate_vol_distances(self):
+        """ONE-SHOT cutover to the volatility-scaled distances (operator ruling
+        2026-08-06 §h and §i). Runs in-process on the first armed poll after the new
+        code boots, never from a side process: the Kraken rate limit is per-ACCOUNT and
+        a scratch migration script spending it throttles this loop blind (2026-07-19).
+
+        §h — OPEN positions adopt the new targets. Each row is stamped with today's
+        table (it then never moves again; see the freeze rule) and its protective stop
+        is re-rested at the new distance.
+
+        A stop is only ever RAISED here. The new SL is tighter than the old flat
+        [5%,15%] support clamp on most pairs (BTC 9.9% -> 3.65%), but on the widest —
+        WLD 11.83%, UNI 9.65% — it is looser, and LOWERING a stop on a position that is
+        already live would withdraw protection the operator currently has. Ratcheted
+        rungs (stop_prot at breakeven) are protected by the same rule. Anything left
+        tighter than the ruling is reported rather than silently accepted.
+
+        §i — RESTING rungs are re-placed at the new spacing, one pair at a time, never
+        a global cancel. A resting entry BID carries no exposure (the protective stops
+        are separate rows), so a gap here costs missed accumulation, never safety.
+
+        Returns a report dict; also written to meta for the Phase 2 proof."""
+        if not getattr(config, "VOL_MIGRATE_ENABLED", True):
+            return None
+        done = store.meta_get(self.conn, "vol_migration_done")
+        if done:
+            return None
+        rep = {"ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+               "positions": [], "rungs": [], "stops_raised": 0, "stops_left_tight": []}
+        try:
+            # ── §h: open positions ───────────────────────────────────────────
+            for oid, sym, mpair, entry, volu, lev, stp, stp_prot, stx in self.conn.execute(
+                    "SELECT id, symbol, margin_pair, entry, volume, leverage, stop, "
+                    "stop_prot, stop_txid FROM orders WHERE status='open' AND mode=? "
+                    "AND COALESCE(entry,0)>0 ORDER BY symbol, entry DESC", (self.mode,)):
+                d = self._distances(sym)
+                self.conn.execute(
+                    "UPDATE orders SET tp_pct=?, sl_pct=?, rung_pct=? WHERE id=?",
+                    (d["tp_pct"], d["sl_pct"], d["rung_pct"], oid))
+                self.conn.commit()
+                cur = stp_prot if stp_prot is not None else stp
+                want = float(entry) * (1 - d["sl_pct"] / 100.0)
+                row = {"id": oid, "symbol": sym, "entry": float(entry),
+                       "old_stop": float(cur) if cur else None, "new_stop": round(want, 10),
+                       "tp_pct": d["tp_pct"], "sl_pct": d["sl_pct"]}
+                # GATE B: a new stop ABOVE the live price is an instant market sell.
+                # Turning a live position into a realized loss because a config knob
+                # moved is not what this cutover is for — keep the existing stop and
+                # let the new distance apply to this pair's future entries only.
+                last = self._last_local_price(sym)
+                if last and want >= last:
+                    row["action"] = ("GATE B: new stop %.8g is at/above live %.8g — kept "
+                                     "existing stop, new SL applies to future entries"
+                                     % (want, last))
+                    rep.setdefault("gate_b", []).append(row)
+                    rep["positions"].append(row)
+                    log.warning("VOL-MIGRATE %s: rung %d GATE B — new stop %s >= live %s, "
+                                "keeping existing stop", sym, oid, f"{want:g}", f"{last:g}")
+                    continue
+                if cur is not None and want <= float(cur):
+                    # Looser than what is already resting — refuse to withdraw cover.
+                    row["action"] = "kept tighter existing stop"
+                    rep["stops_left_tight"].append(row)
+                    rep["positions"].append(row)
+                    continue
+                if stx:
+                    broker.cancel_order(stx)
+                self.conn.execute("UPDATE orders SET stop=?, stop_txid=NULL WHERE id=?",
+                                  (want, oid))
+                self.conn.commit()
+                tick = config.MARGIN_TICK_DECIMALS.get(sym, 2)
+                self._rest_stop(sym, mpair, _round_price(want, tick), volu, lev, oid,
+                                paper=(self.mode == "paper" and not _sim_attached()))
+                row["action"] = "stop raised"
+                rep["stops_raised"] += 1
+                rep["positions"].append(row)
+                log.warning("VOL-MIGRATE %s: rung %d stop %s -> %s (SL %.2f%%, TP %.2f%%)",
+                            sym, oid, f"{float(cur):g}" if cur else "none",
+                            f"{want:g}", d["sl_pct"], d["tp_pct"])
+
+            # ── §i: resting rungs, one pair at a time ────────────────────────
+            pend = self.conn.execute(
+                "SELECT id, symbol, margin_pair, entry, leverage, stop, txid, score, required "
+                "FROM orders WHERE status='pending' AND mode=? ORDER BY symbol", (self.mode,)
+            ).fetchall()
+            for oid, sym, mpair, entry, lev, stp, txid, score, required in pend:
+                t0 = time.time()
+                before = 1
+                killed = False
+                if txid:
+                    killed = bool(broker.cancel_order(txid))
+                self.conn.execute(
+                    "UPDATE orders SET status='canceled', error=? WHERE id=?",
+                    ("re-laddered to volatility-scaled spacing (2026-08-06 ruling)", oid))
+                self.conn.commit()
+                self._respend_credit(
+                    self.conn.execute("SELECT notional FROM orders WHERE id=?",
+                                      (oid,)).fetchone()[0], sym)
+                anchor = self.conn.execute(
+                    "SELECT entry, stop, leverage, score, required FROM orders WHERE symbol=? "
+                    "AND status='open' AND mode=? AND entry IS NOT NULL ORDER BY entry ASC "
+                    "LIMIT 1", (sym, self.mode)).fetchone()
+                placed = 0
+                if anchor:
+                    a_entry, a_stop, a_lev, a_score, a_req = anchor
+                    if self._place_ladder_rung(sym, mpair, a_lev or lev, a_stop, a_entry,
+                                               a_score, a_req):
+                        placed = 1
+                else:
+                    # No open lot to anchor to — this was a seed bid. _seed_chains
+                    # re-opens the chain on its own cadence at the new spacing.
+                    placed = 0
+                gap = round(time.time() - t0, 2)
+                rec = {"symbol": sym, "cancelled": 1 if (killed or not txid) else 0,
+                       "placed": placed, "gap_secs": gap, "before": before,
+                       "after": placed, "shortfall": before - placed}
+                rep["rungs"].append(rec)
+                log.warning("VOL-MIGRATE %s: rungs cancelled %d, placed %d, gap %.2fs%s",
+                            sym, rec["cancelled"], placed, gap,
+                            "" if placed >= before else "  <-- ENDS WITH FEWER RESTING RUNGS")
+            store.meta_set(self.conn, "vol_migration_done", json.dumps(rep))
+            log.warning("VOL-MIGRATE complete: %d positions re-targeted (%d stops raised, "
+                        "%d left tighter), %d pairs re-laddered",
+                        len(rep["positions"]), rep["stops_raised"],
+                        len(rep["stops_left_tight"]), len(rep["rungs"]))
+        except Exception:
+            log.exception("VOL-MIGRATE failed part-way — NOT marking done, retries next "
+                          "cycle (idempotent: stamped rows are skipped by their stop check)")
+            return rep
+        return rep
+
     def poll_fills(self):
         """Promote resting entry limits to positions once Kraken confirms fill,
         then rest the protective stop. A limit sits 'pending' until this sees an
@@ -888,6 +1054,10 @@ class Executor:
         ARMED only (live, or paper against a simulated exchange)."""
         if not self._armed():
             return
+        # One-shot volatility cutover, before anything else touches the book, so no
+        # rung is promoted or laddered against the old geometry after the new code is
+        # live. No-ops instantly once the meta marker is set.
+        self._migrate_vol_distances()
         # Re-protect BEFORE the T/P gate (audit 2026-07-13 M3): while an INCOMPLETE
         # flatten retries, _check_take_profit returns True every cycle — but by then
         # CancelOrderBatch has already swept the protective stops, so skipping the
@@ -1181,7 +1351,8 @@ class Executor:
                 # _place_ladder_rung's `target`), so that — not the fill — is what it
                 # will be sized at. Passed explicitly since the pre-gate no longer
                 # assumes a step: a seed doesn't take one.
-                if self._respend_would_refuse(sym, entry * (1 - config.LADDER_STEP_PCT)):
+                if self._respend_would_refuse(
+                        sym, entry * (1 - self._distances(sym)["rung_pct"] / 100.0)):
                     log.debug("RELADDER %s: respend bucket can't fund the smallest rung "
                               "— skipping before the ticker fetch", sym)
                     continue
@@ -1942,7 +2113,7 @@ class Executor:
             return None
 
     def _check_rung_harvest(self):
-        """Bank individual rungs at entry*(1+TP_RUNG_PCT) — the per-lot harvester the
+        """Bank individual rungs at entry*(1 + the row's frozen tp_pct) — the per-lot harvester the
         07-28 backtest sized (4% target: realized-net peak, 69% win rate, ~1.5 days
         to bank). Two passes: settle/chase the harvests already working, then start
         new ones. Runs every poll; ZERO API calls when no rung is near target and
@@ -1965,7 +2136,7 @@ class Executor:
         partial fill — the terminal vol_exec decides, never our intent). An abort
         clears close_txid so _reprotect_naked_open re-arms the rung's stop."""
         rows = self.conn.execute(
-            "SELECT id, symbol, margin_pair, volume, leverage, entry, close_txid "
+            "SELECT id, symbol, margin_pair, volume, leverage, entry, close_txid, tp_pct "
             "FROM orders WHERE status='open' AND close_txid IS NOT NULL AND mode=?",
             (self.mode,)).fetchall()
         if not rows:
@@ -1982,7 +2153,7 @@ class Executor:
                              if _REST_PAIR.get(r[1])
                              and (close_info.get(t) or {}).get("status") in ("open", "pending")})
         quotes = (rest_client.fetch_ticker(need_quote) or {}) if need_quote else {}
-        for txid, (oid, sym, mpair, vol, lev, entry, _) in mine.items():
+        for txid, (oid, sym, mpair, vol, lev, entry, _, row_tp) in mine.items():
             o = close_info.get(txid)
             if o is None:
                 log.warning("HARVEST %s: close %s status UNKNOWN — leaving alone "
@@ -2007,7 +2178,7 @@ class Executor:
                         banked = 0.0
                     log.warning("HARVEST %s: rung %d BANKED $%+.4f (%.6g @ ~+%.1f%% target)",
                                 sym, oid, banked, vol_exec,
-                                getattr(config, "TP_RUNG_PCT", 0.04) * 100)
+                                self._row_tp_pct(sym, row_tp))
                     self._journal("tp-rung", sym, f"rung {oid} banked ${banked:+.4f} "
                                                   f"({vol_exec:.6g} sold)")
                 elif vol_exec > 0:
@@ -2071,16 +2242,19 @@ class Executor:
         active = {s for (s,) in self.conn.execute(
             "SELECT DISTINCT symbol FROM orders WHERE status='open' "
             "AND close_txid IS NOT NULL AND mode=?", (self.mode,))}
-        tgt_mult = 1 + getattr(config, "TP_RUNG_PCT", 0.04)
         floor_mult = 1 + getattr(config, "TP_RUNG_FLOOR_PCT", 0.02)
         best = {}                                 # sym -> (ratio, row)
         for row in self.conn.execute(
-                "SELECT id, symbol, margin_pair, volume, leverage, entry, stop_txid "
+                "SELECT id, symbol, margin_pair, volume, leverage, entry, stop_txid, tp_pct "
                 "FROM orders WHERE status='open' AND close_txid IS NULL AND mode=? "
                 "AND COALESCE(entry,0) > 0 AND COALESCE(volume,0) > 0", (self.mode,)):
             sym = row[1]
             if sym in active:
                 continue
+            # Each rung banks at ITS OWN frozen target — per-lot, per-pair. A row from
+            # before the 2026-08-06 ruling has NULL tp_pct; it resolves off today's
+            # table rather than being stranded on a constant that no longer exists.
+            tgt_mult = 1 + self._row_tp_pct(sym, row[7]) / 100.0
             last = self._last_local_price(sym)
             if not last or last < float(row[5]) * tgt_mult:
                 continue
@@ -2118,7 +2292,7 @@ class Executor:
             stopped_vol[s] = stopped_vol.get(s, 0.0) + float(v or 0)
         need = sorted({_REST_PAIR.get(r[1][1], "") for r in cands if _REST_PAIR.get(r[1][1])})
         quotes = (rest_client.fetch_ticker(need) or {}) if need else {}
-        for ratio, (oid, sym, mpair, vol, lev, entry, stop_txid) in cands:
+        for ratio, (oid, sym, mpair, vol, lev, entry, stop_txid, _row_tp) in cands:
             q = quotes.get(_REST_PAIR.get(sym, ""))
             if q is None:
                 key = _REST_PAIR.get(sym, "")
@@ -2206,7 +2380,8 @@ class Executor:
                          "its invalidation level", sym, oid, f"{px:g}", f"{bidf:g}")
                 return
             r = self.conn.execute(
-                "SELECT COALESCE(stop_prot, stop) FROM orders WHERE id=?", (oid,)).fetchone()
+                "SELECT COALESCE(stop_prot, stop), tp_pct FROM orders WHERE id=?",
+                (oid,)).fetchone()
             cur = float(r[0]) if r and r[0] is not None else None
             if cur is not None and px <= cur:
                 return                            # already at/above — never lower a stop
@@ -2214,7 +2389,7 @@ class Executor:
             self.conn.commit()
             log.warning("RATCHET %s: rung %d proved +%.1f%% — protective stop %s -> %s "
                         "(an abort now re-arms at breakeven; ladder floor unchanged)",
-                        sym, oid, getattr(config, "TP_RUNG_PCT", 0.04) * 100,
+                        sym, oid, self._row_tp_pct(sym, r[1] if r else None),
                         f"{cur:g}" if cur is not None else "none", f"{px:g}")
             self._journal("stop", sym, f"rung {oid} proved target — protective stop "
                                        f"ratcheted to {px:g} (breakeven)")
@@ -2224,7 +2399,7 @@ class Executor:
     def _place_ladder_rung(self, symbol, margin_pair, leverage, stop, filled_price,
                            score=None, required=None):
         """Continuous laddering (config.LADDER_CONTINUOUS): when a bid fills, drop the
-        NEXT post-only rung one LADDER_STEP_PCT below the fill — CONVICTION-sized off
+        NEXT post-only rung one PER-PAIR ladder step (vol.distances) below the fill — CONVICTION-sized off
         the entry's score (a 7/7 position ladders 2x rungs; score/required ride down
         the chain via the DB), SAME support stop — so accumulation continues down
         toward the stop without waiting for a candle close or a restart. The conviction
@@ -2265,7 +2440,12 @@ class Executor:
             if store.has_pending_entry(self.conn, symbol, mode=self.mode):
                 return                                  # skip if a bid already rests (best-effort; see docstring)
             tick = config.MARGIN_TICK_DECIMALS.get(symbol, 2)
-            target = _round_price(filled_price * (1 - config.LADDER_STEP_PCT), tick)
+            # Rung spacing is the pair's, not the roster's (2026-08-06 ruling):
+            # clamp(0.5 x ATR14, 0.5%, 7%). Flat 1% spent ZEC's whole ladder in an hour
+            # while PAXG never reached rung two.
+            rd = self._distances(symbol)
+            step = rd["rung_pct"] / 100.0
+            target = _round_price(filled_price * (1 - step), tick)
             # Post-only survivability (2026-07-12 offline-gap incident): target is
             # anchored to the FILL, which can be hours stale (offline gap, slow poll).
             # If price has since fallen to/below it, the maker bid crosses the book and
@@ -2291,7 +2471,7 @@ class Executor:
             # the rung if we already hold an OPEN position within half a step of it —
             # descends cleanly toward the stop instead of churn-buying the band. The
             # just-filled anchor is a full step above target, so it never self-blocks.
-            if self._owns_level_near(symbol, target, config.LADDER_STEP_PCT * 0.5):
+            if self._owns_level_near(symbol, target, step * 0.5):
                 log.info("LADDER %s: already own a rung within half a step of %s — skip "
                          "(own each level once)", symbol, target)
                 return
@@ -2342,6 +2522,11 @@ class Executor:
                 "margin": sizing["margin"], "risk_usd": sizing.get("actual_risk", 0.0),
                 # carry the entry conviction to the next rung so it doesn't decay to 1x
                 "score": score, "required": required,
+                # Each rung freezes its OWN distances at placement. A descending chain
+                # entered over days can therefore hold rungs on different tables — that
+                # is the intent: every lot keeps the geometry it was actually born with.
+                "tp_pct": rd.get("tp_pct"), "sl_pct": rd.get("sl_pct"),
+                "rung_pct": rd.get("rung_pct"),
                 "txid": None, "stop_txid": None, "status": "pending", "error": None,
                 "userref": userref,
             }
@@ -2447,6 +2632,12 @@ class Executor:
             "leverage": lev, "notional": mark * leftover,
             "margin": (mark * leftover / lev) if lev else None,
             "status": "open",
+            # An adopted lot is a new row, so it freezes TODAY's distances like any
+            # other. Without these it would carry NULLs and re-resolve on every pass —
+            # the drift the freeze rule exists to prevent.
+            "tp_pct": self._distances(sym).get("tp_pct"),
+            "sl_pct": self._distances(sym).get("sl_pct"),
+            "rung_pct": self._distances(sym).get("rung_pct"),
             "error": f"adopted untracked exchange volume (external position, "
                      f"unclaimed {int(age)}s); entry is the mark at adoption, not a real fill",
         })

@@ -118,7 +118,11 @@ def main():
                     a = atrs[t0]
                     if a is None:
                         continue
-                    step = min(max(config.LADDER_STEP_PCT if k is None else k * a,
+                    # k=None is the "flat spacing" control arm. It used to read
+                    # config.LADDER_STEP_PCT; that constant was deleted by the
+                    # 2026-08-06 volatility ruling (which this backtest is the
+                    # evidence for), so the historical 1% is named here instead.
+                    step = min(max(0.01 if k is None else k * a,
                                    STEP_FLOOR), STEP_CEIL)
                     r = _chain(rows, t0, step, H)
                     if not r or r[1] <= 0:

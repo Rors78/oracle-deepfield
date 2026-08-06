@@ -504,8 +504,13 @@ class Ingest:
         # rung near price. Reuses the same guard continuous laddering uses. Only when an
         # executor exists (off mode is signal-only — no rungs to stack).
         live_px = ps.last_tick.last if ps.last_tick else None
+        # "A ladder step" is per-pair since the 2026-08-06 volatility ruling — read it
+        # from the same resolver the ladder places against, or this guard would measure
+        # a different step than the rungs it is guarding.
+        step_pct = (self.executor._distances(symbol)["rung_pct"] / 100.0
+                    if self.executor is not None else None)
         if (live_px and self.executor is not None
-                and self.executor._owns_level_near(symbol, live_px, config.LADDER_STEP_PCT)):
+                and self.executor._owns_level_near(symbol, live_px, step_pct)):
             self._armed_buys.add(symbol)
             log.info("startup-arm: %s already owns a rung within a step of %.6g — skipping "
                      "re-fire (own each level once)", symbol, live_px)

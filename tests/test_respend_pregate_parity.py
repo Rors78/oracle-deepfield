@@ -8,7 +8,7 @@ swallows the refusal, because the refusal used to log at DEBUG and DEBUG is off 
 production (the live 15MB log contains zero DEBUG lines).
 
 The specific drift, found 2026-08-06 by reading the live log rather than by any
-test: the pre-gate applied `* (1 - LADDER_STEP_PCT)` internally. That is correct
+test: the pre-gate applied `* (1 - one ladder step)` internally. That is correct
 for the reladder caller, whose rung really does price one step below the anchor
 fill — and wrong for the seed caller, which opens a chain AT live and takes no step
 at all. So every seed's bound came out a full ladder step (1%) under its true cost.
@@ -33,6 +33,7 @@ import time
 
 import pytest
 
+from .conftest import pin_vol
 from deepfield import config, store, executor as ex_mod
 
 SYM = "BTC/USD"
@@ -55,11 +56,14 @@ def _bucket(conn, tokens):
                    json.dumps({"tokens": tokens, "updated": time.time()}))
 
 
-def _governor(monkeypatch, rate=5.0, burst=40.0, step=0.01, smult=2.0):
+def _governor(monkeypatch, conn, rate=5.0, burst=40.0, step_pct=1.0, smult=2.0):
+    """Rung spacing is per-pair since the 2026-08-06 ruling, so the geometry is pinned
+    through the real resolver rather than by patching a constant that no longer exists."""
     monkeypatch.setattr(config, "RESPEND_BUDGET_USD_PER_HR", rate)
     monkeypatch.setattr(config, "RESPEND_BURST_USD", burst)
-    monkeypatch.setattr(config, "LADDER_STEP_PCT", step)
     monkeypatch.setattr(config, "SIZE_MULT", smult)
+    pin_vol(conn, rung=step_pct)
+    return step_pct / 100.0
 
 
 def _real_notional(e, price):
@@ -83,7 +87,7 @@ def test_pregate_never_passes_what_the_real_check_refuses(tmp_path, monkeypatch,
     the companion test below). A pre-gate that is too LOOSE is the bug: it produces a
     narrated order that never exists."""
     conn = _conn(tmp_path)
-    _governor(monkeypatch)
+    STEP = _governor(monkeypatch, conn)
     e = _exec(conn)
     need = _real_notional(e, price)
     for i in range(240):
@@ -105,7 +109,7 @@ def test_pregate_never_skips_what_the_real_check_would_fund(tmp_path, monkeypatc
     would throttle harder than RESPEND_BUDGET_USD_PER_HR configures, which is exactly
     the failure the 07-27 debit-accrual audit chased."""
     conn = _conn(tmp_path)
-    _governor(monkeypatch)
+    STEP = _governor(monkeypatch, conn)
     e = _exec(conn)
     need = _real_notional(e, price)
     for i in range(240):
@@ -129,11 +133,11 @@ def test_the_seed_price_basis_is_live_not_a_ladder_step_down(tmp_path, monkeypat
     reopens. Pinned as an inequality against the real sizer, so it fails if the
     discount is ever restored inside the pre-gate."""
     conn = _conn(tmp_path)
-    _governor(monkeypatch)
+    STEP = _governor(monkeypatch, conn)
     e = _exec(conn)
     live = 100.0
     seed_cost = _real_notional(e, live)                              # sized AT live
-    rung_cost = _real_notional(e, live * (1 - config.LADDER_STEP_PCT))
+    rung_cost = _real_notional(e, live * (1 - STEP))
     assert rung_cost < seed_cost, "a rung one step down must cost less than a seed"
 
     # Fund exactly the rung, a hair under the seed. The seed must be refused; if the
@@ -141,7 +145,7 @@ def test_the_seed_price_basis_is_live_not_a_ladder_step_down(tmp_path, monkeypat
     _bucket(conn, rung_cost + 1e-6)
     assert e._respend_would_refuse(SYM, live) is True, \
         "seed pre-gate passed on a bucket that only funds a laddered-down rung"
-    assert e._respend_would_refuse(SYM, live * (1 - config.LADDER_STEP_PCT)) is False, \
+    assert e._respend_would_refuse(SYM, live * (1 - STEP)) is False, \
         "rung pre-gate must still pass on a bucket that funds the rung"
     conn.close()
 
@@ -153,7 +157,7 @@ def test_a_respend_refusal_is_visible_at_info(tmp_path, monkeypatch, caplog):
     readable at INFO. At DEBUG it was invisible in production and the seed
     announcement read as an order that vanished into nothing."""
     conn = _conn(tmp_path)
-    _governor(monkeypatch)
+    STEP = _governor(monkeypatch, conn)
     monkeypatch.setattr(config, "EXCLUDED_PAIRS", ())
     e = _exec(conn)
     monkeypatch.setattr(e, "_accumulation_allowed", lambda: (True, ""))
@@ -174,7 +178,7 @@ def test_seed_does_not_announce_an_order_it_cannot_fund(tmp_path, monkeypatch, c
     NO "starting ladder with a post-only bid" line. That sentence is a statement that
     an order is being placed, and 198 times in 12 days it was not true."""
     conn = _conn(tmp_path)
-    _governor(monkeypatch)
+    STEP = _governor(monkeypatch, conn)
     monkeypatch.setattr(config, "SEED_PAIRS", (SYM,))
     e = _exec(conn)
     monkeypatch.setattr(e, "_armed", lambda: True)
@@ -200,7 +204,7 @@ def test_seed_announces_and_places_when_the_bucket_can_fund_it(tmp_path, monkeyp
     """The converse — otherwise a pre-gate that refuses everything would pass every
     test above while silently switching accumulation off."""
     conn = _conn(tmp_path)
-    _governor(monkeypatch)
+    STEP = _governor(monkeypatch, conn)
     monkeypatch.setattr(config, "SEED_PAIRS", (SYM,))
     e = _exec(conn)
     monkeypatch.setattr(e, "_armed", lambda: True)
@@ -223,7 +227,7 @@ def test_a_stale_local_price_cannot_produce_a_dangling_announcement(tmp_path, mo
     more than the bound just cleared. The seed re-checks on the fresh tick — already
     paid for — before it narrates."""
     conn = _conn(tmp_path)
-    _governor(monkeypatch)
+    STEP = _governor(monkeypatch, conn)
     monkeypatch.setattr(config, "SEED_PAIRS", (SYM,))
     e = _exec(conn)
     monkeypatch.setattr(e, "_armed", lambda: True)

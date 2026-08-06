@@ -32,15 +32,24 @@ MP = "NEARUSD:BTNL"
 MARK = 2.00
 SURPLUS = 4.0
 
+# Hand-rolled so these tests stay a pure in-memory unit. It must track the real
+# orders table: a column the executor writes but this schema lacks fails the INSERT
+# outright (tp_pct/sl_pct/rung_pct did exactly that on 2026-08-06). meta and candles
+# are here because the volatility resolver reads them — without meta the resolver
+# still answers, from the fallback table, but it logs a stack trace on every call.
 SCHEMA = """
 CREATE TABLE orders(
     id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, symbol TEXT, margin_pair TEXT,
     side TEXT, ordertype TEXT, mode TEXT, entry REAL, stop REAL, volume REAL,
     leverage INTEGER, notional REAL, margin REAL, risk_usd REAL, txid TEXT,
     stop_txid TEXT, status TEXT, error TEXT, score INTEGER, required INTEGER,
-    userref INTEGER, close_txid TEXT);
+    userref INTEGER, close_txid TEXT, stop_prot REAL,
+    tp_pct REAL, sl_pct REAL, rung_pct REAL);
 CREATE TABLE journal(id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, kind TEXT,
     symbol TEXT, text TEXT);
+CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT);
+CREATE TABLE candles(pair TEXT, interval INTEGER, ts INTEGER, o REAL, h REAL,
+    l REAL, c REAL, v REAL, closed INTEGER);
 """
 
 

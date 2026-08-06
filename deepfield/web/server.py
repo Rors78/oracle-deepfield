@@ -24,7 +24,30 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from .. import VERSION, config
 from .. import store, engine
+from .. import vol as volatility
 from ..profiles import FULL
+
+
+def _vol_table_blob(conn):
+    """The persisted per-pair distance table, plus its age, for the deck.
+
+    Returns the STORED table only — it never recomputes. If the refresher has not run
+    yet the deck shows "pending" rather than a number the executor is not using, which
+    is the whole point: a display that computes its own distances is a second
+    implementation of the rule."""
+    try:
+        table, updated = volatility.load_table(conn)
+        if not table:
+            return None
+        return {"updated": updated, "age_secs": (time.time() - updated) if updated else None,
+                "pairs": {s: {"atr_pct": d.get("atr_pct"), "tp_pct": d.get("tp_pct"),
+                              "sl_pct": d.get("sl_pct"), "rung_pct": d.get("rung_pct"),
+                              "source": d.get("source"), "liq_pct": d.get("liq_pct"),
+                              "liq_clamped": bool(d.get("liq_clamped")),
+                              "tp_floored": bool(d.get("tp_floored"))}
+                          for s, d in table.items()}}
+    except Exception:
+        return None
 
 # Below roughly one network payload, gzip's header and CPU cost more than it saves.
 _MIN_GZIP_BYTES = 1400
@@ -465,12 +488,19 @@ def _assemble(conn):
         # the executor also reads comes from here.
         "thresholds": {
             "tp_pct": config.TP_PCT,
-            "tp_rung_pct": getattr(config, "TP_RUNG_PCT", None),
+            # tp_rung_pct is GONE as a single number (2026-08-06 volatility ruling):
+            # the per-rung target is per-pair now, so a scalar here would be the same
+            # "one rule, two implementations" defect in a new place. The deck reads
+            # `vol_table` below and labels each pair with its own distances.
             "ml_alert": getattr(config, "MARGIN_LEVEL_ALERT_PCT", None),
             "ml_stack_floor": getattr(config, "MARGIN_LEVEL_STACK_FLOOR_PCT", None),
             "kill_switch_dd_pct": getattr(config, "KILL_SWITCH_DD_PCT", None),
             "size_mult": getattr(config, "SIZE_MULT", None),
         },
+        # Per-pair volatility distances, straight from the table the executor resolves
+        # against (ruling §d: "persist the computed table ... so the TUI and web blob
+        # can display current values"). Shipped whole so the deck never recomputes.
+        "vol_table": _vol_table_blob(conn),
         "capacity": live.get("capacity") if live.get("_fresh") else None,
         "equity_series": _equity_series(conn),
         "recon_ok": recon.get("ok"), "recon_time": recon.get("time"),

@@ -10,6 +10,7 @@ import datetime
 
 import pytest
 
+from .conftest import pin_vol
 from deepfield import store, config, executor as ex_mod
 
 SYM = "BTC/USD"
@@ -123,15 +124,23 @@ def test_size_floors_to_ordermin(tmp_path, monkeypatch):
 
 # ── stop clamp ───────────────────────────────────────────────────────────────
 
-def test_stop_clamped_to_band(tmp_path):
+def test_stop_is_the_pairs_volatility_distance_not_a_support_level(tmp_path):
+    """2026-08-06 ruling: the stop is entry x (1 - the pair's SL%), full stop.
+
+    It used to be the 52-week-low support clamped to a flat [5%, 15%] band — but the
+    BAND, not the support, was doing the work: the live book sat at 7.9-9.9% on every
+    pair regardless of volatility, so a 2.4%-ATR BTC and a 7.9%-ATR WLD got the same
+    stop. The card is now irrelevant to the distance, which is what this pins: the same
+    entry must produce the same stop whatever the card claims support is."""
     conn = _conn(tmp_path)
     e = _exec(conn)
-    # support far below -> clamp to widest allowed (STOP_MAX_PCT)
-    assert abs(e.compute_stop(SYM, 100.0, Card(low_52w=10.0)) - 100.0 * (1 - config.STOP_MAX_PCT)) < 1e-9
-    # support very close -> clamp to tightest allowed (STOP_MIN_PCT)
-    assert abs(e.compute_stop(SYM, 100.0, Card(low_52w=99.0)) - 100.0 * (1 - config.STOP_MIN_PCT)) < 1e-9
-    # support within band -> used as-is
-    assert abs(e.compute_stop(SYM, 100.0, Card(low_52w=92.0)) - 92.0) < 1e-9
+    pin_vol(conn, sl=8.0)
+    for card in (Card(low_52w=10.0), Card(low_52w=99.0), Card(low_52w=92.0), None):
+        assert abs(e.compute_stop(SYM, 100.0, card) - 92.0) < 1e-9, \
+            "the card must no longer move the stop"
+    # a caller may pass a FROZEN distance (a rung re-protecting at the stop it was
+    # born with) and that must win over today's table
+    assert abs(e.compute_stop(SYM, 100.0, None, sl_pct=3.0) - 97.0) < 1e-9
     conn.close()
 
 
@@ -236,8 +245,8 @@ def test_ladder_places_next_rung_on_fill(tmp_path, monkeypatch):
     """v6: a fill drops the NEXT post-only rung one LADDER_STEP_PCT below the fill,
     same support stop — accumulation continues without a candle close/restart."""
     conn = _conn(tmp_path)
+    pin_vol(conn, rung=1)
     monkeypatch.setattr(config, "LADDER_CONTINUOUS", True)
-    monkeypatch.setattr(config, "LADDER_STEP_PCT", 0.01)
     monkeypatch.setattr(ex_mod.broker, "trade_balance", lambda: 1000.0)
     sent = []
     monkeypatch.setattr(ex_mod.broker, "private", _ladder_private(sent))
@@ -258,8 +267,8 @@ def test_ladder_places_next_rung_on_fill(tmp_path, monkeypatch):
 def test_ladder_holds_at_stop_floor(tmp_path, monkeypatch):
     """The natural floor: a rung that would land at/under the stop is not placed."""
     conn = _conn(tmp_path)
+    pin_vol(conn, rung=1)
     monkeypatch.setattr(config, "LADDER_CONTINUOUS", True)
-    monkeypatch.setattr(config, "LADDER_STEP_PCT", 0.01)
     monkeypatch.setattr(ex_mod.broker, "trade_balance", lambda: 1000.0)
     sent = []
     monkeypatch.setattr(ex_mod.broker, "private", _ladder_private(sent))
@@ -314,8 +323,8 @@ def test_ladder_rung_inherits_entry_conviction(tmp_path, monkeypatch):
     a 7/7 position (required 5 -> 3.0x) ladders a 3x rung, NOT a flat min, and the
     score/required are persisted on the rung so it rides down the chain."""
     conn = _conn(tmp_path, ordermin=0.1, costmin=0.5, lot_dec=8)
+    pin_vol(conn, rung=1)
     monkeypatch.setattr(config, "LADDER_CONTINUOUS", True)
-    monkeypatch.setattr(config, "LADDER_STEP_PCT", 0.01)
     monkeypatch.setattr(ex_mod.broker, "trade_balance", lambda: 1000.0)
     monkeypatch.setattr(ex_mod.broker, "private", _ladder_private([]))
     monkeypatch.setattr(ex_mod.broker, "query_order", lambda t: {"status": "closed", "vol_exec": "0.3"})
@@ -334,8 +343,8 @@ def test_ladder_conviction_does_not_decay_down_the_chain(tmp_path, monkeypatch):
     """rung1 fill -> rung2: the frozen entry conviction propagates row-to-row —
     the second hop is still 3x, not silently reset to flat min."""
     conn = _conn(tmp_path, ordermin=0.1, costmin=0.5, lot_dec=8)
+    pin_vol(conn, rung=1)
     monkeypatch.setattr(config, "LADDER_CONTINUOUS", True)
-    monkeypatch.setattr(config, "LADDER_STEP_PCT", 0.01)
     # Conviction propagation only — take the respend governor out of the picture. With
     # it armed at its live settings the $30 rung1 drains the $40 burst and rung2 is
     # paced away, so this test measured the throttle instead of the thing it names.
@@ -366,8 +375,8 @@ def test_ladder_rung_null_score_falls_back_to_flat_min(tmp_path, monkeypatch):
     """A row with no persisted score (pre-migration order / paper edge) -> the rung
     sizes at flat 1.0x min, never crashing on a NULL score."""
     conn = _conn(tmp_path, ordermin=0.1, costmin=0.5, lot_dec=8)
+    pin_vol(conn, rung=1)
     monkeypatch.setattr(config, "LADDER_CONTINUOUS", True)
-    monkeypatch.setattr(config, "LADDER_STEP_PCT", 0.01)
     monkeypatch.setattr(ex_mod.broker, "trade_balance", lambda: 1000.0)
     monkeypatch.setattr(ex_mod.broker, "private", _ladder_private([]))
     monkeypatch.setattr(ex_mod.broker, "query_order", lambda t: {"status": "closed", "vol_exec": "0.1"})
@@ -383,8 +392,8 @@ def test_ladder_dedupe_skips_owned_level(tmp_path, monkeypatch):
     """Level-dedupe: the ladder does NOT place a rung at a price it already owns
     (within half a step) — so it descends cleanly instead of re-buying a band."""
     conn = _conn(tmp_path, ordermin=0.1, costmin=0.5, lot_dec=8)
+    pin_vol(conn, rung=1)
     monkeypatch.setattr(config, "LADDER_CONTINUOUS", True)
-    monkeypatch.setattr(config, "LADDER_STEP_PCT", 0.01)
     monkeypatch.setattr(ex_mod.broker, "trade_balance", lambda: 1000.0)
     monkeypatch.setattr(ex_mod.broker, "private", _ladder_private([]))
     monkeypatch.setattr(ex_mod.broker, "query_order", lambda t: {"status": "closed", "vol_exec": "0.1"})
@@ -404,8 +413,8 @@ def test_ladder_dedupe_allows_a_clean_step_down(tmp_path, monkeypatch):
     """Control: with nothing owned near the target, the rung IS placed — dedupe
     only suppresses re-buying a level, never a genuine next step down."""
     conn = _conn(tmp_path, ordermin=0.1, costmin=0.5, lot_dec=8)
+    pin_vol(conn, rung=1)
     monkeypatch.setattr(config, "LADDER_CONTINUOUS", True)
-    monkeypatch.setattr(config, "LADDER_STEP_PCT", 0.01)
     monkeypatch.setattr(ex_mod.broker, "trade_balance", lambda: 1000.0)
     monkeypatch.setattr(ex_mod.broker, "private", _ladder_private([]))
     monkeypatch.setattr(ex_mod.broker, "query_order", lambda t: {"status": "closed", "vol_exec": "0.1"})
@@ -1791,9 +1800,9 @@ def test_respend_pre_gate_skips_only_what_it_would_refuse(tmp_path, monkeypatch)
     The caller passes the price the order is SIZED at — here a rung one 1% ladder
     step below a 100.0 anchor fill, so 99.0."""
     conn = _conn(tmp_path, ordermin=0.1, costmin=0.5, lot_dec=8)
+    pin_vol(conn, rung=1)
     monkeypatch.setattr(config, "RESPEND_BUDGET_USD_PER_HR", 5.0)
     monkeypatch.setattr(config, "RESPEND_BURST_USD", 40.0)
-    monkeypatch.setattr(config, "LADDER_STEP_PCT", 0.01)
     e = _exec(conn, mode="live")
     # smallest rung at its own price = 0.1 x 99.0 = $9.90
     _bucket(conn, tokens=1.0, age_secs=0)
@@ -1811,9 +1820,9 @@ def test_respend_pre_gate_scales_with_size_mult(tmp_path, monkeypatch):
     authoritative check (observed live on XLM minutes after the 07-31 1->2
     bump). Verified to FAIL on the unscaled bound."""
     conn = _conn(tmp_path, ordermin=0.1, costmin=0.5, lot_dec=8)
+    pin_vol(conn, rung=1)
     monkeypatch.setattr(config, "RESPEND_BUDGET_USD_PER_HR", 5.0)
     monkeypatch.setattr(config, "RESPEND_BURST_USD", 40.0)
-    monkeypatch.setattr(config, "LADDER_STEP_PCT", 0.01)
     monkeypatch.setattr(config, "SIZE_MULT", 2.0)
     e = _exec(conn, mode="live")
     # smallest REAL rung at 2x = 0.1 x 99.0 x 2 = $19.80
@@ -1960,9 +1969,9 @@ def test_seed_pre_gate_skips_before_the_ticker_and_the_narration(tmp_path, monke
     monkeypatch.setattr(config, "SEED_PAIRS", (SYM,))
     monkeypatch.setattr(config, "RESPEND_BUDGET_USD_PER_HR", 5.0)
     monkeypatch.setattr(config, "RESPEND_BURST_USD", 40.0)
-    monkeypatch.setattr(config, "LADDER_STEP_PCT", 0.01)
     ex_mod._seed_next.clear()
     conn = _conn(tmp_path, ordermin=0.1, costmin=0.5, lot_dec=8)
+    pin_vol(conn, rung=1)
     _seed_candle(conn, SYM, 100.0)                 # smallest bid ~ 0.1 x 99 = $9.90
     _bucket(conn, tokens=1.0, age_secs=0)          # nowhere near it
     e = _exec(conn, mode="live")
@@ -1982,9 +1991,9 @@ def test_seed_pre_gate_lets_a_funded_bid_through(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "SEED_PAIRS", (SYM,))
     monkeypatch.setattr(config, "RESPEND_BUDGET_USD_PER_HR", 5.0)
     monkeypatch.setattr(config, "RESPEND_BURST_USD", 40.0)
-    monkeypatch.setattr(config, "LADDER_STEP_PCT", 0.01)
     ex_mod._seed_next.clear()
     conn = _conn(tmp_path, ordermin=0.1, costmin=0.5, lot_dec=8)
+    pin_vol(conn, rung=1)
     _seed_candle(conn, SYM, 100.0)
     _bucket(conn, tokens=40.0, age_secs=0)
     e = _exec(conn, mode="live")

@@ -10,6 +10,7 @@ import time
 
 import pytest
 
+from .conftest import pin_vol
 from deepfield import broker, config, executor as ex_mod, paper_broker, store
 
 SYM = "BTC/USD"
@@ -273,7 +274,7 @@ def test_paper_executor_fills_rests_stop_and_places_next_rung(sim, monkeypatch):
     a pending bid, poll_fills promotes it on a real touch, the protective stop goes
     on, and the chain continues with the next rung below the fill."""
     monkeypatch.setattr(config, "LADDER_CONTINUOUS", True)
-    monkeypatch.setattr(config, "LADDER_STEP_PCT", 0.01)
+    pin_vol(sim, rung=1)          # `sim` IS the connection (see the fixture)
     # conftest defaults _ensure_ladder_rungs inert for legacy tests; the chain is
     # exactly what this test exercises, so put the real method back.
     monkeypatch.setattr(ex_mod.Executor, "_ensure_ladder_rungs",
@@ -380,7 +381,9 @@ def test_lifecycle_rung_harvest_banks_at_plus_4pct(sim, monkeypatch):
     closes FIFO and the gain lands in cash. This is the engine that has been the
     primary earner since 07-29, and paper never exercised it before the simulator."""
     monkeypatch.setattr(config, "TP_RUNG_ENABLED", True)
-    monkeypatch.setattr(config, "TP_RUNG_PCT", 0.04)
+    # The target is per-pair and frozen on the row since 2026-08-06; pin the table to
+    # the +4% this test is written around so it exercises the real resolver.
+    pin_vol(sim, tp=4.0)
     monkeypatch.setattr(config, "LADDER_CONTINUOUS", False)   # isolate the harvest
     e = _armed_exec(sim, monkeypatch)
     oid, entry = _fill_one(sim, e)
@@ -575,7 +578,12 @@ def test_excluded_pair_keeps_its_existing_lot_protected(sim, monkeypatch):
 
 
 def test_excluded_pairs_are_absent_from_seed_list():
-    for sym in ("WLD/USD", "SHIB/USD", "NEAR/USD", "ALGO/USD", "ZEC/USD", "USDC/USD"):
+    """Exclusion means "no NEW exposure", NOT removal: these five stay ingested, scored
+    and shown, and their existing lots keep stops, harvest and reconcile.
+
+    USDC/USD is deliberately absent from this list — it was REMOVED from the roster
+    outright on 2026-08-06, a different thing, pinned in test_rails_rearm."""
+    for sym in ("WLD/USD", "SHIB/USD", "NEAR/USD", "ALGO/USD", "ZEC/USD"):
         assert sym in config.EXCLUDED_PAIRS
         assert sym not in config.SEED_PAIRS, f"{sym} still seeds"
     # the roster itself is untouched — they are still ingested, scored and shown

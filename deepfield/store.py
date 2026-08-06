@@ -192,9 +192,16 @@ def connect(db_path):
         # accumulating on exactly the pairs that are working. Protection paths
         # (reprotect, reconcile re-place) read COALESCE(stop_prot, stop); ladder
         # geometry keeps reading `stop`. NULL = never ratcheted.
+        # tp_pct/sl_pct/rung_pct (2026-08-06 ATR ruling): the volatility-scaled
+        # distances FROZEN onto the row at fill time. The daily ATR refresh moves the
+        # table for new entries only — an open position keeps what it was given, because
+        # a live-computed target widens away from the price it is chasing when ATR
+        # spikes mid-position. NULL = a pre-ruling row; readers fall back to the
+        # resolver so the old book is not stranded.
         _ensure_columns(conn, "orders", [("score", "INTEGER"), ("required", "INTEGER"),
                                          ("userref", "INTEGER"), ("close_txid", "TEXT"),
-                                         ("stop_prot", "REAL")])
+                                         ("stop_prot", "REAL"), ("tp_pct", "REAL"),
+                                         ("sl_pct", "REAL"), ("rung_pct", "REAL")])
         conn.commit()
     except Exception:
         conn.close()   # _WriterConn.close() frees the write lock the schema writes took
@@ -298,9 +305,14 @@ def insert_alert(conn, ts_iso, symbol, price, score, denom, signals, kind):
 
 def insert_order(conn, row):
     """row: dict of the orders columns. Returns the new order id."""
+    # tp_pct/sl_pct/rung_pct are the volatility distances FROZEN at placement. They are
+    # listed here explicitly because this column list is a whitelist: a key present in
+    # `row` but absent here is silently dropped, which would leave every new order with
+    # NULL frozen distances and make the freeze-at-fill rule quietly vacuous.
     cols = ["ts", "symbol", "margin_pair", "side", "ordertype", "mode", "entry", "stop",
             "volume", "leverage", "notional", "margin", "risk_usd", "score", "required",
-            "txid", "stop_txid", "status", "error", "userref"]
+            "txid", "stop_txid", "status", "error", "userref",
+            "tp_pct", "sl_pct", "rung_pct"]
     cur = conn.execute(
         f"INSERT INTO orders({','.join(cols)}) VALUES({','.join('?' * len(cols))})",
         [row.get(c) for c in cols],
@@ -441,6 +453,18 @@ def get_pair_info(conn, ws_symbol):
     if row is None:
         return None
     return {"ordermin": row[0], "costmin": row[1], "lot_decimals": row[2], "display": row[3]}
+
+
+def closed_daily_candles(conn, ws_symbol, limit=120):
+    """CLOSED 1d candles for a pair, ASCENDING, newest `limit` of them: [(ts,h,l,c)].
+
+    closed=1 only. An in-progress day carries a partial high/low, so including it
+    understates true range and would quietly tighten every ATR-scaled distance on the
+    pair for the rest of the session (deepfield.vol)."""
+    rows = conn.execute(
+        "SELECT ts, h, l, c FROM candles WHERE pair=? AND interval=1440 AND closed=1 "
+        "ORDER BY ts DESC LIMIT ?", (ws_symbol, int(limit))).fetchall()
+    return list(reversed(rows))
 
 
 def recent_alerts(conn, n=5):

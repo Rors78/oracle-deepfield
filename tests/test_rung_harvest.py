@@ -13,6 +13,7 @@ Covers the money-path invariants:
 """
 import json
 
+from .conftest import pin_vol
 from deepfield import config, store, executor as ex_mod
 
 TS = "2026-07-29T00:00:00+00:00"
@@ -74,9 +75,12 @@ def _mock_broker(monkeypatch, *, quotes=None, positions=None, close_orders=None,
 
 def _mk_exec(conn, monkeypatch, **cfg):
     monkeypatch.setattr(config, "TP_RUNG_ENABLED", cfg.get("enabled", True))
-    monkeypatch.setattr(config, "TP_RUNG_PCT", cfg.get("pct", 0.04), raising=False)
     monkeypatch.setattr(config, "TP_RUNG_FLOOR_PCT", cfg.get("floor", 0.02), raising=False)
     monkeypatch.setattr(config, "TP_RUNG_MAX_PER_PASS", cfg.get("cap", 4), raising=False)
+    # Per-rung targets are per-pair and frozen on the row since the 2026-08-06 ruling.
+    # Pin the table to the flat geometry these tests were written against, so they keep
+    # asserting the same thing while running through the real resolver.
+    pin_vol(conn, tp=cfg.get("pct", 0.04) * 100, sl=10.0, rung=1.0)
     e = ex_mod.Executor(conn)
     e.mode = "live"
     return e
@@ -402,6 +406,6 @@ def test_ratchet_does_not_freeze_the_ladder(tmp_path, monkeypatch):
     stop_for_ladder = conn.execute(
         "SELECT stop FROM orders WHERE status='open' AND entry IS NOT NULL "
         "ORDER BY entry ASC LIMIT 1").fetchone()[0]
-    next_rung = 1.0 * (1 - config.LADDER_STEP_PCT)
+    next_rung = 1.0 * (1 - 0.01)          # pinned rung spacing, see _mk_exec
     assert stop_for_ladder == 0.92
     assert next_rung > stop_for_ladder * (1 + config.LADDER_STOP_BUFFER)   # room remains

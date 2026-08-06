@@ -22,6 +22,7 @@ from . import ui
 from . import simple_ui
 from . import alerter
 from . import defense
+from . import vol as volatility
 from . import paper_broker
 from .ws_client import WSClient
 from .state import AppState
@@ -361,6 +362,42 @@ def _aligned_series(conn, symbols, interval, limit, field="c"):
     return [(s, p[-n:]) for s, p in out]
 
 
+def _refresh_vol_table_threaded():
+    """Off-loop (own conn): recompute the per-pair ATR distance table (operator ruling
+    2026-08-06 §d).
+
+    Reads ONLY stored daily candles — no exchange call, so this can never spend the
+    per-account rate limit the live trading loop depends on. Runs on its own thread and
+    its own cadence rather than inline, because it walks every roster pair and the exec
+    loop turns over in ~8s.
+
+    Persisted with a timestamp so the deck and the TUI show the SAME numbers the money
+    path resolves against, rather than each recomputing and drifting. Open positions are
+    unaffected: their distances were frozen onto the row at fill."""
+    try:
+        conn = store.connect(config.DB_PATH)
+    except Exception:
+        log.exception("vol refresh: cannot open DB (table unchanged)")
+        return
+    try:
+        table = volatility.build_table(conn)
+        volatility.save_table(conn, table)
+        atr_n = sum(1 for d in table.values() if d.get("source") == "atr")
+        clamped = [s for s, d in table.items() if d.get("liq_clamped")]
+        floored = [s for s, d in table.items() if d.get("tp_floored")]
+        log.info("VOL table refreshed: %d pairs (%d from ATR, %d fallback)%s%s",
+                 len(table), atr_n, len(table) - atr_n,
+                 ("; liq-clamped SL: " + ",".join(sorted(clamped))) if clamped else "",
+                 ("; TP at floor: " + ",".join(sorted(floored))) if floored else "")
+    except Exception:
+        log.exception("vol refresh failed (previous table stands)")
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
 def _poll_stress_threaded():
     """Off-loop (own conn): intraday liq-buffer stress telemetry.
 
@@ -531,6 +568,10 @@ async def _exec_state_refresh(appstate, conn, ing, interval=15):
     # Intraday stress telemetry: held past boot like the fee poll so its multi-pair
     # candle scan doesn't contend with the boot reconcile.
     stress_next = _t.monotonic() + 90
+    # Soon after boot, then daily. The table must exist before the first entry resolves
+    # its distances — vol.distances() computes on demand if it is missing, but that puts
+    # a per-pair candle walk on the exec loop instead of off it.
+    vol_next = _t.monotonic() + 15
     while True:
         try:
             mode = config.EXEC_MODE
@@ -591,6 +632,12 @@ async def _exec_state_refresh(appstate, conn, ing, interval=15):
             else:
                 equity = config.PAPER_PORTFOLIO_USD
                 free_margin, margin_used = equity, 0.0
+            # Volatility table (ruling §d). Outside the live-only branch above: it is
+            # pure local candle math, so paper resolves the same distances live does.
+            vsecs = float(getattr(config, "VOL_REFRESH_SECS", 0) or 0)
+            if vsecs > 0 and _t.monotonic() >= vol_next:
+                vol_next = _t.monotonic() + vsecs
+                await asyncio.to_thread(_refresh_vol_table_threaded)
             rails_detail = ex.rails_detail(equity) if ex else None
             rails_ok, reason = ((rails_detail["ok"], rails_detail["reason"])
                                 if rails_detail else (True, ""))

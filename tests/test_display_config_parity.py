@@ -53,10 +53,20 @@ def test_every_threshold_the_deck_asks_for_is_shipped(tmp_path):
     assert not missing, f"deck asks for thresholds the server never ships: {missing}"
 
 
+def test_the_per_rung_target_is_no_longer_a_single_threshold(tmp_path):
+    """2026-08-06: the per-rung take-profit became PER PAIR, so shipping one
+    `tp_rung_pct` scalar would be the same "deck holds its own copy" defect in a new
+    place — every pair would be labelled with some other pair's target. The deck reads
+    `vol_table` instead, which is the table the executor itself resolves against."""
+    h = _health(tmp_path)
+    assert "tp_rung_pct" not in h["thresholds"], \
+        "a single rung target cannot describe a volatility-scaled roster"
+    assert "vol_table" in h, "the deck needs the per-pair table to label anything"
+
+
 def test_shipped_thresholds_equal_config(tmp_path):
     t = _health(tmp_path)["thresholds"]
     assert t["tp_pct"] == config.TP_PCT
-    assert t["tp_rung_pct"] == config.TP_RUNG_PCT
     assert t["ml_alert"] == config.MARGIN_LEVEL_ALERT_PCT
     assert t["ml_stack_floor"] == config.MARGIN_LEVEL_STACK_FLOOR_PCT
     assert t["kill_switch_dd_pct"] == config.KILL_SWITCH_DD_PCT
@@ -82,7 +92,6 @@ def test_deck_fallbacks_match_config(tmp_path):
     with it rather than quietly drifting into fiction."""
     src = DECK.read_text()
     expect = {
-        "tp_rung_pct": config.TP_RUNG_PCT,
         "tp_pct": config.TP_PCT,
         "ml_alert": float(config.MARGIN_LEVEL_ALERT_PCT),
         "ml_stack_floor": float(config.MARGIN_LEVEL_STACK_FLOOR_PCT),

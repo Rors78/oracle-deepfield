@@ -154,16 +154,22 @@ def test_leff_gate_fails_open_on_stale_missing_or_inf(tmp_path):
 
 # ── 5. USDC out of the seed roster ───────────────────────────────────────────
 
-def test_usdc_not_seeded_but_still_a_pair():
-    """USDC is pegged, so it can never dip enough to seed a ladder — but it stays in
-    the roster for display and signals.
+def test_usdc_is_gone_from_the_roster_entirely():
+    """USDC/USD was REMOVED from the roster on 2026-08-06, not merely un-seeded.
 
-    The count was `len(PAIRS) - 1` when USDC was the ONLY pull. Exclusions are now a
-    named list (config.EXCLUDED_PAIRS — five stop-churn pairs joined it 2026-08-05),
-    so the invariant is stated against that list rather than a hardcoded one. The
-    property being pinned is unchanged: excluded pairs do not seed, and are NOT
-    removed from the roster."""
+    It had been pulled from SEEDING on 07-30 and kept in PAIRS for display — this test
+    used to pin exactly that. The operator's volatility ruling went further: a pegged
+    pair (measured ATR14 0.03%/day) cannot be rescued by scaling distances, because
+    even the 1.0% TP floor is ~33x a normal day's range. The row is gone, and so is
+    everything that would let a roster probe quietly restore it.
+
+    An EXCLUDED_PAIRS entry would now be a dead line that reads as protection, so the
+    absence is asserted on both sides."""
     assert "USDC/USD" not in _REAL_SEED_PAIRS
-    assert "USDC/USD" in config.EXCLUDED_PAIRS
+    assert not any(p["ws"] == "USDC/USD" for p in config.PAIRS), "roster row still present"
+    assert "USDC/USD" not in config.EXCLUDED_PAIRS, "excluding a pair that no longer exists"
+    assert "USDC/USD" not in config.MARGIN_PAIR, \
+        "a margin-pair mapping would let a probe re-enable USDC silently"
+    assert "USDC/USD" not in config.PER_PAIR_LEVERAGE
+    # the general invariant still holds for the pairs that ARE excluded
     assert len(_REAL_SEED_PAIRS) == len(config.PAIRS) - len(config.EXCLUDED_PAIRS)
-    assert any(p["ws"] == "USDC/USD" for p in config.PAIRS)  # display/signals stay

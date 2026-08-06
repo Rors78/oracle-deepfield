@@ -10,7 +10,28 @@ import types
 
 import pytest
 
-from deepfield import config
+from deepfield import config, vol
+
+
+def pin_vol(conn, tp=4.0, sl=10.0, rung=1.0, symbols=None):
+    """Pin the per-pair distance table to fixed percentages for a test.
+
+    Since the 2026-08-06 volatility ruling there is no flat LADDER_STEP_PCT /
+    TP_RUNG_PCT / STOP_*_PCT to monkeypatch — every distance resolves per pair from
+    deepfield/vol.py. Tests that need a KNOWN geometry write a table here instead of
+    patching a constant, so they still exercise the real resolver rather than a
+    test-only branch inside it.
+
+    Defaults reproduce the pre-ruling flat geometry (4% target, 10% stop, 1% rung), so
+    a legacy test pinned to those numbers keeps asserting exactly what it always did."""
+    syms = symbols or [p["ws"] for p in config.PAIRS]
+    vol.save_table(conn, {s: {"atr_pct": None, "tp_pct": tp, "sl_pct": sl,
+                              "rung_pct": rung, "source": "test",
+                              "liq_pct": None, "liq_clamped": False,
+                              "tp_floored": False, "tp_capped": False,
+                              "rr": (tp / sl if sl else None),
+                              "leverage": config.PER_PAIR_LEVERAGE.get(s)}
+                          for s in syms})
 
 
 @pytest.fixture(autouse=True)
@@ -31,6 +52,11 @@ def _isolate_operator_stack_knobs(monkeypatch):
     # behavior to poll_fills; default it inert so legacy tests test exactly what they
     # tested. The dedicated test_reverse_gear.py monkeypatches it on.
     monkeypatch.setattr(config, "REVERSE_GEAR_ENABLED", False)
+    # The 2026-08-06 volatility cutover is a ONE-SHOT pass at the top of poll_fills
+    # that cancels every resting rung and re-rests every stop. Left armed it would
+    # rewrite the book out from under every poll_fills test in the suite. Inert by
+    # default, exactly like the knobs above; test_vol_distances turns it on.
+    monkeypatch.setattr(config, "VOL_MIGRATE_ENABLED", False)
 
 
 @pytest.fixture(autouse=True)
