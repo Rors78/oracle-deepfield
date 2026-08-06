@@ -853,3 +853,81 @@ def test_fresh_seed_inherits_no_book_state(tmp_path):
     finally:
         paper_broker.detach()
     conn.close()
+
+
+# ── money-path invariants that were documented but never enforced ────────────
+
+def _mk(conn, sym=SYM, entry=100.0, stop=90.0, stop_prot=None):
+    conn.execute("INSERT INTO orders(ts,symbol,margin_pair,side,ordertype,mode,entry,stop,"
+                 "stop_prot,volume,leverage,status) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                 ("2026-08-05T00:00:00+00:00", sym, MPAIR, "buy", "limit", "paper",
+                  entry, stop, stop_prot, 1.0, 10, "open"))
+    conn.commit()
+    return conn.execute("SELECT MAX(id) FROM orders").fetchone()[0]
+
+
+def _prot(conn, oid):
+    return conn.execute("SELECT stop_prot, stop FROM orders WHERE id=?", (oid,)).fetchone()
+
+
+def test_ratchet_never_lowers_a_stop(sim, monkeypatch):
+    """MONOTONIC. A protective stop may only ever move UP. Lowering one re-opens
+    risk the operator already banked, silently."""
+    monkeypatch.setattr(config, "TP_RUNG_RATCHET_ENABLED", True)
+    monkeypatch.setattr(config, "TP_RUNG_RATCHET_PCT", 0.0)
+    e = _armed_exec(sim, monkeypatch)
+    oid = _mk(sim, entry=100.0, stop=90.0, stop_prot=105.0)   # already ratcheted high
+    e._ratchet_stop_prot(oid, SYM, 100.0, 130.0)              # would imply 100.0
+    assert _prot(sim, oid)[0] == 105.0, "ratchet lowered an existing protective stop"
+
+
+def test_ratchet_refuses_to_rest_at_or_above_the_market(sim, monkeypatch):
+    """BELOW THE MARKET. A stop at/above the bid fires on contact — it would close
+    the lot the instant it was placed."""
+    monkeypatch.setattr(config, "TP_RUNG_RATCHET_ENABLED", True)
+    monkeypatch.setattr(config, "TP_RUNG_RATCHET_PCT", 0.0)
+    e = _armed_exec(sim, monkeypatch)
+    oid = _mk(sim, entry=100.0, stop=90.0)
+    e._ratchet_stop_prot(oid, SYM, 100.0, 100.0)     # bid == the level
+    assert _prot(sim, oid)[0] is None
+    e._ratchet_stop_prot(oid, SYM, 100.0, 99.0)      # bid BELOW the level
+    assert _prot(sim, oid)[0] is None
+    e._ratchet_stop_prot(oid, SYM, 100.0, 130.0)     # comfortably above -> allowed
+    assert _prot(sim, oid)[0] == 100.0
+
+
+def test_ratchet_never_touches_the_chain_stop(sim, monkeypatch):
+    """`stop` is the ladder's inherited floor AND the next rung's sizing denominator.
+    Ratcheting it to breakeven reads as 'ladder floor reached' and silently freezes
+    accumulation on a pair that is working — which is why stop_prot is a separate
+    column at all."""
+    monkeypatch.setattr(config, "TP_RUNG_RATCHET_ENABLED", True)
+    e = _armed_exec(sim, monkeypatch)
+    oid = _mk(sim, entry=100.0, stop=90.0)
+    e._ratchet_stop_prot(oid, SYM, 100.0, 130.0)
+    prot, chain = _prot(sim, oid)
+    assert prot == 100.0 and chain == 90.0, "the chain's invalidation level moved"
+
+
+def test_min_volume_never_lands_under_either_floor(sim, monkeypatch):
+    """Rounding to the lot grid must round UP. Down would place an order Kraken
+    rejects for being under ordermin or costmin — silently, every time."""
+    e = _armed_exec(sim, monkeypatch)
+    for ordermin, costmin, entry, dec in [
+            (0.00005, 0.5, 64000.0, 8), (5.0, 0.5, 0.69, 8), (0.1, 10.0, 74.0, 4),
+            (1.0, 0.5, 0.0000049, 0), (0.02, 5.0, 213.0, 8)]:
+        v = e._min_volume(ordermin, costmin, entry, dec)
+        assert v >= ordermin - 1e-12, f"under ordermin: {v} < {ordermin}"
+        assert v * entry >= costmin - 1e-9, f"under costmin: {v*entry} < {costmin}"
+        assert abs(v * 10**dec - round(v * 10**dec)) < 1e-6, f"{v} off the lot grid"
+
+
+def test_owns_level_near_is_mode_scoped(sim, monkeypatch):
+    """The ladder owns each price level ONCE. If this saw another mode's rows it
+    would refuse to ladder a level this book does not actually hold."""
+    e = _armed_exec(sim, monkeypatch)
+    _mk(sim, entry=100.0)
+    assert e._owns_level_near(SYM, 100.5, 0.01) is True
+    assert e._owns_level_near(SYM, 120.0, 0.01) is False
+    sim.execute("UPDATE orders SET mode='live' WHERE symbol=?", (SYM,)); sim.commit()
+    assert e._owns_level_near(SYM, 100.5, 0.01) is False, "saw another mode's position"
