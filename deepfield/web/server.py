@@ -435,6 +435,26 @@ def _assemble(conn):
         # reading off `updated` instead.
         "rails": live.get("rails"),
         "rails_block_since": live.get("rails_block_since"),
+        # Every config number the console DISPLAYS, shipped from config itself.
+        #
+        # Three separate bugs on 2026-08-05 were one bug: a rule written down twice
+        # and updated once. The worst of them showed a T/P target 39% off and read as
+        # a flatten being overdue. The deck still held its own copies of TP_PCT,
+        # TP_RUNG_PCT, MARGIN_LEVEL_ALERT_PCT (six places in the runway alone) and
+        # MARGIN_LEVEL_STACK_FLOOR_PCT — so changing any of those in config left the
+        # deck labelling the OLD value, which is worse than not labelling it.
+        #
+        # Rule: the deck may choose how to draw a number; it may not decide what the
+        # number IS. Axis geometry stays in deck.html (a resolution choice); anything
+        # the executor also reads comes from here.
+        "thresholds": {
+            "tp_pct": config.TP_PCT,
+            "tp_rung_pct": getattr(config, "TP_RUNG_PCT", None),
+            "ml_alert": getattr(config, "MARGIN_LEVEL_ALERT_PCT", None),
+            "ml_stack_floor": getattr(config, "MARGIN_LEVEL_STACK_FLOOR_PCT", None),
+            "kill_switch_dd_pct": getattr(config, "KILL_SWITCH_DD_PCT", None),
+            "size_mult": getattr(config, "SIZE_MULT", None),
+        },
         "capacity": live.get("capacity") if live.get("_fresh") else None,
         "equity_series": _equity_series(conn),
         "recon_ok": recon.get("ok"), "recon_time": recon.get("time"),

@@ -499,7 +499,7 @@ footer .reg{color:var(--ink2)}
     </article>
 
     <article class="card harvest rise" style="animation-delay:.07s">
-      <div class="eyebrow">Harvest <span class="aux">rung +4% · book +20% backstop</span></div>
+      <div class="eyebrow">Harvest <span class="aux" id="hv-aux"></span></div>
       <div class="hv-rungs" id="hv-rungs"></div>
       <div class="skimwrap" id="hv-skim"></div>
       <div class="gaugewrap" id="hv-gauge"></div>
@@ -591,6 +591,20 @@ const fmtPx=v=>{ if(v==null)return "—"; const a=Math.abs(v);
 const fmtVol=v=>{ if(v==null)return "—"; const a=Math.abs(v);
   return a>=1e6?(a/1e6).toFixed(2).replace(/\.?0+$/,"")+"M":a>=1e3?(a/1e3).toFixed(1).replace(/\.0$/,"")+"k":String(parseFloat(a.toFixed(6))); };
 const cls=v=>v>=0?"gain":"loss";
+/* Config numbers the deck DISPLAYS, shipped from config (health.thresholds).
+
+   The deck used to keep its own copies — TP_PCT, TP_RUNG_PCT, and the margin-level
+   ALERT/STACK-FLOOR marks in six places of the runway. On 2026-08-05 that habit
+   produced three separate misreadings in one day, the worst of them a T/P target
+   39% off that read as a flatten being overdue. A hardcoded label does not go
+   blank when config moves; it confidently states the old value.
+
+   `thr(key, fallback)` returns the shipped number, or the fallback for an old blob
+   that predates this. The fallbacks are the values as of 2026-08-05 — they keep an
+   old server rendering rather than blank, and they are the ONLY copies left. */
+const thr=(k,fb)=>{ const t=(S&&S.health&&S.health.thresholds)||{};
+  const v=t[k]; return (typeof v==="number"&&isFinite(v))?v:fb; };
+const pctLabel=(v,d=0)=>`${(v*100).toFixed(d).replace(/\.0$/,"")}%`;
 /* W5, carried from v7: which pairs the last reconcile sweep flagged. A pair is
    bad only on an explicit ok:false — absence of data is the header's UNVERIFIED
    state, not a per-pair alarm. */
@@ -883,6 +897,10 @@ function renderHarvest(h){
   // per-rung harvest strip (the primary engine since 07-29) — cycle gauge below
   // is the book-level backstop. Ledgers stay separate: cycle profit is settled
   // minus baseline, so rung banks inside a completed cycle are already in it.
+  // Was hardcoded "rung +4% · book +20% backstop". Both are config knobs the
+  // operator has moved before, and a stale label on a live number is a lie.
+  $("hv-aux").textContent=`rung +${pctLabel(thr("tp_rung_pct",0.04))}`
+    +` · book +${pctLabel(thr("tp_pct",0.20))} backstop`;
   const rh=S.rung_harvest||{total:0,n:0,today:0,today_n:0,recent:[]};
   $("hv-rungs").innerHTML=`
     <div class="hv-rungstat">
@@ -996,8 +1014,10 @@ function renderSkim(rh){
 
 /* ═══ defense ═══ */
 function mlX(v){ // piecewise: 40→4% · 80→16% · 120→34% · 200→50% · 400→76% · 800→100%
-  // Knot at 120, not 150: 120 is MARGIN_LEVEL_ALERT_PCT (the level that pages), so it
-  // gets a control point and the 80-200 danger stretch keeps its resolution.
+  // AXIS GEOMETRY ONLY — a resolution choice, deliberately NOT config-derived. The
+  // knots give the 80-200 danger stretch room; they are not claims about where any
+  // threshold sits. The ALERT and STACK FLOOR marks drawn ON this axis do come from
+  // config, so if those move the marks move and the axis simply stays as tuned.
   const a=[[0,0],[40,4],[80,16],[120,34],[200,50],[400,76],[800,100]];
   if(v==null) return null; if(v>=800) return 100;
   for(let i=1;i<a.length;i++) if(v<=a[i][0]){
@@ -1022,23 +1042,33 @@ function renderDefense(h){
     :`<span class="loss" style="font-weight:600">recon MISMATCH ${esc(h.recon_time||"")}${rbad.length?" · "+rbad.map(b=>esc(b.lab)).join(" · "):""}</span>`;
   const lvl=h.margin_level, x=mlX(lvl);
   const W=420,H=64;
-  // Zones split at 120 (MARGIN_LEVEL_ALERT_PCT). Below it the watch is paging, so it
-  // reads hotter than the 120-200 stretch, where the book is merely under the stack
-  // floor with seeds paused — a normal operating state for this posture, not an alarm.
-  const zones=[[0,40,"rgba(216,80,107,.28)"],[40,80,"rgba(216,80,107,.14)"],
-               [80,120,"rgba(186,139,50,.22)"],[120,200,"rgba(186,139,50,.10)"],
-               [200,800,"rgba(47,169,124,.08)"]];
+  // ALERT and STACK FLOOR come from config, not from this file. They were written
+  // here six times (mlX knot, two zone edges, a tick, a label, the pointer colour)
+  // and moving either config value would have left every one of them labelling the
+  // old number — stated confidently, which is worse than blank. 40/80 stay literal:
+  // they are KRAKEN's liquidation and margin-call levels, not our knobs.
+  const ALERT=thr("ml_alert",120), FLOOR=thr("ml_stack_floor",200);
+  // Zones split at ALERT. Below it the watch is paging, so it reads hotter than the
+  // ALERT-to-FLOOR stretch, where the book is merely under the stack floor with
+  // seeds paused — a normal operating state for this posture, not an alarm.
+  // Sorted and clamped so an operator setting ALERT above FLOOR still draws a sane
+  // axis instead of a negative-width rectangle.
+  const A=Math.min(ALERT,FLOOR), B=Math.max(ALERT,FLOOR);
+  const zones=[[0,40,"rgba(216,80,107,.28)"],[40,Math.min(80,A),"rgba(216,80,107,.14)"],
+               [Math.min(80,A),A,"rgba(186,139,50,.22)"],[A,B,"rgba(186,139,50,.10)"],
+               [B,800,"rgba(47,169,124,.08)"]].filter(([a,b])=>b>a);
   const zx=v=>mlX(v)/100*W;
+  const ticks=[...new Set([40,80,ALERT,FLOOR,400])].sort((a,b)=>a-b);
   $("runway").innerHTML=`<svg viewBox="0 0 ${W} ${H}" style="width:100%" aria-label="margin level runway">
     ${zones.map(([a,b,c])=>`<rect x="${zx(a)}" y="24" width="${zx(b)-zx(a)}" height="12" fill="${c}"/>`).join("")}
     <rect x="0" y="24" width="${W}" height="12" fill="none" stroke="var(--line2)" rx="2"/>
-    ${[40,80,120,200,400].map(v=>`<line x1="${zx(v)}" x2="${zx(v)}" y1="21" y2="39" stroke="var(--line2)"/>
+    ${ticks.map(v=>`<line x1="${zx(v)}" x2="${zx(v)}" y1="21" y2="39" stroke="var(--line2)"/>
       <text x="${zx(v)}" y="52" fill="var(--ink4)" font-size="8.5" text-anchor="middle" font-family="var(--mono)">${v}</text>`).join("")}
     <text x="${zx(40)}" y="14" fill="var(--loss-ink)" font-size="8" text-anchor="middle" letter-spacing="1">LIQ</text>
     <text x="${zx(80)}" y="14" fill="var(--loss-ink)" font-size="8" text-anchor="middle" letter-spacing="1" opacity=".7">CALL</text>
-    <text x="${zx(120)}" y="14" fill="var(--warn)" font-size="8" text-anchor="middle" letter-spacing="1" opacity=".8">ALERT</text>
-    <text x="${zx(200)}" y="14" fill="var(--ink4)" font-size="8" text-anchor="middle" letter-spacing="1">STACK FLOOR</text>
-    ${x!=null?`<path d="M ${x/100*W} 22 l -5 -8 l 10 0 z" fill="${lvl>=200?"var(--gain)":lvl>=120?"var(--warn)":"var(--loss)"}"/>
+    <text x="${zx(ALERT)}" y="14" fill="var(--warn)" font-size="8" text-anchor="middle" letter-spacing="1" opacity=".8">ALERT</text>
+    <text x="${zx(FLOOR)}" y="14" fill="var(--ink4)" font-size="8" text-anchor="middle" letter-spacing="1">STACK FLOOR</text>
+    ${x!=null?`<path d="M ${x/100*W} 22 l -5 -8 l 10 0 z" fill="${lvl>=FLOOR?"var(--gain)":lvl>=ALERT?"var(--warn)":"var(--loss)"}"/>
     <text x="${Math.min(W-30, Math.max(26, x/100*W))}" y="62" fill="var(--ink)" font-size="11" font-weight="600" text-anchor="middle" font-family="var(--mono)">${lvl}%</text>`
     :`<text x="${W/2}" y="60" fill="var(--ink4)" font-size="9" text-anchor="middle">margin level populates on next bot cycle</text>`}
   </svg>`;
