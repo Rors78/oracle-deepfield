@@ -173,3 +173,50 @@ def test_deck_reads_the_two_balances_not_equity():
         "off-collateral must be eb - tb"
     assert "h.balance_total - eq" not in src, \
         "eb - equity folds unrealized P/L into the collateral gap"
+
+
+# ── % above the 52-week low (2026-08-05) ─────────────────────────────────────
+
+def test_pct_low_is_measured_against_the_price_shown(tmp_path, monkeypatch):
+    """One sentence, two different "now"s. The card's pct_above_low is computed off
+    the last SCORED close (weekly/daily) while the sheet header carries the LIVE
+    tick, so intraday they disagree. On 2026-08-05 the detail sheet read:
+
+        XRP  1.04909    "52-week 1.05162 — 3.2755 · now 1% above the low"
+
+    a price BELOW the stated low, described as above it. The 52w bounds stay
+    weekly-close truth on purpose; only the percentage is re-based."""
+    price, lo52 = 1.04909, 1.05162
+    shown = round((price / lo52 - 1) * 100, 1)
+    assert shown == -0.2, "must reflect the price actually displayed"
+    assert shown < 0, "a price under the low cannot read as above it"
+
+
+def test_a_break_below_the_low_is_not_clamped_to_zero():
+    """It was `max(0, round(...))`. That reported a break below the 52-week low as
+    "0% above" — silencing the exact event the bottom thesis exists to notice, and
+    rounding to whole percent turned every sub-1% breach into 0 as well."""
+    for price, lo52 in ((1.04909, 1.05162), (0.90, 1.00), (0.9996, 1.0000)):
+        pct = round((price / lo52 - 1) * 100, 1)
+        assert pct <= 0
+        assert max(0, round(pct)) == 0, "the old form collapsed all of these to 0"
+    assert round((0.90 / 1.00 - 1) * 100, 1) == -10.0, "a 10% break must survive"
+
+
+def test_deck_phrases_below_the_low_rather_than_negative_above():
+    """`-0.2% above the low` is not English. The deck must say BELOW."""
+    src = _decommented(DECK.read_text())
+    assert "lowPhrase(" in src, "the phrasing helper must exist"
+    assert "% above 52w low" not in src.replace("${p.pctLow}% above 52w low", ""), \
+        "raw concatenation of a possibly-negative pct must not remain"
+    assert "BELOW" in src, "a break below the low must be sayable"
+
+
+def test_pct_low_survives_a_missing_card(tmp_path):
+    """No card (young pair, unscoreable) must not blow up the pairs payload."""
+    conn = store.connect(str(tmp_path / "p.db"))
+    try:
+        out = server._assemble(conn)
+        assert isinstance(out.get("pairs"), list)
+    finally:
+        conn.close()

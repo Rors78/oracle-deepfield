@@ -336,10 +336,26 @@ def _assemble(conn):
             sig = [st_map[r.state] for r in card.results]
             na = {i: r.reason for i, r in enumerate(card.results) if r.state == engine.NA}
             score, denom, req = card.score, card.denom, card.required
-        if card and card.pct_above_low is not None:
-            pct_low = max(0, round(card.pct_above_low))
-        elif price and lo52 and lo52 > 0:
-            pct_low = max(0, round((price / lo52 - 1) * 100))
+        # Measured against the price the console actually SHOWS, not the engine's
+        # scored close. The card's own pct_above_low is computed off the last scored
+        # (weekly/daily) close while the sheet's header carries the live tick, and
+        # intraday the two are different "now"s. On 2026-08-05 that put this on one
+        # line: XRP at 1.04909 beside "52-week 1.05162 … now 1% above the low" — a
+        # price BELOW the stated low, described as above it.
+        #
+        # The 52w bounds stay weekly-close truth (deliberate — see deck.html); only
+        # the percentage is re-based so the sentence is self-consistent.
+        #
+        # NOT clamped at 0 any more. A price that has broken below its 52-week low is
+        # exactly the bottom-thesis signal this strategy is built to notice, and the
+        # clamp reported it as "0% above" — hiding the one case worth seeing. One
+        # decimal because sub-1% breaches are the common case and rounding to whole
+        # percent renders them as 0.
+        base_px = price if price else (card.price if card else None)
+        if base_px and lo52 and lo52 > 0:
+            pct_low = round((base_px / lo52 - 1) * 100, 1)
+        elif card and card.pct_above_low is not None:
+            pct_low = round(card.pct_above_low, 1)
         else:
             pct_low = None
 

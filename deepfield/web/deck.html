@@ -591,6 +591,16 @@ const fmtPx=v=>{ if(v==null)return "—"; const a=Math.abs(v);
 const fmtVol=v=>{ if(v==null)return "—"; const a=Math.abs(v);
   return a>=1e6?(a/1e6).toFixed(2).replace(/\.?0+$/,"")+"M":a>=1e3?(a/1e3).toFixed(1).replace(/\.0$/,"")+"k":String(parseFloat(a.toFixed(6))); };
 const cls=v=>v>=0?"gain":"loss";
+/* "N% above 52w low" — but a price can BREAK the low, and this was clamped at 0 so
+   it read "0% above" at the exact moment worth noticing. A break below the 52-week
+   low is the bottom thesis firing, not a rounding artifact: say so plainly. */
+const lowPhrase=(p,sheet=false)=>{
+  if(p==null) return "";
+  const where = sheet ? "the low" : "52w low";
+  if(Math.abs(p) < 0.05) return `at ${where}`;
+  return p > 0 ? `${p}% above ${where}`
+               : `<b>${Math.abs(p)}% BELOW ${where}</b>`;
+};
 /* Config numbers the deck DISPLAYS, shipped from config (health.thresholds).
 
    The deck used to keep its own copies — TP_PCT, TP_RUNG_PCT, and the margin-level
@@ -1484,7 +1494,7 @@ function renderBook(){
         :p.excluded?`<span class="dim">no new entries</span>`:"no bid"}</td>
       <td class="dim"${naNote(p)?` title="${esc(naNote(p))}"`:""}>${
         p.denom ? `score ${p.score}/${p.denom}` : `<span class="warn">unscoreable</span>`}</td>
-      <td class="dim" colspan="3">${p.pctLow!=null?p.pctLow+"% above 52w low":""}</td></tr>`).join(""):"";
+      <td class="dim" colspan="3">${lowPhrase(p.pctLow)}</td></tr>`).join(""):"";
   $("booktable").innerHTML=head+`<tbody>${rows}${scoutRows}</tbody>`;
   document.querySelectorAll("#booktable th").forEach(th=>th.addEventListener("click",()=>{
     const k=th.dataset.k; if(!k) return;
@@ -1660,7 +1670,7 @@ function renderDetail(){
       ${IVWINS[detailIv].map(([w,l])=>`<button data-w="${w}" class="${w===detailWin?"on":""}">${l}</button>`).join("")}
     </div>
     <div id="candlebox">${candleChart(d.days,p,d.fills)}</div>
-    ${lo!=null?`<div class="dim num" style="font-size:10.5px;margin-top:4px">52-week ${fmtPx(lo)} — ${fmtPx(hi)}${p.pctLow!=null?` · now ${p.pctLow}% above the low`:""}</div>`:""}
+    ${lo!=null?`<div class="dim num" style="font-size:10.5px;margin-top:4px">52-week ${fmtPx(lo)} — ${fmtPx(hi)}${p.pctLow!=null?` · now ${lowPhrase(p.pctLow, true)}`:""}</div>`:""}
     <div class="subgrid">
       <div><h4>Campaign · ${p.fills||0} fills ${p.size?`· ${fmtVol(p.size)} ${esc(detailSym)}`:""}</h4>
         <table><thead><tr><th class="l">rung</th><th>entry</th><th>vol</th><th>stop</th><th>prot</th></tr></thead><tbody>
