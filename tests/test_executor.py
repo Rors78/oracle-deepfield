@@ -1785,18 +1785,21 @@ def test_respend_disabled_fails_open(tmp_path, monkeypatch):
 
 def test_respend_pre_gate_skips_only_what_it_would_refuse(tmp_path, monkeypatch):
     """The cheap pre-gate must be conservative: it may skip only when the bucket
-    cannot fund even the smallest possible rung, so it can never drop a rung the
-    authoritative check would have funded."""
+    cannot fund even the smallest possible order, so it can never drop an order the
+    authoritative check would have funded.
+
+    The caller passes the price the order is SIZED at — here a rung one 1% ladder
+    step below a 100.0 anchor fill, so 99.0."""
     conn = _conn(tmp_path, ordermin=0.1, costmin=0.5, lot_dec=8)
     monkeypatch.setattr(config, "RESPEND_BUDGET_USD_PER_HR", 5.0)
     monkeypatch.setattr(config, "RESPEND_BURST_USD", 40.0)
     monkeypatch.setattr(config, "LADDER_STEP_PCT", 0.01)
     e = _exec(conn, mode="live")
-    # smallest rung at a 1%-lower price = 0.1 x 99.0 = $9.90
+    # smallest rung at its own price = 0.1 x 99.0 = $9.90
     _bucket(conn, tokens=1.0, age_secs=0)
-    assert e._respend_would_refuse(SYM, 100.0) is True      # $1 can't fund $9.90
+    assert e._respend_would_refuse(SYM, 99.0) is True       # $1 can't fund $9.90
     _bucket(conn, tokens=20.0, age_secs=0)
-    assert e._respend_would_refuse(SYM, 100.0) is False     # $20 can — do the work
+    assert e._respend_would_refuse(SYM, 99.0) is False      # $20 can — do the work
     conn.close()
 
 
@@ -1815,9 +1818,9 @@ def test_respend_pre_gate_scales_with_size_mult(tmp_path, monkeypatch):
     e = _exec(conn, mode="live")
     # smallest REAL rung at 2x = 0.1 x 99.0 x 2 = $19.80
     _bucket(conn, tokens=15.0, age_secs=0)
-    assert e._respend_would_refuse(SYM, 100.0) is True      # $15 funds 1x, not 2x
+    assert e._respend_would_refuse(SYM, 99.0) is True       # $15 funds 1x, not 2x
     _bucket(conn, tokens=25.0, age_secs=0)
-    assert e._respend_would_refuse(SYM, 100.0) is False     # $25 funds the 2x rung
+    assert e._respend_would_refuse(SYM, 99.0) is False      # $25 funds the 2x rung
     conn.close()
 
 

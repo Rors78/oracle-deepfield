@@ -655,23 +655,40 @@ class Executor:
         except Exception:
             return None
 
-    def _respend_would_refuse(self, symbol, ref_price):
+    def _respend_would_refuse(self, symbol, order_price):
         """Cheap read-only pre-gate: True when the bucket provably cannot fund even the
-        SMALLEST rung this symbol could produce, so the caller can skip before spending
-        a public-ticker REST call and a narration line on work that ends in a refusal.
+        SMALLEST order this symbol could produce at `order_price`, so the caller can
+        skip before spending a public-ticker REST call and a narration line on work
+        that ends in a refusal.
+
+        `order_price` is the price the order will actually be SIZED at — the caller's
+        job, because only the caller knows it. A rung passes its rung price (one
+        ladder step below the anchor fill); a seed passes live, because a seed is NOT
+        a step below anything: it opens the chain at live.
+
+        That distinction is the whole bug this signature exists to prevent. This
+        method used to apply `* (1 - LADDER_STEP_PCT)` internally, which is right for
+        one caller and wrong for the other — one rule, two meanings. The seed's bound
+        came out a full ladder step (1%) under its real notional, and because the
+        bucket is chronically starved it always crosses a threshold from BELOW: the
+        pre-gate fired the moment tokens passed the LOW bound, while the real check
+        1% higher still refused. The 8s exec loop against ~47s of accrual across that
+        gap made the miss essentially certain rather than occasional. Measured over
+        2026-07-25..08-06: 198 of 275 seeds (72%) announced "starting ladder with a
+        post-only bid" and placed nothing, silently — the gate written to prevent
+        dangling announcements was manufacturing them.
 
         Conservative by construction — it compares against a true LOWER bound on the
-        rung notional (min placeable volume at a price one ladder step BELOW ref_price,
-        which is at or under whatever the real rung prices at), so it can never skip a
-        rung that would in fact have been funded. The authoritative check remains
+        order notional (minimum placeable volume, no conviction), so it can never skip
+        an order that would in fact have been funded. The authoritative check remains
         _respend_budget_ok() on the real sizing. Never raises: any doubt -> False
         (proceed), matching the governor's own fail-open stance."""
         try:
             rate = float(getattr(config, "RESPEND_BUDGET_USD_PER_HR", 0) or 0)
-            if rate <= 0 or not ref_price or ref_price <= 0:
+            if rate <= 0 or not order_price or order_price <= 0:
                 return False                                   # OFF / unknown — proceed
             info = store.get_pair_info(self.conn, symbol) or {}
-            floor_price = ref_price * (1 - config.LADDER_STEP_PCT)
+            floor_price = float(order_price)
             vol = self._min_volume(info.get("ordermin") or 0.0, info.get("costmin") or 0.0,
                                    floor_price, info.get("lot_decimals"))
             if not vol or vol <= 0:
@@ -760,7 +777,14 @@ class Executor:
         if respend:
             ok_b, why_b, debit = self._respend_budget_ok(sizing["notional"])
             if not ok_b:
-                log.debug("EXEC %s: %s", symbol, why_b)      # per-pair per-cycle — debug
+                # INFO, not DEBUG. respend=True reaches here only from the seed path,
+                # which has ALREADY narrated "starting ladder with a post-only bid" at
+                # INFO — so this is the explanation for a stated intention, and the two
+                # must be readable at the same level. At DEBUG (off in production: the
+                # 15MB log holds zero DEBUG lines) the refusal was invisible and the
+                # announcement read as an order that vanished. Bounded by the
+                # announcement's own 600s per-symbol backoff, so it cannot spam.
+                log.info("EXEC %s: %s", symbol, why_b)
                 return None
 
         margin_pair = config.MARGIN_PAIR[symbol]
@@ -1153,7 +1177,11 @@ class Executor:
                 # last step (07-27 audit: ~27 pairs x every 10min). Leaving the clock
                 # unstamped means the pair retries as soon as the bucket refills instead
                 # of eating a full backoff for a refusal that never reached the exchange.
-                if self._respend_would_refuse(sym, entry):
+                # The rung prices one ladder step below the anchor fill (see
+                # _place_ladder_rung's `target`), so that — not the fill — is what it
+                # will be sized at. Passed explicitly since the pre-gate no longer
+                # assumes a step: a seed doesn't take one.
+                if self._respend_would_refuse(sym, entry * (1 - config.LADDER_STEP_PCT)):
                     log.debug("RELADDER %s: respend bucket can't fund the smallest rung "
                               "— skipping before the ticker fetch", sym)
                     continue
@@ -1202,6 +1230,8 @@ class Executor:
                 # bid" at INFO before being refused at DEBUG. The dangling announcement is
                 # worse than the spam it replaced: the log reads as a placement that
                 # vanished. Priced off our OWN candles so the check itself costs nothing.
+                # A seed opens the chain AT live — it is not a step below anything, so
+                # it passes live, not a laddered-down price (see _respend_would_refuse).
                 if self._respend_would_refuse(sym, self._last_local_price(sym)):
                     log.debug("SEED %s: respend bucket can't fund the smallest bid "
                               "— skipping before the ticker fetch", sym)
@@ -1209,6 +1239,15 @@ class Executor:
                 _seed_next[sym] = now + _RELADDER_RETRY_SECS
                 live = self._live_last(sym)
                 if not live or live <= 0:
+                    continue
+                # Re-check on the FRESH tick before narrating. The gate above priced off
+                # a 15m candle close that can be a quarter-hour stale; if price has run
+                # up since, the real sizing costs more than the bound just cleared and
+                # the announcement dangles again. This costs nothing — the ticker call
+                # is already spent — and closes the staleness half of the same hole.
+                if self._respend_would_refuse(sym, live):
+                    log.debug("SEED %s: respend bucket can't fund the smallest bid at the "
+                              "fresh tick %s — not announcing", sym, live)
                     continue
                 log.info("SEED %s: no chain working — starting ladder with a post-only "
                          "bid below live %s", sym, live)
@@ -2281,7 +2320,11 @@ class Executor:
             # seeds (debit only once the rung definitely rests). Signals never ladder.
             ok_b, why_b, debit = self._respend_budget_ok(sizing["notional"])
             if not ok_b:
-                log.debug("LADDER %s: %s", symbol, why_b)     # per-pair per-cycle — debug
+                # INFO for the same reason as the seed path: a rung that got this far
+                # was either announced by RELADDER or triggered by a real fill, and
+                # "the bucket paced it" is the answer to why no rung appeared. Rate is
+                # bounded by fills + the 600s reladder backoff, not the 8s poll.
+                log.info("LADDER %s: %s", symbol, why_b)
                 return
             vol = sizing["volume"]
             userref = _new_userref()
