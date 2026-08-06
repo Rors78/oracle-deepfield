@@ -944,12 +944,22 @@ class Executor:
             return None
         rep = {"ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
                "positions": [], "rungs": [], "stops_raised": 0, "stops_left_tight": []}
+        failed = False        # any deferred row keeps the marker unwritten -> retry
         try:
             # ── §h: open positions ───────────────────────────────────────────
-            for oid, sym, mpair, entry, volu, lev, stp, stp_prot, stx in self.conn.execute(
-                    "SELECT id, symbol, margin_pair, entry, volume, leverage, stop, "
-                    "stop_prot, stop_txid FROM orders WHERE status='open' AND mode=? "
-                    "AND COALESCE(entry,0)>0 ORDER BY symbol, entry DESC", (self.mode,)):
+            # fetchall(), NOT a live cursor. Iterating the cursor directly keeps a READ
+            # transaction open on this connection for the whole loop, and the loop both
+            # writes and makes broker calls — which on the paper simulator open their own
+            # connection to this same database. SQLite then cannot upgrade our read to a
+            # write while the other connection wants one, and the pass dies on "database
+            # is locked" partway through (observed 2026-08-06 10:17, aborting the cutover
+            # after the first row). Reading the work list up front costs nothing here.
+            open_rows = self.conn.execute(
+                "SELECT id, symbol, margin_pair, entry, volume, leverage, stop, "
+                "stop_prot, stop_txid FROM orders WHERE status='open' AND mode=? "
+                "AND COALESCE(entry,0)>0 ORDER BY symbol, entry DESC",
+                (self.mode,)).fetchall()
+            for oid, sym, mpair, entry, volu, lev, stp, stp_prot, stx in open_rows:
                 d = self._distances(sym)
                 self.conn.execute(
                     "UPDATE orders SET tp_pct=?, sl_pct=?, rung_pct=? WHERE id=?",
@@ -980,18 +990,42 @@ class Executor:
                     rep["stops_left_tight"].append(row)
                     rep["positions"].append(row)
                     continue
-                if stx:
-                    broker.cancel_order(stx)
-                self.conn.execute("UPDATE orders SET stop=?, stop_txid=NULL WHERE id=?",
-                                  (want, oid))
-                self.conn.commit()
-                tick = config.MARGIN_TICK_DECIMALS.get(sym, 2)
-                self._rest_stop(sym, mpair, _round_price(want, tick), volu, lev, oid,
-                                paper=(self.mode == "paper" and not _sim_attached()))
-                row["action"] = "stop raised"
+                # Cancel the old stop and record the new level, then hand the RE-ARM to
+                # _reprotect_naked_open, which runs immediately after this pass in
+                # poll_fills. Deliberately not calling _rest_stop here:
+                #
+                #   1. Reprotect is the one tested path that rests a protective stop —
+                #      it checks live backing, sibling commitments and ordering. A
+                #      second placement path in the migration is the same "one rule,
+                #      two implementations" defect this whole ruling is cleaning up.
+                #   2. _rest_stop issues a broker call, and on the paper simulator that
+                #      opens its OWN connection to this database. Doing that mid-pass
+                #      deadlocked against the migration's writes ("database is locked",
+                #      observed 2026-08-06 10:17) and aborted the whole cutover.
+                #
+                # A row therefore spends at most one poll cycle with no resting stop.
+                # That window already exists everywhere else in this codebase (every
+                # harvest cancels its stop before selling) and reprotect is what closes
+                # it. Isolated per row: one pair failing must not abort the cutover.
+                try:
+                    if stx:
+                        broker.cancel_order(stx)
+                    self.conn.execute("UPDATE orders SET stop=?, stop_txid=NULL WHERE id=?",
+                                      (want, oid))
+                    self.conn.commit()
+                except Exception:
+                    log.exception("VOL-MIGRATE %s: rung %d could not be re-stopped this "
+                                  "pass — left as it was, retrying next cycle", sym, oid)
+                    row["action"] = "deferred (write contention)"
+                    rep.setdefault("deferred", []).append(row)
+                    rep["positions"].append(row)
+                    failed = True
+                    continue
+                row["action"] = "stop raised (reprotect re-arms)"
                 rep["stops_raised"] += 1
                 rep["positions"].append(row)
-                log.warning("VOL-MIGRATE %s: rung %d stop %s -> %s (SL %.2f%%, TP %.2f%%)",
+                log.warning("VOL-MIGRATE %s: rung %d stop %s -> %s (SL %.2f%%, TP %.2f%%) "
+                            "— reprotect re-arms it this cycle",
                             sym, oid, f"{float(cur):g}" if cur else "none",
                             f"{want:g}", d["sl_pct"], d["tp_pct"])
 
@@ -1004,29 +1038,43 @@ class Executor:
                 t0 = time.time()
                 before = 1
                 killed = False
-                if txid:
-                    killed = bool(broker.cancel_order(txid))
-                self.conn.execute(
-                    "UPDATE orders SET status='canceled', error=? WHERE id=?",
-                    ("re-laddered to volatility-scaled spacing (2026-08-06 ruling)", oid))
-                self.conn.commit()
-                self._respend_credit(
-                    self.conn.execute("SELECT notional FROM orders WHERE id=?",
-                                      (oid,)).fetchone()[0], sym)
+                # Per-pair isolation: a cancel that races another writer must cost this
+                # ONE pair a retry, not abort the cutover half-done across the book.
+                try:
+                    if txid:
+                        killed = bool(broker.cancel_order(txid))
+                    self.conn.execute(
+                        "UPDATE orders SET status='canceled', error=? WHERE id=?",
+                        ("re-laddered to volatility-scaled spacing (2026-08-06 ruling)", oid))
+                    self.conn.commit()
+                    self._respend_credit(
+                        self.conn.execute("SELECT notional FROM orders WHERE id=?",
+                                          (oid,)).fetchone()[0], sym)
+                except Exception:
+                    log.exception("VOL-MIGRATE %s: rung %d not re-laddered this pass — "
+                                  "bid left as it was, retrying next cycle", sym, oid)
+                    rep["rungs"].append({"symbol": sym, "cancelled": 0, "placed": 0,
+                                         "gap_secs": 0, "before": before, "after": 1,
+                                         "shortfall": 0, "note": "deferred"})
+                    failed = True
+                    continue
                 anchor = self.conn.execute(
                     "SELECT entry, stop, leverage, score, required FROM orders WHERE symbol=? "
                     "AND status='open' AND mode=? AND entry IS NOT NULL ORDER BY entry ASC "
                     "LIMIT 1", (sym, self.mode)).fetchone()
-                placed = 0
                 if anchor:
                     a_entry, a_stop, a_lev, a_score, a_req = anchor
-                    if self._place_ladder_rung(sym, mpair, a_lev or lev, a_stop, a_entry,
-                                               a_score, a_req):
-                        placed = 1
-                else:
-                    # No open lot to anchor to — this was a seed bid. _seed_chains
-                    # re-opens the chain on its own cadence at the new spacing.
-                    placed = 0
+                    self._place_ladder_rung(sym, mpair, a_lev or lev, a_stop, a_entry,
+                                            a_score, a_req)
+                # COUNT THE BOOK, do not trust a return value. _place_ladder_rung
+                # returns None on success as well as on every refusal, so keying the
+                # report off it made "placed" permanently 0 and every pair reported
+                # "ENDS WITH FEWER RESTING RUNGS" — an alarm that could only ever fire,
+                # which is worse than no alarm. The operator asked for this signal
+                # specifically; it has to be measured, not inferred.
+                placed = self.conn.execute(
+                    "SELECT COUNT(*) FROM orders WHERE symbol=? AND status='pending' "
+                    "AND mode=?", (sym, self.mode)).fetchone()[0]
                 gap = round(time.time() - t0, 2)
                 rec = {"symbol": sym, "cancelled": 1 if (killed or not txid) else 0,
                        "placed": placed, "gap_secs": gap, "before": before,
@@ -1035,6 +1083,11 @@ class Executor:
                 log.warning("VOL-MIGRATE %s: rungs cancelled %d, placed %d, gap %.2fs%s",
                             sym, rec["cancelled"], placed, gap,
                             "" if placed >= before else "  <-- ENDS WITH FEWER RESTING RUNGS")
+            if failed:
+                log.warning("VOL-MIGRATE incomplete — %d row(s) deferred; NOT marking "
+                            "done, the next poll retries only what is left",
+                            len(rep.get("deferred", [])))
+                return rep
             store.meta_set(self.conn, "vol_migration_done", json.dumps(rep))
             log.warning("VOL-MIGRATE complete: %d positions re-targeted (%d stops raised, "
                         "%d left tighter), %d pairs re-laddered",
