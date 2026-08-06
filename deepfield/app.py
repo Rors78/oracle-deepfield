@@ -585,19 +585,7 @@ async def _exec_state_refresh(appstate, conn, ing, interval=15):
             rails_ok, reason = ((rails_detail["ok"], rails_detail["reason"])
                                 if rails_detail else (True, ""))
             rails_block_since = _track_rails_block(conn, rails_ok, reason)
-            positions = [
-                {"symbol": r[0], "entry": r[1], "stop": r[2], "volume": r[3],
-                 "leverage": r[4], "margin": r[5], "mode": r[6]}
-                for r in conn.execute(
-                    "SELECT symbol,entry,stop,volume,leverage,margin,mode FROM orders "
-                    "WHERE status='open' ORDER BY id DESC")
-            ]
-            pending = [
-                {"symbol": r[0], "entry": r[1], "volume": r[2], "leverage": r[3]}
-                for r in conn.execute(
-                    "SELECT symbol,entry,volume,leverage FROM orders "
-                    "WHERE status='pending' ORDER BY id DESC")
-            ]
+            positions, pending = _book_rows(conn, mode)
             # v6 SURVEY read-only plumbing: per-pair ledger, journal tail, realized
             # day/week P&L (F6 boundaries, verbatim from rails_ok), min-fill capacity.
             now = datetime.datetime.now(datetime.timezone.utc)
@@ -607,7 +595,21 @@ async def _exec_state_refresh(appstate, conn, ing, interval=15):
 
             def _realized(since):        # display-only — never let it blank the snapshot
                 try:
-                    return store.realized_pnl_since(conn, since)
+                    # MODE-SCOPED, like rails_ok and the web console. This was the one
+                    # caller of three that the 2026-08-05 mode-scoping missed, while
+                    # the comment above still claimed "verbatim from rails_ok" — it was
+                    # not. A paper run is seeded from a live snapshot, so one DB holds
+                    # both ledgers; unscoped, the TUI's realized day/week showed REAL
+                    # money losses against a simulated book.
+                    #
+                    # 'off' scopes to None (the documented unscoped default) rather
+                    # than to the literal string: no order row is ever written with
+                    # mode='off', so scoping to it would report a flat $0.00 for an
+                    # operator who is inspecting a real book with execution disabled.
+                    # The web console reaches the same answer by a different road —
+                    # _active_mode falls through 'off' to the last working order.
+                    return store.realized_pnl_since(
+                        conn, since, mode if mode in ("live", "paper") else None)
                 except Exception:
                     log.exception("realized_pnl_since failed (display value only)")
                     return 0.0
@@ -634,10 +636,7 @@ async def _exec_state_refresh(appstate, conn, ing, interval=15):
                     return None
             # live stop coverage: open rows carrying a resting stop txid (header
             # safety-reading number — tracks the live book, not the boot recon stamp)
-            scov = conn.execute(
-                "SELECT COUNT(*), COALESCE(SUM(CASE WHEN stop_txid IS NOT NULL "
-                "AND stop_txid<>'' THEN 1 ELSE 0 END),0) FROM orders WHERE status='open'"
-            ).fetchone()
+            scov = _stop_coverage(conn, mode)         # same book as everything above
             # Defense buffer engine (Wave 1): price-space liq telemetry +
             # edge-triggered escalation. Needs a TradeBalance for the notional `v` —
             # which the paper simulator now supplies, so the gate is the BALANCE, not
@@ -772,6 +771,58 @@ def _run_defense(conn, balance, equity, margin_used, now):
 
 
 _ml_worst_bucket = None   # worst 5-point margin-level bucket paged since the last recovery
+
+
+def _book_mode(mode):
+    """WHICH BOOK does an aggregate mean? A paper run is seeded from a live DB
+    snapshot, so one file legitimately holds a live P&L ledger AND live paper rows.
+
+    Returns the mode to filter on, or None for "every row" — which is what 'off'
+    means here. No order row is ever written with mode='off', so scoping to the
+    literal would blank a real book that the operator is inspecting with execution
+    disabled: a regression dressed as a fix. The web console reaches the same answer
+    by a different road (server._active_mode falls through 'off' to the last working
+    order)."""
+    return mode if mode in ("live", "paper") else None
+
+
+def _book_rows(conn, mode):
+    """Open positions and resting entry bids for ONE book — (positions, pending).
+
+    These were unscoped while rails_ok counted committed positions mode-scoped, so
+    the executor and the operator's screen were describing different books. Harmless
+    with a single book in the file; it is paper, where both ledgers coexist, that the
+    split quietly invalidated."""
+    m = _book_mode(mode)
+    clause = " AND mode=?" if m else ""
+    args = (m,) if m else ()
+    positions = [
+        {"symbol": r[0], "entry": r[1], "stop": r[2], "volume": r[3],
+         "leverage": r[4], "margin": r[5], "mode": r[6]}
+        for r in conn.execute(
+            "SELECT symbol,entry,stop,volume,leverage,margin,mode FROM orders "
+            "WHERE status='open'" + clause + " ORDER BY id DESC", args)
+    ]
+    pending = [
+        {"symbol": r[0], "entry": r[1], "volume": r[2], "leverage": r[3]}
+        for r in conn.execute(
+            "SELECT symbol,entry,volume,leverage FROM orders "
+            "WHERE status='pending'" + clause + " ORDER BY id DESC", args)
+    ]
+    return positions, pending
+
+
+def _stop_coverage(conn, mode):
+    """(open lots, lots carrying a resting protective stop) for ONE book. The live
+    safety reading behind "7/7 stops resting" — it tracks the book right now rather
+    than the boot recon stamp, so it must not count another book's stops."""
+    m = _book_mode(mode)
+    clause = " AND mode=?" if m else ""
+    args = (m,) if m else ()
+    return conn.execute(
+        "SELECT COUNT(*), COALESCE(SUM(CASE WHEN stop_txid IS NOT NULL "
+        "AND stop_txid<>'' THEN 1 ELSE 0 END),0) FROM orders WHERE status='open'"
+        + clause, args).fetchone()
 
 
 def _track_rails_block(conn, rails_ok, reason):
