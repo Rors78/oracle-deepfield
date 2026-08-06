@@ -808,3 +808,48 @@ def test_market_order_fills_at_the_market_not_at_zero(sim):
     # closing 90 -> ~95 must GAIN, not wipe the notional
     assert float(paper_broker._state_get("cash")) > cash0
     assert broker.open_positions() == {}
+
+
+def test_fresh_seed_inherits_no_book_state(tmp_path):
+    """A paper DB is seeded by snapshotting the LIVE one, for its candle history.
+    That is right for what describes the MARKET and wrong for everything that
+    describes a BOOK — and it went wrong five separate ways on 2026-08-05: the fee
+    anchors, the T/P cycle ledger, the equity curve (a $1000->$200 reset drawn as an
+    80% crash), the journal (the HARVEST filter showed a LIVE rung bank), and the
+    alert ledger. This pins the whole family so a sixth cannot creep in.
+
+    Note what is deliberately NOT reset: candles and pairs. Inheriting those is the
+    entire reason to seed from a snapshot rather than re-backfill the roster over the
+    shared public API."""
+    db = str(tmp_path / "seeded.db")
+    conn = store.connect(db)
+    # a snapshot of a live book: market data AND book state
+    store.upsert_pair(conn, "XXBTZUSD", SYM, "BTC", 0.00005, 0.5, 8)
+    store.upsert_candle(conn, SYM, 15, 1785000000, 1, 1, 1, 1, 1.0, 1)
+    store.meta_set(conn, "fees_total", "10.579")
+    store.meta_set(conn, "fees_epoch", "1784449954.0")
+    store.journal(conn, "tp-rung", "HBAR/USD", "rung 877 banked $+0.1285 (55 sold)")
+    store.journal(conn, "safety", "*", "[recon-mismatch] 107 ledger rows retired")
+    conn.execute("INSERT INTO equity_history(ts,equity) VALUES(?,?)", (1785000000, 1000.21))
+    conn.execute("INSERT INTO alerts(ts,symbol,price,score,denom,signals,kind) "
+                 "VALUES(?,?,?,?,?,?,?)", ("2026-07-04T10:23", SYM, 1.0, 5, 7, "", "confirmed"))
+    conn.commit()
+
+    market_before = (conn.execute("SELECT COUNT(*) FROM candles").fetchone()[0],
+                     conn.execute("SELECT COUNT(*) FROM pairs").fetchone()[0])
+    assert market_before == (1, 1)
+
+    paper_broker.attach(db)
+    try:
+        for tbl in ("journal", "alerts", "equity_history", "tp_cycles"):
+            n = conn.execute(f"SELECT COUNT(*) FROM {tbl}").fetchone()[0]
+            assert n == 0, f"{tbl} inherited {n} row(s) from the snapshot"
+        # fee accounting re-anchored to this book, prior values recoverable
+        assert float(store.meta_get(conn, "fees_total")) == 0.0
+        assert store.meta_get(conn, "prepaper_fees_total") == "10.579"
+        # and the market data — the reason for the snapshot — is untouched
+        assert (conn.execute("SELECT COUNT(*) FROM candles").fetchone()[0],
+                conn.execute("SELECT COUNT(*) FROM pairs").fetchone()[0]) == market_before
+    finally:
+        paper_broker.detach()
+    conn.close()
