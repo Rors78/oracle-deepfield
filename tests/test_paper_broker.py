@@ -931,3 +931,69 @@ def test_owns_level_near_is_mode_scoped(sim, monkeypatch):
     assert e._owns_level_near(SYM, 120.0, 0.01) is False
     sim.execute("UPDATE orders SET mode='live' WHERE symbol=?", (SYM,)); sim.commit()
     assert e._owns_level_near(SYM, 100.5, 0.01) is False, "saw another mode's position"
+
+
+# ── reverse gear internals: reachable code now the trigger is 16% ────────────
+
+def test_pick_trim_lot_takes_the_largest_and_is_mode_scoped(sim, monkeypatch):
+    """Largest-notional first sheds the most exposure per close, so a trim needs the
+    fewest closes and pays the least fee drag. Mode scoping matters because a paper
+    book must never pick a live row to shed."""
+    e = _armed_exec(sim, monkeypatch)
+    for entry, vol, notl in ((100.0, 1.0, 5.0), (100.0, 1.0, 50.0), (100.0, 1.0, 20.0)):
+        sim.execute("INSERT INTO orders(ts,symbol,margin_pair,side,ordertype,mode,entry,"
+                    "stop,volume,leverage,notional,status) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                    ("2026-08-05T00:00:00+00:00", SYM, MPAIR, "buy", "limit", "paper",
+                     entry, 90.0, vol, 10, notl, "open"))
+    sim.commit()
+    assert e._pick_trim_lot()["notional"] == 50.0
+
+    # a closed row self-excludes, so a pass walks down the book
+    sim.execute("UPDATE orders SET status='closed' WHERE notional=50.0"); sim.commit()
+    assert e._pick_trim_lot()["notional"] == 20.0
+
+    # another mode's rows are invisible
+    sim.execute("UPDATE orders SET mode='live' WHERE status='open'"); sim.commit()
+    assert e._pick_trim_lot() is None, "picked a lot belonging to another book"
+
+
+def test_close_lot_caps_at_live_volume_and_never_flips_short(sim, monkeypatch):
+    """THE no-short invariant. The ledger row can legitimately overstate what is
+    actually held (a stop filled while we were down). Closing the ROW's volume would
+    sell more than exists and open a short on a long-only book."""
+    e = _armed_exec(sim, monkeypatch)
+    _now_bar(sim, 100.0)
+    _add(90.0)
+    _now_bar(sim, 90.0)
+    broker.open_positions()                       # a REAL 0.001 position exists
+    held = paper_broker._long_open_vol(MPAIR)
+    assert held == pytest.approx(0.001)
+
+    oid = _mk(sim, entry=90.0, stop=80.0)         # ledger row claims 1.0 — 1000x reality
+    lot = {"id": oid, "symbol": SYM, "margin_pair": MPAIR, "volume": 1.0,
+           "leverage": 10, "stop_txid": None, "notional": 90.0}
+    assert e._close_lot(lot) is True
+    broker.open_positions()                       # settle the market close
+    assert paper_broker._long_open_vol(MPAIR) == pytest.approx(0.0)
+    assert broker.open_positions() == {}, "a short was opened"
+    # Assert on what the EXECUTOR REQUESTED, not on what filled. The simulator has
+    # its own long-only guard that caps a sell at the volume actually held, so
+    # checking vol_exec would pass even with the executor's cap removed — it would
+    # test the simulator's safety net instead of the executor's. `volume` is the
+    # order as SENT; against a real exchange that is the number that matters.
+    asked = sim.execute("SELECT SUM(volume) FROM paper_orders WHERE type='sell'").fetchone()[0]
+    assert asked == pytest.approx(0.001), (
+        f"executor asked to sell {asked} holding only {held} — uncapped, this shorts "
+        f"on any exchange without its own guard")
+
+
+def test_close_lot_refuses_to_close_blind(sim, monkeypatch):
+    """If live net long cannot be read, closing would be a guess at size. Refuse and
+    retry next cycle rather than sell an unknown quantity."""
+    e = _armed_exec(sim, monkeypatch)
+    monkeypatch.setattr(ex_mod.Executor, "_pair_net_long", lambda self, s: None)
+    oid = _mk(sim, entry=90.0, stop=80.0)
+    lot = {"id": oid, "symbol": SYM, "margin_pair": MPAIR, "volume": 1.0,
+           "leverage": 10, "stop_txid": None, "notional": 90.0}
+    assert e._close_lot(lot) is False
+    assert sim.execute("SELECT status FROM orders WHERE id=?", (oid,)).fetchone()[0] == "open"
