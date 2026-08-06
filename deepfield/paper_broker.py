@@ -42,8 +42,6 @@ would understate accumulation for a reason that has nothing to do with the marke
 A partial CLOSE is a different thing and is supported — a sell smaller than a lot
 advances vol_closed and leaves the remainder open (see _close_longs).
 """
-import datetime
-import json
 import logging
 import random
 import sqlite3

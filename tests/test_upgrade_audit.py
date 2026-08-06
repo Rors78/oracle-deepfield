@@ -6,7 +6,6 @@ A5 provisional cleared on close    A6 countdown monotonic guard
 """
 import time
 import asyncio
-import datetime
 
 from deepfield import store, events, alerter, engine
 from deepfield.ingest import Ingest

@@ -1216,7 +1216,22 @@ def _run_banner():
     if sha:
         bits.append(f"code={sha}")
     if config.EXEC_MODE != "live":
-        bits.append(f"paper_equity=${config.PAPER_PORTFOLIO_USD:g}")
+        # The SEEDED cash, not the config constant. PAPER_PORTFOLIO_USD seeds the
+        # simulated book exactly ONCE (paper_broker line ~154: only when `cash` is
+        # unset), so on every restart against an existing book the constant and the
+        # actual money diverge — this banner announced "paper_equity=$1000" over a
+        # $199.67 book on 2026-08-05. A boot line whose job is to identify the run
+        # must not state a number the run does not have. Falls back to the constant
+        # for a genuinely fresh book, and never blocks the banner on a DB read.
+        seeded = None
+        try:
+            row = store.connect(config.DB_PATH).execute(
+                "SELECT value FROM paper_state WHERE key='cash'").fetchone()
+            seeded = float(row[0]) if row and row[0] is not None else None
+        except Exception:
+            seeded = None
+        bits.append(f"paper_cash=${seeded:,.2f}" if seeded is not None
+                    else f"paper_seed=${config.PAPER_PORTFOLIO_USD:g} (fresh book)")
     bits += [f"size_mult={config.SIZE_MULT:g}",
              f"rails={'on' if config.RAILS_ENABLED else 'OFF'}",
              f"db={config.DB_PATH}"]

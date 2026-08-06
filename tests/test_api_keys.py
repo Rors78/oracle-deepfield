@@ -21,7 +21,6 @@ def _reset_key_cache(monkeypatch, keyfiles):
 
 def test_primary_keyfile_is_named_at_info(tmp_path, monkeypatch, caplog):
     """Which key is this process actually using? Before 2026-08-05 nothing said."""
-    from deepfield import broker
     primary = tmp_path / "primary"
     primary.write_text("KEY1\nSECRET1\n")
     b = _reset_key_cache(monkeypatch, [str(primary), str(tmp_path / "absent")])
@@ -36,7 +35,6 @@ def test_fallback_keyfile_warns_loudly(tmp_path, monkeypatch, caplog):
     silently, Kraken answered EAPI:Invalid key and then locked the ACCOUNT out ~650
     times. The cascade was blamed on rate-limit pressure for two boots because no
     line named the file in use. Falling back is fine; doing it mutely is not."""
-    from deepfield import broker
     missing = tmp_path / "gone"
     fallback = tmp_path / "stale"
     fallback.write_text("OLDKEY\nOLDSECRET\n")
@@ -52,7 +50,6 @@ def test_fallback_keyfile_warns_loudly(tmp_path, monkeypatch, caplog):
 
 
 def test_no_keys_at_all_is_an_error_not_a_shrug(tmp_path, monkeypatch, caplog):
-    from deepfield import broker
     b = _reset_key_cache(monkeypatch, [str(tmp_path / "a"), str(tmp_path / "b")])
     with caplog.at_level("INFO", logger="deepfield.broker"):
         assert b.load_keys() == (None, None, None)
@@ -62,7 +59,6 @@ def test_no_keys_at_all_is_an_error_not_a_shrug(tmp_path, monkeypatch, caplog):
 def test_short_keyfile_is_skipped_not_half_loaded(tmp_path, monkeypatch):
     """A truncated file (key, no secret) must fall through rather than authenticate
     with a None secret."""
-    from deepfield import broker
     short = tmp_path / "short"
     short.write_text("ONLYKEY\n")
     good = tmp_path / "good"

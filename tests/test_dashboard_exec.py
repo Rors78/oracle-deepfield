@@ -2,8 +2,8 @@
 and that the frame renders the exec regions without exploding."""
 import time
 
-from deepfield import store, config, ui, executor as ex_mod
-from deepfield.state import AppState, PairState
+from deepfield import store, ui, executor as ex_mod
+from deepfield.state import AppState
 
 
 SYM = "BTC/USD"

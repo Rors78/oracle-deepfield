@@ -11,10 +11,8 @@ import asyncio
 import logging
 
 from . import config
-from . import store
 from . import ui
 from .app import _startup, _make_ws_clients, _make_gap_heal_cb
-from .ingest import Ingest
 
 
 async def main(run_secs=75):

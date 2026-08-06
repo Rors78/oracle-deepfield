@@ -584,7 +584,7 @@ def test_excluded_pairs_are_absent_from_seed_list():
 
 # ── run banner ───────────────────────────────────────────────────────────────
 
-def test_run_banner_records_what_the_run_means(caplog, monkeypatch):
+def test_run_banner_records_what_the_run_means(tmp_path, caplog, monkeypatch):
     """The log is append-only and never rotated, so one file holds every restart.
     The banner is what lets a grep be scoped to a single run — and what says which
     build produced the lines."""
@@ -592,12 +592,51 @@ def test_run_banner_records_what_the_run_means(caplog, monkeypatch):
     monkeypatch.setattr(config, "EXEC_MODE", "paper")
     monkeypatch.setattr(config, "PAPER_PORTFOLIO_USD", 200.0)
     monkeypatch.setattr(config, "SIZE_MULT", 2.0)
+    # Point at an empty DB: the banner now reads paper_state for the seeded cash,
+    # and a test must not read whatever book happens to sit in the checkout.
+    monkeypatch.setattr(config, "DB_PATH", str(tmp_path / "empty.db"))
     with caplog.at_level("WARNING"):
         app._run_banner()
     line = "\n".join(r.getMessage() for r in caplog.records)
     assert "RUN START" in line
-    for expect in ("exec=paper", "paper_equity=$200", "size_mult=2", "rails=", "db=", "pid="):
+    for expect in ("exec=paper", "size_mult=2", "rails=", "db=", "pid="):
         assert expect in line, f"banner missing {expect}: {line}"
+    # No paper book seeded here, so it must say SEED and mark it fresh — never
+    # imply the run holds money it does not.
+    assert "paper_seed=$200" in line and "fresh book" in line, line
+
+
+def test_run_banner_reports_seeded_cash_not_the_constant(tmp_path, caplog, monkeypatch):
+    """PAPER_PORTFOLIO_USD seeds the simulated book exactly ONCE, so on every
+    restart against an existing book the constant and the actual money diverge. On
+    2026-08-05 the banner announced "paper_equity=$1000" over a $199.67 book. A boot
+    line whose whole job is to identify the run must not state a number the run does
+    not have."""
+    from deepfield import app
+    db = tmp_path / "paper.db"
+    conn = store.connect(str(db))
+    conn.execute("CREATE TABLE IF NOT EXISTS paper_state(key TEXT PRIMARY KEY, value TEXT)")
+    conn.execute("INSERT INTO paper_state(key,value) VALUES('cash','199.67')")
+    conn.commit(); conn.close()
+    monkeypatch.setattr(config, "EXEC_MODE", "paper")
+    monkeypatch.setattr(config, "PAPER_PORTFOLIO_USD", 1000.0)
+    monkeypatch.setattr(config, "DB_PATH", str(db))
+    with caplog.at_level("WARNING"):
+        app._run_banner()
+    line = "\n".join(r.getMessage() for r in caplog.records)
+    assert "paper_cash=$199.67" in line, line
+    assert "1000" not in line, f"the seed constant must not appear over a live book: {line}"
+
+
+def test_run_banner_survives_an_unreadable_db(tmp_path, caplog, monkeypatch):
+    """The banner reads the DB now. It must still never be the reason a trading
+    process fails to start."""
+    from deepfield import app
+    monkeypatch.setattr(config, "EXEC_MODE", "paper")
+    monkeypatch.setattr(config, "DB_PATH", "/nonexistent/dir/nope.db")
+    with caplog.at_level("WARNING"):
+        app._run_banner()                   # must not raise
+    assert "RUN START" in "\n".join(r.getMessage() for r in caplog.records)
 
 
 def test_run_banner_survives_a_broken_git(monkeypatch):

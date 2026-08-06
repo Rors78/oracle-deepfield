@@ -16,7 +16,7 @@ from . import engine
 from . import config
 from . import defense
 from . import VERSION
-from .signals import FIRED, NOT, NA
+from .signals import FIRED, NA
 
 DENVER = ZoneInfo("America/Denver")
 DISPLAY = {p["ws"]: p["display"] for p in config.PAIRS}

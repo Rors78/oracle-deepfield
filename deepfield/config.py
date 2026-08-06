@@ -125,17 +125,9 @@ PROVISIONAL_ALERTS = False # invariant 7: provisional is display-only unless Tru
 # --- Conviction multipliers (F8): score relative to required threshold ---
 CONVICTION = {0: 1.0, 1: 2.0, 2: 3.0}  # +1 -> 2x, +2 and above -> 3x (STARTER at 0)
 
-# --- Named horizontal price levels (F7), display-only, operator-edited ---
-LEVELS = {
-    "BTC/USD": [("62.8k", 62858), ("57.6k", 57585)],
-}
-
 # --- UI cadence ---
 SIMPLE_SECS = 60           # plaintext frame period in --simple mode
 RENDER_HZ = 2              # rich Live render cap
-FLASH_SECS = 0.6           # tick-direction tint window; >= one render period at
-                           # RENDER_HZ=2 so the flash is actually visible (spec's
-                           # ~300ms would fall between frames half the time)
 
 # --- Candle-close clock fallback (SPEC §5b) ---
 # The WS ohlc feed sends NOTHING across an interval border until the next trade.

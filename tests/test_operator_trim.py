@@ -4,9 +4,8 @@ open rows) so the assertions are about the trim's SCOPE and safety, not the math
 it must touch exactly one pair, cancel only that pair's bids, honor --lots, stop
 on a failed close, and never fire outside live mode.
 """
-import pytest
 
-from deepfield import config, store, executor as ex_mod
+from deepfield import store, executor as ex_mod
 
 from .test_reverse_gear import _seed_open_lots, _install_mock_broker
 

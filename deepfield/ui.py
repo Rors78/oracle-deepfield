@@ -76,16 +76,6 @@ def _fmt_usd(v):
     return f"+${v:,.2f}" if v > 0 else f"-${abs(v):,.2f}"
 
 
-def _fmt_age(secs):
-    if secs is None or secs == float("inf"):
-        return "---"
-    if secs < 60:
-        return f"{secs:.0f}s"
-    if secs < 3600:
-        return f"{secs / 60:.0f}m"
-    return f"{secs / 3600:.1f}h"
-
-
 def _fmt_hms(secs):
     secs = max(0, int(secs))
     h, rem = divmod(secs, 3600)
@@ -109,16 +99,6 @@ def _local_short(ts_iso):
         return dt.astimezone(DENVER).strftime("%m-%d %H:%M")
     except Exception:
         return (ts_iso or "")[:16]
-
-
-def _local_hm(ts_iso):
-    try:
-        dt = datetime.datetime.fromisoformat(ts_iso)
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=datetime.timezone.utc)
-        return dt.astimezone(DENVER).strftime("%H:%M")
-    except Exception:
-        return "--:--"
 
 
 def _local_hms(ts_iso):

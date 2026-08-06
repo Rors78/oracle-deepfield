@@ -22,7 +22,7 @@ from . import alerter
 from . import config
 from .profiles import FULL
 from .state import TrancheInfo
-from .config import (REALERT_HOURS, PROVISIONAL_ALERTS, STALE_SECS, FLASH_SECS,
+from .config import (REALERT_HOURS, PROVISIONAL_ALERTS, STALE_SECS,
                      CLOSE_GRACE_SECS, CLOSE_POLL_SECS)
 
 log = logging.getLogger("deepfield.ingest")
@@ -95,9 +95,6 @@ class Ingest:
 
     def handle_tick(self, ev: events.Tick):
         ps = self.state.pair(ev.symbol)
-        if ps.last_tick is not None and ev.last != ps.last_tick.last:
-            ps.flash_color = "green" if ev.last > ps.last_tick.last else "red"
-            ps.flash_until = time.monotonic() + FLASH_SECS
         ps.last_tick = ev
         ps.last_tick_ts = ev.ts
         # Keep the champion card's tranche priced off the live tick, not stale

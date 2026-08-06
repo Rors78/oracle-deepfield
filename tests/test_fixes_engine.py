@@ -2,11 +2,10 @@
 import logging
 from logging.handlers import RotatingFileHandler
 
-import pytest
 
 from deepfield import engine
 from deepfield import VERSION, USER_AGENT
-from deepfield.signals import FIRED, NOT, NA
+from deepfield.signals import NOT, NA
 from deepfield.profiles import COMPAT, FULL
 from deepfield.logsetup import setup_logging
 

@@ -3,7 +3,6 @@
 Never touches the network (live/validate broker calls are monkeypatched). No
 test can place a real order — paper and off are the only self-contained modes.
 """
-import os
 import time
 import json
 import sqlite3
@@ -1499,7 +1498,7 @@ def test_tp_fires_off_trough_and_books_red_cycle(tmp_path, monkeypatch):
     _wire_tp(monkeypatch, equity=80.0, positions={}, open_orders={}, terminal={}, sent=sent)
     e = _exec(conn, mode="live")
     assert e._check_take_profit() is False                         # ratchet only
-    a = _seed_open(conn, "OSTOP-A", vol=0.5)
+    _seed_open(conn, "OSTOP-A", vol=0.5)
     _wire_tp(monkeypatch, equity=96.5, positions={"P": _pos(0.5)}, open_orders={},
              terminal={}, sent=sent, bid=64990.0, ask=65000.0)
     assert e._check_take_profit() is True                          # fired off the trough
@@ -1533,7 +1532,7 @@ def test_tp_floor_at_baseline_never_banks_loss(tmp_path, monkeypatch):
     assert e._check_take_profit() is False                          # ratchet only
     assert float(store.meta_get(conn, "tp_trough")) == 80.0
     # the bounce that fired a red cycle un-floored — held here (96.5 < 100 floor)
-    a = _seed_open(conn, "OSTOP-A", vol=0.5)
+    _seed_open(conn, "OSTOP-A", vol=0.5)
     _wire_tp(monkeypatch, equity=96.5, positions={"P": _pos(0.5)}, open_orders={},
              terminal={}, sent=sent, bid=64990.0, ask=65000.0)
     assert e._check_take_profit() is False                          # FLOORED — no loss-fire
@@ -1560,7 +1559,7 @@ def test_tp_no_ratchet_while_flatten_active(tmp_path, monkeypatch):
     store.meta_set(conn, "tp_baseline", 100.0)
     store.meta_set(conn, "tp_trough", 90.0)
     store.meta_set(conn, "tp_flatten_active", "1")
-    a = _seed_open(conn, "OSTOP-A", vol=0.5)
+    _seed_open(conn, "OSTOP-A", vol=0.5)
     sent = []
     _wire_tp(monkeypatch, equity=50.0, positions={"P": _pos(0.5)}, open_orders={},
              terminal={}, sent=sent)

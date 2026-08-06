@@ -5,7 +5,6 @@ ingest persists to `meta`. Critically it FAILS OPEN — only an unambiguous BULL
 regime pauses accumulation; missing/unknown/other regimes still accumulate, so a
 stale or unavailable regime can never silently halt entries (no-blockers stance).
 """
-import sqlite3
 import pytest
 
 from deepfield import store, config, executor as ex_mod

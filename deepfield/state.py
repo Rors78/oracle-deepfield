@@ -22,8 +22,6 @@ class PairState:
     symbol: str
     last_tick: object = None          # events.Tick or None
     last_tick_ts: float = 0.0         # wall-clock receipt time (F5 tick_age)
-    flash_color: str = None           # "green"/"red" — last tick direction (§8)
-    flash_until: float = 0.0          # monotonic deadline for the ~300ms tint
     confirmed: object = None          # engine.ScoreCard or None
     provisional: object = None        # engine.ScoreCard or None
     last_provisional_ts: float = 0.0  # monotonic; throttles F13 to <=1/s

@@ -3,7 +3,6 @@ integration test of Executor._reverse_gear with a self-consistent balance mock
 (closing a lot drops notional/margin, so the buffer rises exactly as it would
 live). Guards: fail-open, cap, disabled, never-flip-short, cancels bids.
 """
-import math
 import pytest
 
 from deepfield import defense, config, store, executor as ex_mod
@@ -11,32 +10,12 @@ from deepfield import defense, config, store, executor as ex_mod
 
 # ── pure decision math ───────────────────────────────────────────────────────
 
-def test_project_buffer_rises_when_shedding():
-    # e=185 m=172 v=1250 -> 9.30% ; shed 30 margin / 300 notional -> higher
-    base = defense.project_buffer(185, 172, 1250)
-    shed = defense.project_buffer(185, 172, 1250, d_margin=30, d_value=300)
-    assert base == pytest.approx(9.30, abs=0.05)
-    assert shed > base
-    assert defense.project_buffer(185, 172, 1250, d_value=1250) == math.inf  # flat
-    assert defense.project_buffer(None, 1, 1) is None
-
-
 @pytest.mark.parametrize("buf,trig,expected", [
     (7.9, 8.0, True), (8.0, 8.0, False), (12.0, 8.0, False),
     (None, 8.0, False), (float("inf"), 8.0, False), (float("nan"), 8.0, False),
 ])
 def test_should_trim_fails_open(buf, trig, expected):
     assert defense.should_trim(buf, trig) is expected
-
-
-def test_plan_trim_closes_enough_largest_first_and_caps():
-    lots = [{"value": 300, "margin": 30, "id": i} for i in range(6)]
-    for L in lots:
-        L["rank_key"] = -L["value"]
-    sel, proj = defense.plan_trim(lots, 185, 172, 1800, target_pct=12.0, max_lots=4)
-    assert 0 < len(sel) <= 4
-    # projected buffer with the selection meets target (or hit the cap)
-    assert proj >= 12.0 or len(sel) == 4
 
 
 # ── integration: Executor._reverse_gear ──────────────────────────────────────
@@ -128,7 +107,9 @@ def test_fires_and_deleverages_to_target(tmp_path, monkeypatch):
     # ended at/above target OR hit the per-pass cap
     rows = conn.execute("SELECT COALESCE(notional,0),COALESCE(margin,0) FROM orders WHERE status='open'").fetchall()
     v = sum(r[0] for r in rows); m = sum(r[1] for r in rows)
-    buf = defense.project_buffer(EQUITY, m, v)
+    # liq buffer after the shed, stated here rather than imported: the helper this
+    # used to call had no production caller, so it was the test propping it up.
+    buf = (EQUITY - defense.LIQ_ML * m) / v * 100.0 if v > 0 else float('inf')
     assert buf >= 12.0 or (before - after) == 8
 
 

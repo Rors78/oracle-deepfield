@@ -393,7 +393,7 @@ def test_ratchet_does_not_freeze_the_ladder(tmp_path, monkeypatch):
     so writing breakeven into `stop` would trip "ladder floor reached" and silently
     stop accumulating on a winning pair."""
     conn = _mk_conn(tmp_path)
-    oid = _seed_rung(conn, entry=1.0, vol=100.0, stop=0.92)
+    _seed_rung(conn, entry=1.0, vol=100.0, stop=0.92)
     _seed_candle(conn, 1.05)
     _mock_broker(monkeypatch, quotes={REST: {"b": ["1.049"], "a": ["1.051"]}},
                  positions=_pos(100.0))

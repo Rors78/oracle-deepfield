@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from . import indicators as ind
 from . import signals as sg
 from .signals import FIRED, NOT, NA, SignalResult
-from .profiles import Profile, FULL
+from .profiles import FULL
 from .config import MIN_RATIO, STRICT_SEVEN, DANGER_DRSI, STALE_SECS, REALERT_HOURS, CONVICTION
 
 

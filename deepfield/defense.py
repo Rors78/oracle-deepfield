@@ -129,23 +129,6 @@ def step(prev, computed, tier, now):
     return new_state, events
 
 
-def project_buffer(e, m, v, d_margin=0.0, d_value=0.0):
-    """Liq buffer % AFTER shedding d_margin of used margin and d_value of notional
-    by closing lots. Equity is ~conserved across a close (realized P&L replaces the
-    unrealized that was already in equity; only fees nick it, ignored here as
-    second-order). Pure. v-d_value<=0 (fully flat) -> +inf. None on bad e."""
-    try:
-        e = float(e); m = float(m); v = float(v)
-    except (TypeError, ValueError):
-        return None
-    if not (e > 0):
-        return None
-    nv = v - d_value
-    if nv <= 0:
-        return math.inf
-    return (e - LIQ_ML * (m - d_margin)) / nv * 100.0
-
-
 def stress_buffer(e, m, v, adverse_move):
     """Liq buffer % the CURRENT book would have after an adverse basket move of
     `adverse_move` (a fraction: 0.10 == the whole book down 10%).
@@ -272,28 +255,6 @@ def should_trim(buffer_liq_pct, trigger_pct):
     if math.isnan(b) or math.isinf(b):
         return False
     return b < trigger_pct
-
-
-def plan_trim(lots, e, m, v, target_pct, max_lots):
-    """Select whole lots to close to lift the liq buffer to target_pct. `lots` is a
-    list of dicts each with 'margin', 'value' (current notional) and 'rank_key'
-    (lower = close FIRST; default heuristic uses -value so the largest-notional lot,
-    which sheds the most exposure per close, goes first). Greedy in rank order, capped
-    at max_lots. Returns (selected_lots, projected_buffer_pct). Pure — the executor
-    re-reads live balance after each real close, so this drives ORDER + the test
-    oracle, not the live stop condition."""
-    ordered = sorted(lots, key=lambda L: L.get("rank_key", -float(L.get("value", 0) or 0)))
-    sel, dm, dv = [], 0.0, 0.0
-    for L in ordered:
-        b = project_buffer(e, m, v, dm, dv)
-        if b is not None and not math.isinf(b) and b >= target_pct:
-            break
-        if len(sel) >= max_lots:
-            break
-        sel.append(L)
-        dm += float(L.get("margin", 0) or 0)
-        dv += float(L.get("value", 0) or 0)
-    return sel, project_buffer(e, m, v, dm, dv)
 
 
 def _fmt_pct(x):

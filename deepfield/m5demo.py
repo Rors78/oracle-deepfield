@@ -13,7 +13,6 @@ import time
 import logging
 
 from . import store
-from . import engine
 from . import events
 from . import ingest as ingest_mod
 from .state import AppState
