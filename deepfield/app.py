@@ -1046,7 +1046,14 @@ def _persist_web_live(conn, appstate, equity, margin_used, free_margin, balance)
     # target reachable after a drawdown while the baseline stays the ledger's
     # profit yardstick (executor._check_take_profit).
     tptr = _mg("tp_trough")
-    tp_eff = min(tpb, tptr) if (tpb and tptr) else tpb
+    # The TARGET is not min(baseline,trough) * (1 + TP_PCT). It was computed that way here for
+    # two weeks while the executor also applied the 07-27 baseline floor, and on
+    # 2026-08-05 the two disagreed by 39% — the deck showed $208.54 against $223.30
+    # of equity, reading as a flatten 6.6% overdue, while the executor's real target
+    # was $289.83 and the book was 23% below it, holding. Call the executor's own
+    # definition so a console number cannot mean something different from the rail.
+    from . import executor as _ex          # local import, as elsewhere in this file
+    tp_tgt = _ex.tp_target(tpb, tptr if tptr else tpb) if tpb else None
     # Defense telemetry (Wave 1) for the web dashboard's future health band. inf
     # (flat book) -> None so the blob stays STRICT JSON (JS JSON.parse rejects
     # Infinity); a JS reader treats None as "no positions / no risk".
@@ -1082,7 +1089,7 @@ def _persist_web_live(conn, appstate, equity, margin_used, free_margin, balance)
         "mode": config.EXEC_MODE, "started": appstate.started_ts, "updated": _t.time(),
         "tp_baseline": round(tpb, 2) if tpb else None,
         "tp_trough": round(tptr, 2) if tptr else None,
-        "tp_target": round(tp_eff * (1 + config.TP_PCT), 2) if tp_eff else None,
+        "tp_target": round(tp_tgt, 2) if tp_tgt else None,
         "fees_day": _mg("fees_day"), "fees_total": _mg("fees_total"),
         "fees_epoch": _mg("fees_epoch"),
         "buffer_liq_pct": _finite(dfn.get("buffer_liq_pct")),

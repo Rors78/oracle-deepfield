@@ -38,6 +38,29 @@ from . import rest_client
 log = logging.getLogger("deepfield.exec")
 
 
+def tp_target(baseline, trough):
+    """The whole-book T/P target. ONE definition, for the fire check and the deck.
+
+    The trough ratchet lowers the target toward a bounce off the equity low so it
+    stays reachable after a drawdown; the baseline floor (operator 2026-07-27,
+    TP_TARGET_FLOOR_BASELINE) then stops it going BELOW baseline, so a fire can
+    never bank a loss — worst case is breakeven. Set False for the old
+    min(baseline,trough) behaviour that could settle red cycles.
+
+    MODULE-LEVEL because it was not, and that cost a real misreading. The floor
+    lived only inside _check_take_profit's closure, while _persist_web_live kept its
+    own `min(baseline, trough) * (1 + TP_PCT)` for the dashboard. On 2026-08-05 the
+    two disagreed by 39%: the executor's target was $289.83 and the deck showed
+    $208.54 against $223.30 of equity — telling the operator a full-book flatten was
+    6.6% OVERDUE when the book was in fact 23% below target and holding. Nothing
+    misfired; the console simply described a different bot. Both callers now read
+    this, so they cannot drift again."""
+    t = min(baseline, trough) * (1 + config.TP_PCT)
+    if getattr(config, "TP_TARGET_FLOOR_BASELINE", False):
+        t = max(baseline, t)
+    return t
+
+
 def _round_down(x, decimals):
     f = 10 ** decimals
     return math.floor(x * f) / f
@@ -1505,17 +1528,10 @@ class Executor:
                 # tp_baseline keeps its "changed underneath = cycle completed"
                 # meaning. Ratchet is skipped while a flatten owns the book —
                 # mid-chase equity is half-settled noise, not a trading trough.
-                # Baseline floor (operator 2026-07-27): the ratchet may lower the
-                # target toward a bounce off the low but NEVER below baseline, so a
-                # fire can never settle at a loss (worst case is breakeven). Both the
-                # fire check and the ratchet narration read the same _target_for so
-                # they can't disagree. TP_TARGET_FLOOR_BASELINE=False restores the old
-                # min(baseline,trough) behavior that could bank red cycles.
+                # Baseline floor: see tp_target() — the fire check, the ratchet
+                # narration AND the dashboard all read that one function now.
                 def _target_for(tr):
-                    t = min(baseline, tr) * (1 + config.TP_PCT)
-                    if getattr(config, "TP_TARGET_FLOOR_BASELINE", False):
-                        t = max(baseline, t)
-                    return t
+                    return tp_target(baseline, tr)
                 trough = 0.0
                 try:
                     trough = float(store.meta_get(self.conn, "tp_trough", 0) or 0)
