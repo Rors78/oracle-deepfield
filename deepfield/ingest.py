@@ -488,7 +488,14 @@ class Ingest:
         # for the next close) is already served. Skip the re-fire so a restart doesn't
         # stack a redundant bid on the resting one; the duplicates were restart-driven,
         # not new pyramid steps. Consume the one-shot; the next real close fires normally.
-        if store.has_pending_entry(self.conn, symbol):
+        # MODE-SCOPED: this gates whether a real entry gets placed, so it must ask
+        # about THIS book. A paper run is seeded from a live DB snapshot, so both
+        # ledgers share the file — unscoped, a leftover row from the other book
+        # silently suppresses a legitimate entry, and the log line explains the skip
+        # by pointing at a bid that does not exist in the book being traded.
+        _bmode = self.executor.mode if self.executor is not None else config.EXEC_MODE
+        if store.has_pending_entry(self.conn, symbol,
+                                   mode=_bmode if _bmode in ("live", "paper") else None):
             self._armed_buys.add(symbol)
             log.info("startup-arm: %s already has a resting pending entry — skipping re-fire", symbol)
             self._journal("order", symbol, "boot-arm skipped — entry already resting")

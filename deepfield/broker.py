@@ -52,19 +52,39 @@ _KEY_SRC = None
 
 
 def load_keys():
-    """(key, secret, source_path) or (None, None, None). Cached after first hit."""
+    """(key, secret, source_path) or (None, None, None). Cached after first hit.
+
+    SAYS WHICH FILE IT USED (2026-08-05). The fallback down KEYFILES was silent, and
+    that silence cost a day. `~/.deepfield_keys` went missing, so this quietly loaded
+    `~/.hydra_keys` — a stale June key — and Kraken answered `EAPI:Invalid key`, then
+    ~650 `EGeneral:Temporary lockout`. Nothing anywhere named the file in use, so the
+    cascade got blamed on rate-limit pressure for two whole boots.
+
+    Falling back is still correct behaviour; doing it without a word is not. The
+    primary logs at INFO, any fallback at WARNING with both paths named — a
+    one-line answer to "which key is this process actually using?"."""
     global _KEY, _SECRET, _KEY_SRC
     if _KEY is not None:
         return _KEY, _SECRET, _KEY_SRC
-    for path in KEYFILES:
+    for i, path in enumerate(KEYFILES):
         try:
             with open(path) as f:
                 lines = [ln.strip() for ln in f if ln.strip()]
             if len(lines) >= 2:
                 _KEY, _SECRET, _KEY_SRC = lines[0], lines[1], path
+                if i == 0:
+                    log.info("keys loaded from %s", path)
+                else:
+                    log.warning(
+                        "keys loaded from FALLBACK %s — %s is missing or unreadable. "
+                        "A stale fallback key answers EAPI:Invalid key and Kraken then "
+                        "locks the ACCOUNT out; if auth fails, suspect this first.",
+                        path, ", ".join(KEYFILES[:i]))
                 return _KEY, _SECRET, _KEY_SRC
         except Exception:
             continue
+    log.error("NO API KEYS — tried %s. Private calls will fail; equity is unreadable "
+              "and the rails block trading rather than run blind.", ", ".join(KEYFILES))
     return None, None, None
 
 

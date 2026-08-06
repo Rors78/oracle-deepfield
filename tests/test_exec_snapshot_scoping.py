@@ -114,6 +114,58 @@ def test_unscoped_counts_would_mix_the_books(conn):
     assert app._stop_coverage(conn, "paper") == (1, 1)
 
 
+def test_stress_basket_weights_one_book(conn, monkeypatch):
+    """_stress_weights feeds the SURVIVABILITY verdict. Weighting a simulated basket
+    by real positions makes the stress card describe a book nobody is trading."""
+    conn.execute("UPDATE orders SET volume=1, entry=100 WHERE status='open'")
+    conn.commit()
+    monkeypatch.setattr(config, "EXEC_MODE", "paper")
+    assert {s for s, _ in app._stress_weights(conn)} == {"XRP/USD"}
+    monkeypatch.setattr(config, "EXEC_MODE", "live")
+    assert {s for s, _ in app._stress_weights(conn)} == {"BTC/USD", "ETH/USD"}
+
+
+def test_by_pair_ledger_shows_one_book(conn, monkeypatch):
+    """The deck's per-pair ledger — fills AND resting bids."""
+    class _S:
+        pairs = {}
+    monkeypatch.setattr(config, "EXEC_MODE", "paper")
+    bp = app._build_by_pair(conn, _S())
+    assert set(bp) == {"XRP/USD"}
+    monkeypatch.setattr(config, "EXEC_MODE", "live")
+    bp = app._build_by_pair(conn, _S())
+    assert set(bp) == {"BTC/USD", "ETH/USD", "SOL/USD"}      # SOL is the resting bid
+
+
+def test_boot_arm_asks_about_its_own_book(conn):
+    """The one with teeth: has_pending_entry gates whether an ENTRY IS PLACED. A
+    stale row from the other ledger must not suppress a real order — and the skip
+    log would then point at a bid that does not exist in the book being traded."""
+    # SOL has a live pending bid and no paper one.
+    assert store.has_pending_entry(conn, "SOL/USD", mode="live") is True
+    assert store.has_pending_entry(conn, "SOL/USD", mode="paper") is False
+    # Unscoped — what ingest.py asked — cannot tell the two apart.
+    assert store.has_pending_entry(conn, "SOL/USD") is True
+
+
+def test_ghost_pairs_are_scoped(conn, monkeypatch, tmp_path):
+    """A 'ghost' is an open position the console does not display — a watchdog
+    signal. Unscoped, every live symbol reads as a ghost of a paper book."""
+    from deepfield.web import server
+    # build_health closes the connection it is handed, so it needs a FRESH one per
+    # call — reusing the fixture's handle makes the second call fail silently into
+    # its own except and return [], which looks exactly like a passing scope test.
+    path = conn.execute("PRAGMA database_list").fetchone()[2]
+    monkeypatch.setattr(server, "DISPLAY", ["XRP/USD"])
+    monkeypatch.setattr(server, "_ro_conn", lambda: store.connect(path))
+    monkeypatch.setattr(server, "_web_live", lambda c: {"mode": "paper", "_fresh": True})
+    out = server.build_health()
+    assert out["db_ok"] is True, "the query must actually have run"
+    assert out["ghost_pairs"] == []
+    monkeypatch.setattr(server, "_web_live", lambda c: {"mode": "live", "_fresh": True})
+    assert server.build_health()["ghost_pairs"] == ["BTC/USD", "ETH/USD"]
+
+
 def test_rails_and_the_screen_now_count_the_same_book(conn):
     """The invariant that was actually broken. committed_position_count backs the
     MAX_OPEN rail; the snapshot backs the screen. They must agree, or the operator

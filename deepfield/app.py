@@ -329,9 +329,15 @@ def _stress_weights(conn):
     approximate: DB volume can lag Kraken's by vol_closed, so a symbol's share may
     be slightly off. That biases the basket weighting, never the absolute buffer —
     e/m/v for the actual buffer numbers come from live TradeBalance, not from here."""
+    # Scoped to the running book: this weights the STRESS basket, a safety reading.
+    # With both ledgers in one file (paper is seeded from a live snapshot) an
+    # unscoped sum weights a simulated basket by real positions, and the survivability
+    # verdict then describes a book that is not being traded.
+    m = _book_mode(config.EXEC_MODE)
     rows = conn.execute(
         "SELECT symbol, SUM(volume * entry) FROM orders WHERE status='open' "
-        "AND volume > 0 AND entry > 0 GROUP BY symbol").fetchall()
+        "AND volume > 0 AND entry > 0" + (" AND mode=?" if m else "") +
+        " GROUP BY symbol", (m,) if m else ()).fetchall()
     return [(r[0], float(r[1])) for r in rows if r[1] and r[1] > 0]
 
 
@@ -454,16 +460,20 @@ def _build_by_pair(conn, appstate):
     snapshot convenience (last known tick); the FIELD LEDGER recomputes per-fill
     uP&L live at render from ps.last_tick (renderers own the live math)."""
     by_pair = {}
+    # Scoped like every other aggregate in the snapshot — the per-pair ledger the
+    # operator reads must be the book the executor is trading.
+    m = _book_mode(config.EXEC_MODE)
+    mc, ma = (" AND mode=?", (m,)) if m else ("", ())
     for oid, sym, ts, vol, lev, entry, stop, stop_txid in conn.execute(
             "SELECT id, symbol, ts, volume, leverage, entry, stop, stop_txid FROM orders "
-            "WHERE status='open' ORDER BY symbol, id"):
+            "WHERE status='open'" + mc + " ORDER BY symbol, id", ma):
         d = by_pair.setdefault(sym, {"fills": [], "pendings": [], "vol_sum": 0.0,
                                      "avg_entry": None, "upnl": None, "stop": None})
         d["fills"].append({"id": oid, "ts": ts, "vol": vol, "lev": lev,
                            "entry": entry, "stop": stop, "stop_txid": stop_txid})
     for sym, price, vol, ts in conn.execute(
             "SELECT symbol, entry, volume, ts FROM orders "
-            "WHERE status='pending' ORDER BY symbol, id"):
+            "WHERE status='pending'" + mc + " ORDER BY symbol, id", ma):
         d = by_pair.setdefault(sym, {"fills": [], "pendings": [], "vol_sum": 0.0,
                                      "avg_entry": None, "upnl": None, "stop": None})
         d["pendings"].append({"price": price, "vol": vol, "ts": ts})
@@ -1240,7 +1250,10 @@ def _startup(debug, announce=False):
     if (config.EXEC_MODE == "live" or paper_broker.attached()) and ing.executor is not None:
         try:
             kr = broker.open_positions()
-            ours = store.open_position_count(conn)
+            # Scoped: this is compared against Kraken's OWN open positions, which
+            # only ever reflect one book. Counting both ledgers manufactures a drift
+            # warning out of nothing — and this line is a safety reading.
+            ours = store.open_position_count(conn, mode=_book_mode(config.EXEC_MODE))
             # kr is None on an API failure — guard the len() so a transient blip in this
             # cosmetic log line can't raise and skip verify_open_stops() below (which has
             # its own None-handling and MUST run to re-place any missing/orphaned stops).

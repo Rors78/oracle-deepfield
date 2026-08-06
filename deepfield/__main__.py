@@ -91,7 +91,12 @@ def main(argv=None) -> int:
         equity = config.PAPER_PORTFOLIO_USD if config.EXEC_MODE != "live" else broker.trade_balance()
         ok, reason = e.rails_ok(equity)
         print(f"equity(for sizing)=${equity}  rails={'OK' if ok else 'BLOCKED: ' + reason}")
-        print(f"open positions (this bot)={store.open_position_count(conn)}  HALT file={'YES' if __import__('os').path.exists(config.HALT_FILE) else 'no'}")
+        # Scoped to e.mode, matching the rails line printed directly above it — an
+        # unscoped count here read a different book than the rail it sits next to.
+        _sm = e.mode if e.mode in ("live", "paper") else None
+        print(f"open positions (this bot, mode={e.mode})="
+              f"{store.open_position_count(conn, mode=_sm)}  "
+              f"HALT file={'YES' if __import__('os').path.exists(config.HALT_FILE) else 'no'}")
         print("recent orders:")
         for r in conn.execute("SELECT ts,symbol,mode,side,volume,leverage,entry,stop,status FROM orders ORDER BY id DESC LIMIT 8"):
             print("  ", r)

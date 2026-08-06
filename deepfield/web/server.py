@@ -743,9 +743,15 @@ def build_health():
                     out["last_equity_sample_age_s"] = round(time.time() - row[0], 1)
             except sqlite3.OperationalError:
                 pass                                     # table appears post-upgrade
+            # Scoped: a "ghost" is a pair holding an open position that the console
+            # does not display, i.e. something the watchdog should shout about.
+            # Unscoped, every live symbol reads as a ghost of a paper book (and the
+            # reverse), so the watchdog cries wolf about positions in another ledger.
+            _gm = _active_mode(conn, live)
             out["ghost_pairs"] = sorted(
                 s for (s,) in conn.execute(
-                    "SELECT DISTINCT symbol FROM orders WHERE status='open'")
+                    "SELECT DISTINCT symbol FROM orders WHERE status='open' "
+                    "AND (? IS NULL OR mode=?)", (_gm, _gm))
                 if s not in DISPLAY)
             out["db_ok"] = True                          # the queries answered
         finally:
