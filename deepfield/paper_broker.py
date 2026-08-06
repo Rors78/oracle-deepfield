@@ -193,13 +193,27 @@ def _reanchor_fee_accounting():
     # that never happened, and stretched the y-axis so the live book was a flat
     # smear. Clear it for the same reason the fee anchors move: this book did not
     # live through any of it. The live DB keeps its own.
-    try:
-        n = _conn.execute("DELETE FROM equity_history").rowcount
-        if n:
-            log.info("PAPER: cleared %d inherited equity samples — a fresh book has "
-                     "no equity history", n)
-    except Exception:
-        pass                                    # table may not exist yet; never fatal
+    # Everything that DESCRIBES A BOOK, as opposed to describing the market. Seeding
+    # from a live snapshot is right for candles and pairs and wrong for all of this:
+    #   equity_history  drew the previous book's curve continuous with this one — a
+    #                   $1000 -> $200 reset rendered as an 80% crash, and the y-axis
+    #                   stretched so the real book was a flat smear
+    #   journal         the console's event feed. With no paper harvests yet, the
+    #                   HARVEST filter showed a LIVE rung bank; the safety filter
+    #                   showed a live recon incident
+    #   alerts          the alert ledger, entirely live
+    #   tp_cycles       6 live cycles, +$51.93, displayed as this book's
+    # The live DB keeps every one of them; this only ever runs on a FRESH simulated
+    # book (guarded by the cash seed), so a restart never erases a paper run's own.
+    for tbl, what in (("equity_history", "equity samples"), ("journal", "journal entries"),
+                      ("alerts", "alert rows"), ("tp_cycles", "T/P cycles")):
+        try:
+            n = _conn.execute(f"DELETE FROM {tbl}").rowcount
+            if n:
+                log.info("PAPER: cleared %d inherited %s — a fresh book did not live "
+                         "through them", n, what)
+        except Exception:
+            pass                                # table may not exist yet; never fatal
     keys = (("fees_epoch", now), ("fees_cursor", now), ("flows_cursor", now),
             ("fees_banked", 0.0), ("fees_total", 0.0), ("fees_day", 0.0))
     # Back the old values up before overwriting. Paper is meant to run from a
