@@ -966,7 +966,12 @@ class Executor:
                     (d["tp_pct"], d["sl_pct"], d["rung_pct"], oid))
                 self.conn.commit()
                 cur = stp_prot if stp_prot is not None else stp
-                want = float(entry) * (1 - d["sl_pct"] / 100.0)
+                # Rounded to the pair's tick HERE too, not just on the wire: this value
+                # is PERSISTED, and reprotect/reconcile read it back for years. An
+                # unrounded stop in the ledger is a landmine for every later reader
+                # (2026-08-06: it took the whole live book naked for ~4 minutes).
+                want = _round_price(float(entry) * (1 - d["sl_pct"] / 100.0),
+                                    config.MARGIN_TICK_DECIMALS.get(sym, 2))
                 row = {"id": oid, "symbol": sym, "entry": float(entry),
                        "old_stop": float(cur) if cur else None, "new_stop": round(want, 10),
                        "tp_pct": d["tp_pct"], "sl_pct": d["sl_pct"]}
@@ -2115,7 +2120,15 @@ class Executor:
             bid, ask = q
             tick_dec = config.MARGIN_TICK_DECIMALS.get(sym, 2)
             tick = 10 ** -tick_dec
-            px = min(_round_price(bid + tick, tick_dec), ask)
+            # FLOOR to the tick after the min(). `ask` arrives raw from the
+            # ticker, so when it is the smaller of the two it can carry more
+            # decimals than the pair allows and Kraken rejects the sell outright
+            # (EOrder:Invalid price) — the same defect that took the live book
+            # naked on 2026-08-06, in the harvest leg instead of the stop leg.
+            # FLOOR, not round: a sell rounded UP could land above the ask and be
+            # rejected as crossing by post-only, which is the failure this line's
+            # min() exists to prevent in the first place.
+            px = _round_down(min(_round_price(bid + tick, tick_dec), ask), tick_dec)
             if px <= bid:
                 px = ask                           # degenerate book — join the ask
             pxstr = f"{px:.{tick_dec}f}"
@@ -2376,7 +2389,15 @@ class Executor:
             self._ratchet_stop_prot(oid, sym, entry, bid)
             tick_dec = config.MARGIN_TICK_DECIMALS.get(sym, 2)
             tick = 10 ** -tick_dec
-            px = min(_round_price(bid + tick, tick_dec), ask)
+            # FLOOR to the tick after the min(). `ask` arrives raw from the
+            # ticker, so when it is the smaller of the two it can carry more
+            # decimals than the pair allows and Kraken rejects the sell outright
+            # (EOrder:Invalid price) — the same defect that took the live book
+            # naked on 2026-08-06, in the harvest leg instead of the stop leg.
+            # FLOOR, not round: a sell rounded UP could land above the ask and be
+            # rejected as crossing by post-only, which is the failure this line's
+            # min() exists to prevent in the first place.
+            px = _round_down(min(_round_price(bid + tick, tick_dec), ask), tick_dec)
             if px <= bid:
                 px = ask                          # degenerate book — join the ask
             info = store.get_pair_info(self.conn, sym) or {}
@@ -3267,6 +3288,20 @@ class Executor:
                               (f"PAPER-STOP-{order_id}", order_id))
             self.conn.commit()
             return
+        # Round HERE, not only at the call sites. Kraken rejects any price carrying
+        # more decimals than the pair allows —
+        #     EOrder:Invalid price:BCH/USD:BTNL price can only be specified up to 2
+        # — and a rejected protective stop leaves a live leveraged long NAKED.
+        #
+        # This is the single chokepoint every exchange stop passes through, so it is
+        # the right place for the guarantee. Every caller used to round for itself,
+        # which held right up until one of them didn't: the 2026-08-06 volatility
+        # migration wrote entry*(1-sl_pct/100) into orders.stop raw, reprotect read it
+        # back and sent 200.28072941616674, and all 12 live lots sat unprotected for
+        # ~4 minutes, re-failing every cycle. Rounding at the caller is a rule that has
+        # to be remembered; rounding here is one that cannot be forgotten.
+        stop_px = _round_price(float(stop_px),
+                               config.MARGIN_TICK_DECIMALS.get(symbol, 2))
         params = {"pair": margin_pair, "type": "sell", "ordertype": "stop-loss",
                   "price": str(stop_px), "volume": str(volume),
                   "leverage": str(leverage), "trigger": "index"}  # :BTNL rejects 'last'

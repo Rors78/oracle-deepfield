@@ -704,6 +704,28 @@ def _add_order(p, meta, cache):
     if ordertype == "market":
         price = 0.0
 
+    # TICK PRECISION. Kraken rejects a price carrying more decimals than the pair
+    # allows; this simulator used to accept anything, and that permissiveness is not
+    # harmless — it is the difference between a bug caught in paper and a bug caught
+    # by the live book going naked.
+    #
+    # On 2026-08-06 the volatility migration persisted an unrounded stop
+    # (200.28072941616674 on a 2-decimal pair). Paper rested it happily across two
+    # full migration runs and 570 tests; Kraken answered
+    #     EOrder:Invalid price:BCH/USD:BTNL price can only be specified up to 2 decimals
+    # to every retry, and all 12 live lots sat unprotected for ~4 minutes while
+    # reprotect hammered away at it. A simulated exchange that is more forgiving than
+    # the real one certifies code that cannot work.
+    if price and ordertype != "market":
+        dec = config.MARGIN_TICK_DECIMALS.get(symbol)
+        if dec is not None and round(price, dec) != price:
+            if meta is not None:
+                meta["error"] = (f"EOrder:Invalid price:{symbol}:BTNL price can only be "
+                                 f"specified up to {dec} decimals.")
+            log.error("PAPER AddOrder %s: price %r exceeds %d decimals — rejected "
+                      "(Kraken would too)", symbol, price, dec)
+            return None
+
     last = _last_price(symbol, cache)
     oflags = str(p.get("oflags", "") or "")
     # Post-only rejects anything that would cross and take liquidity — the very

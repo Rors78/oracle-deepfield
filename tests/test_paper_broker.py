@@ -702,7 +702,12 @@ def test_audit_tolerates_a_lot_mid_harvest(sim, tmp_path, monkeypatch):
     oid, entry = _fill_one(sim, e)
     stx = sim.execute("SELECT stop_txid FROM orders WHERE id=?", (oid,)).fetchone()[0]
     broker.cancel_order(stx)                                  # as the harvest does
-    sell = _add(entry * 1.04, otype="sell", oflags=None)
+    # Rounded to the pair's tick, as the harvest does: entry * 1.04 is
+    # 103.89600000000002, which Kraken rejects on a 1-decimal pair and the simulator
+    # now rejects too (2026-08-06 — it used to accept any precision, which is how an
+    # unrounded stop reached the live book and left it naked).
+    sell = _add(round(entry * 1.04, config.MARGIN_TICK_DECIMALS.get(SYM, 2)),
+                otype="sell", oflags=None)
     sim.execute("UPDATE orders SET stop_txid=NULL, close_txid=? WHERE id=?",
                 (sell["txid"][0], oid))
     sim.commit()
