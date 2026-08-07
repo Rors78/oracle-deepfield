@@ -2460,9 +2460,7 @@ class Executor:
             bidf = float(bid or 0)
             if entryf <= 0 or bidf <= 0:
                 return
-            tick_dec = config.MARGIN_TICK_DECIMALS.get(sym, 2)
-            px = _round_price(
-                entryf * (1 + getattr(config, "TP_RUNG_RATCHET_PCT", 0.0)), tick_dec)
+            px = _tick_round(sym, entryf * (1 + getattr(config, "TP_RUNG_RATCHET_PCT", 0.0)))
             if px >= bidf:
                 log.info("RATCHET %s: rung %d level %s not below bid %s — stop left at "
                          "its invalidation level", sym, oid, f"{px:g}", f"{bidf:g}")
@@ -2700,12 +2698,19 @@ class Executor:
             log.error("%s: %s surplus %.8g ready to adopt but no live mark — retrying next pass",
                       pfx, sym, leftover)
             return
+        # Snap the mark BEFORE anything compares against it. Both prices below are
+        # PERSISTED and read back by reprotect/reconcile for the life of the row, and
+        # this is the path that claims the operator's own hand-opened probe positions
+        # — not a rare corner. Rounding after the stop < mark guard would be worse
+        # than not rounding at all: a stop 99.996 under a mark of 100.0 passes the
+        # guard, then rounds up ONTO the mark and fires the instant it rests.
+        mark = _tick_round(sym, mark)
         # Prefer the invalidation level this pair's own lots already sit on, so an
         # adopted lot stops out WITH its siblings rather than at a lone level.
         r = self.conn.execute(
             "SELECT stop FROM orders WHERE symbol=? AND status='open' AND stop IS NOT NULL "
             "ORDER BY id DESC LIMIT 1", (sym,)).fetchone()
-        stop = float(r[0]) if r and r[0] else self.compute_stop(sym, mark, None)
+        stop = _tick_round(sym, float(r[0]) if r and r[0] else self.compute_stop(sym, mark, None))
         if stop >= mark:
             # Siblings' level is already above the mark (this pair is under water):
             # a stop resting there fires on contact. Fall back to a fresh stop under
@@ -2713,7 +2718,7 @@ class Executor:
             # would be an instant unasked-for market sell.
             log.warning("%s: %s sibling stop %s is at/above mark %s — using a fresh stop "
                         "below the mark for the adopted lot instead", pfx, sym, stop, mark)
-            stop = self.compute_stop(sym, mark, None)
+            stop = _tick_round(sym, self.compute_stop(sym, mark, None))
             if stop >= mark:
                 log.error("%s: %s cannot derive a stop below mark %s — NOT adopting", pfx, sym, mark)
                 return

@@ -184,3 +184,47 @@ def test_kill_switch_disables_adoption(ex, monkeypatch):
     age_out(ex)
     ex._adopt_surplus("t", SYM, MP, SURPLUS)
     assert adopted(ex) == []
+
+
+# ── tick precision (2026-08-06) ────────────────────────────────────────────
+#
+# This row is PERSISTED and read back by reprotect and reconcile for the rest of its
+# life, and Kraken rejects a price finer than the pair's tick. Both prices arrive
+# dirty: `mark` off the ticker, `stop` off compute_stop (entry x (1 - sl_pct/100)) or
+# off a sibling row. NEAR/USD allows 3 decimals.
+
+def test_adopted_row_persists_tick_clean_prices(ex):
+    """The naked-book failure mode reaches this path through the ledger, not the wire:
+    an adopted row holding a finer-than-tick stop re-fails every later stop re-place.
+
+    The sibling level carries the dirt deliberately — that is how it propagates in the
+    real ledger, and a stop derived fresh from a round mark can land tick-clean by
+    luck, which would make the assertion below pass while proving nothing."""
+    ex._live_last = lambda s: 2.0004999                 # a raw ticker quote
+    ex.conn.execute("INSERT INTO orders(symbol,status,stop,volume) VALUES(?,'open',?,8.0)",
+                    (SYM, 1.90284999))                  # a raw sibling invalidation level
+    ex._adopt_surplus("t", SYM, MP, SURPLUS)
+    age_out(ex)
+    ex._adopt_surplus("t", SYM, MP, SURPLUS)
+    rows = adopted(ex)
+    assert len(rows) == 1
+    _, entry, stop, *_ = rows[0]
+    assert entry == 2.0, f"adopted entry is finer than the tick: {entry!r}"
+    assert stop == 1.903, f"adopted stop is finer than the tick: {stop!r}"
+
+
+def test_snapping_never_lifts_the_stop_onto_the_mark(ex):
+    """Ordering trap. Snap AFTER the `stop < mark` guard and a stop just under the
+    mark rounds UP onto it — the guard passes, then the stop fires the instant it
+    rests. That is worse than not rounding at all, so the guard must see the
+    snapped values."""
+    ex._live_last = lambda s: 2.0
+    # a sibling level 0.4 of a tick below the mark: rounds to exactly 2.0
+    ex.conn.execute("INSERT INTO orders(symbol,status,stop,volume) VALUES(?,'open',1.9996,8.0)",
+                    (SYM,))
+    ex._adopt_surplus("t", SYM, MP, SURPLUS)
+    age_out(ex)
+    ex._adopt_surplus("t", SYM, MP, SURPLUS)
+    rows = adopted(ex)
+    assert len(rows) == 1
+    assert rows[0][2] < 2.0, f"adopted stop {rows[0][2]!r} is at/above the mark — fires on rest"
