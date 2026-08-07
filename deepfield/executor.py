@@ -178,6 +178,27 @@ class Executor:
         # from a fill that has not been booked yet. In-memory by design — a restart
         # restarts the clock rather than adopting on stale evidence.
         self._surplus_seen = {}
+        # sym -> (target, stop) of the last ladder-floor refusal, so an unchanged
+        # refusal narrates once instead of every cycle. See _ladder_floor_reached.
+        self._floor_seen = {}
+
+    def _ladder_floor_reached(self, symbol, target, stop):
+        """The chain has descended as far as its invalidation level allows.
+
+        Narrate the FIRST refusal, and any refusal whose numbers moved, at INFO —
+        that is real news about the chain. Narrate an identical repeat at DEBUG.
+        A chain sits at its floor until one of its lots exits, and the inputs
+        (lowest open fill, chain stop) cannot drift on their own, so the refusal
+        repeats verbatim indefinitely: XRP logged the same line 60 times over 15.5
+        hours on 2026-08-07, which buried every genuine reladder event on the deck.
+        The condition is still re-checked every cycle; only the narration is
+        deduplicated."""
+        key = (target, stop)
+        first = self._floor_seen.get(symbol) != key
+        self._floor_seen[symbol] = key
+        log.log(logging.INFO if first else logging.DEBUG,
+                "LADDER %s: next rung @ %s would hit stop %s — ladder floor reached, holding",
+                symbol, target, stop)
 
     def _armed(self):
         """Modes that place orders against a real counterparty: `live`, or `paper`
@@ -2532,6 +2553,18 @@ class Executor:
             rd = self._distances(symbol)
             step = rd["rung_pct"] / 100.0
             target = _round_price(filled_price * (1 - step), tick)
+            # Floor PRE-gate — refuse before the ticker fetch, not after.
+            #
+            # The live clamp below can only ever LOWER the target, so a fill-anchored
+            # target already at/under the floor is still under it after clamping: the
+            # answer is settled here, and everything past this point is wasted work.
+            # A chain sits at its floor until one of its lots exits, so this is not a
+            # transient — XRP re-derived the identical refusal every 607s for 15.5h on
+            # 2026-08-07, fetching a ticker each time to reach a foregone conclusion.
+            # Same idiom the respend pre-gate already uses.
+            if stop and target <= stop * (1 + config.LADDER_STOP_BUFFER):
+                self._ladder_floor_reached(symbol, target, stop)
+                return
             # Post-only survivability (2026-07-12 offline-gap incident): target is
             # anchored to the FILL, which can be hours stale (offline gap, slow poll).
             # If price has since fallen to/below it, the maker bid crosses the book and
@@ -2547,9 +2580,11 @@ class Executor:
                              "clamped to %s so the post-only maker rests",
                              symbol, target, live, lid)
                     target = lid
+            # Re-check AFTER the clamp: the clamp lowers the target, so a rung that
+            # cleared the pre-gate can still land on the floor once it is pulled below
+            # a fallen live price. The pre-gate is an early-out, not a replacement.
             if stop and target <= stop * (1 + config.LADDER_STOP_BUFFER):
-                log.info("LADDER %s: next rung @ %s would hit stop %s — ladder floor reached, holding",
-                         symbol, target, stop)
+                self._ladder_floor_reached(symbol, target, stop)
                 return
             # Level dedupe: own each price level ONCE. In a choppy range the daily
             # re-arm + ladder would otherwise re-buy the same band (a fill dips 1%,
