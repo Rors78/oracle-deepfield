@@ -74,6 +74,21 @@ def _round_price(x, decimals):
     return round(x, decimals)
 
 
+def _tick_round(symbol, px):
+    """Snap a price to the pair's own tick. THE rounding rule, in one place.
+
+    Kraken rejects any price carrying more decimals than the pair allows, and a
+    rejected protective stop leaves a live leveraged long naked (2026-08-06). Use
+    this at every site that SENDS a price to the exchange or PERSISTS one into
+    `orders`, because a stored price is a price that will be sent later — reconcile
+    and reprotect read `orders.stop` back for the life of the row, and a ladder rung
+    copies its parent's stop down the whole chain.
+    """
+    if px is None:
+        return None
+    return _round_price(float(px), config.MARGIN_TICK_DECIMALS.get(symbol, 2))
+
+
 # Kraken echoes a pair as a canonical key, an X-prefixed altname, or a base with a
 # ':SUFFIX' (margin). Normalize all three to the canonical `rest` key so ledger rows,
 # OpenPositions, and OpenOrders compare on ONE identity. (Hydra field-verified map.)
@@ -826,7 +841,7 @@ class Executor:
             px = _round_price(entry_price * (1 - config.POST_ONLY_SLIP_PCT), tick)
         else:
             px = _round_price(entry_price, tick)
-        stop_px = _round_price(stop, tick)
+        stop_px = _tick_round(symbol, stop)
         vol = sizing["volume"]
         tag = (f" ({cmult:g}x conviction)" if cmult > 1.0
                else " (FLOORED-min)" if sizing["floored_to_min"]
@@ -970,8 +985,7 @@ class Executor:
                 # is PERSISTED, and reprotect/reconcile read it back for years. An
                 # unrounded stop in the ledger is a landmine for every later reader
                 # (2026-08-06: it took the whole live book naked for ~4 minutes).
-                want = _round_price(float(entry) * (1 - d["sl_pct"] / 100.0),
-                                    config.MARGIN_TICK_DECIMALS.get(sym, 2))
+                want = _tick_round(sym, float(entry) * (1 - d["sl_pct"] / 100.0))
                 row = {"id": oid, "symbol": sym, "entry": float(entry),
                        "old_stop": float(cur) if cur else None, "new_stop": round(want, 10),
                        "tp_pct": d["tp_pct"], "sl_pct": d["sl_pct"]}
@@ -2591,7 +2605,12 @@ class Executor:
             row = {
                 "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
                 "symbol": symbol, "margin_pair": margin_pair, "side": "buy",
-                "ordertype": "limit", "mode": self.mode, "entry": target, "stop": stop,
+                # The inherited stop is SNAPPED, not copied. A rung takes its parent's
+                # stop verbatim, so one over-precise value propagates down the entire
+                # chain (id 1065 -> 1073, observed live 2026-08-06) and every row it
+                # reaches becomes unrecoverable if its stop ever goes missing.
+                "ordertype": "limit", "mode": self.mode, "entry": target,
+                "stop": _tick_round(symbol, stop),
                 "volume": vol, "leverage": leverage, "notional": sizing["notional"],
                 "margin": sizing["margin"], "risk_usd": sizing.get("actual_risk", 0.0),
                 # carry the entry conviction to the next rung so it doesn't decay to 1x
@@ -3109,6 +3128,22 @@ class Executor:
             # rests — that is the stop honoring itself LATE (correct for a long under
             # its invalidation), but say so loudly instead of letting it read as a
             # surprise market close.
+            # This leg does NOT go through _rest_stop — it carries its own claiming,
+            # counters and committed_vol bookkeeping — so the rounding rule has to be
+            # applied here too. The 4ccafb8 note calling _rest_stop "the single
+            # chokepoint every exchange stop passes through" was WRONG: this is a
+            # second placement path, and it is the RECOVERY one, reached only when a
+            # lot is already naked. An over-precise stored value would turn a
+            # one-cycle gap into a permanent one, re-failing every cycle — the very
+            # incident this code exists to end. Persist the snapped value as well, so
+            # the row stops being a landmine for every later reader.
+            rounded = _tick_round(sym, stop)
+            if rounded is not None and stop is not None and float(rounded) != float(stop):
+                log.warning("%s: %s order %d stored stop %s is finer than the pair's "
+                            "tick — snapped to %s before re-placing", pfx, sym, oid, stop, rounded)
+                self.conn.execute("UPDATE orders SET stop=? WHERE id=?", (rounded, oid))
+                self.conn.commit()
+            stop = rounded
             live = self._live_last(sym)
             if live and stop and live <= float(stop):
                 log.warning("%s: %s re-placing stop %s AT/ABOVE live %s — it will trigger "
@@ -3293,15 +3328,18 @@ class Executor:
         #     EOrder:Invalid price:BCH/USD:BTNL price can only be specified up to 2
         # — and a rejected protective stop leaves a live leveraged long NAKED.
         #
-        # This is the single chokepoint every exchange stop passes through, so it is
-        # the right place for the guarantee. Every caller used to round for itself,
-        # which held right up until one of them didn't: the 2026-08-06 volatility
-        # migration wrote entry*(1-sl_pct/100) into orders.stop raw, reprotect read it
-        # back and sent 200.28072941616674, and all 12 live lots sat unprotected for
-        # ~4 minutes, re-failing every cycle. Rounding at the caller is a rule that has
-        # to be remembered; rounding here is one that cannot be forgotten.
-        stop_px = _round_price(float(stop_px),
-                               config.MARGIN_TICK_DECIMALS.get(symbol, 2))
+        # Every caller used to round for itself, which held right up until one of them
+        # didn't: the 2026-08-06 volatility migration wrote entry*(1-sl_pct/100) into
+        # orders.stop raw, reprotect read it back and sent 200.28072941616674, and all
+        # 12 live lots sat unprotected for ~4 minutes, re-failing every cycle.
+        #
+        # This is the NORMAL placement path, not the only one — reconcile's re-place
+        # leg carries its own bookkeeping and rounds for itself, and the ladder snaps
+        # the stop it inherits. There is no single chokepoint to defend (an earlier
+        # note here claimed there was, and that claim is what let the ladder and
+        # recovery paths keep propagating raw values). The rule lives in _tick_round;
+        # every send site and every persist site calls it.
+        stop_px = _tick_round(symbol, stop_px)
         params = {"pair": margin_pair, "type": "sell", "ordertype": "stop-loss",
                   "price": str(stop_px), "volume": str(volume),
                   "leverage": str(leverage), "trigger": "index"}  # :BTNL rejects 'last'
