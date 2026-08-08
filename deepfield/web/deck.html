@@ -236,6 +236,10 @@ main>*, .row1>*, .row3>*, .side>*{min-width:0}
 .railwhy{flex:1; min-width:0; color:var(--ink2)}
 .railwhy b{color:var(--ink)}
 .railsince{font-family:var(--mono); font-size:10.5px; color:var(--loss-ink); flex:none}
+/* Growth-gate note: informational, never alarm-red. PACED is the governor doing
+   its job; painting it like a blocked rail would teach the eye to ignore red. */
+.railgrowth{font-family:var(--mono); font-size:10.5px; color:var(--ink2); flex:none}
+.railgrowth b{color:var(--warn-ink,#ba8b32)}
 /* Per-rail headroom. auto-fit so four rails reflow to two and then one on a phone
    rather than crushing "open positions" into a column of single characters. */
 .railbars{display:grid; grid-template-columns:repeat(auto-fit,minmax(148px,1fr));
@@ -479,6 +483,7 @@ footer .reg{color:var(--ink2)}
   <div class="railstrip clear" id="railstrip" style="display:none">
     <span class="railbadge rb-CLEAR" id="railbadge">CLEAR</span>
     <span class="railwhy" id="railwhy"></span>
+    <span class="railgrowth" id="railgrowth"></span>
     <span class="railsince" id="railsince"></span>
     <div class="railbars" id="railbars" style="display:none"></div>
   </div>
@@ -810,6 +815,28 @@ function renderRails(h){
   const age=railAge(h.rails_block_since);
   $("railsince").textContent=(blocked&&age)?`frozen ${age}`:"";
 
+  // Growth gates — why the book isn't growing while the rails read CLEAR
+  // (2026-08-05: kill-switch freeze invisible; 2026-08-07 audit R1: respend
+  // pacing invisible — same lesson, other gate). Values are RENDERED, never
+  // computed here: `paced`, `eta_secs` and the reasons all arrive from the
+  // executor, whose _respend_tokens_now is the one copy of the bucket math.
+  // Posture gates (regime, stack) outrank pacing: a deliberate off-switch is
+  // bigger news than the always-on throttle.
+  const g=h.growth, gw=$("railgrowth"), notes=[];
+  if(g && !halted && !blocked){
+    if(g.regime && g.regime.ok===false)
+      notes.push(`<b>accumulation paused</b> — ${esc(g.regime.reason||"regime gate")}`);
+    if(g.stack && g.stack.ok===false)
+      notes.push(`<b>growth paused</b> — ${esc(g.stack.reason||"stack gate")}`);
+    if(!notes.length && g.respend && g.respend.enabled && g.respend.paced){
+      const m=Math.max(1,Math.round((g.respend.eta_secs||0)/60));
+      notes.push(`<b>paced</b> — governor refilling `
+        +`($${(g.respend.tokens??0).toFixed(2)} of $${g.respend.burst}, `
+        +`next bid ~${m}m)`);
+    }
+  }
+  gw.innerHTML=notes.join(" · ");
+
   // Per-rail headroom, opened unasked when it matters. The kill switch sat 2.6%
   // from firing before it fired; these bars are where that would have shown.
   if(!rails.length || (!blocked && !halted && !tight)){ bars.style.display="none"; return; }
@@ -840,7 +867,16 @@ function renderRails(h){
   }).join("");
 }
 function renderCapital(h){
-  const eqLive=h.equity!=null, eq=eqLive?h.equity:h.peak;
+  const eqLive=h.equity!=null;
+  // Stale-blob fallback is the LAST RECORDED EQUITY, not peak_equity. Peak is a
+  // ratcheted all-time high — during a drawdown it is the one number guaranteed
+  // wrong, and captioning it "last known" made the deck lie at exactly the moment
+  // it mattered (2026-08-07 audit, R4). The series ships with every payload; its
+  // tail is the honest "last known". Peak remains only for a fresh DB with no
+  // samples at all, and says so.
+  const es=Array.isArray(h.equity_series)&&h.equity_series.length
+    ? h.equity_series[h.equity_series.length-1][1] : null;
+  const eq=eqLive?h.equity:(es!=null?es:h.peak);
   // Never assert Kraken provenance for a number Kraken did not produce: in paper the
   // equity comes from the simulated exchange, and a deck that mislabels its own
   // source is worse than one that shows nothing.

@@ -379,6 +379,84 @@ class Executor:
                   blocking=(pl <= -cap), invert=True)
         return detail
 
+    def growth_detail(self):
+        """The gates that refuse SEEDS and RUNGS while every rail is green — the
+        other half of the 2026-08-05 lesson. rails_detail answers "is something
+        wrong?"; this answers "why isn't the book growing?", and they are
+        deliberately separate sections because folding pacing into the rails
+        verdict would paint the strip red whenever the governor is merely doing
+        its job — a console crying wolf is the same lie as one saying CLEAR
+        through a freeze, in the other direction (2026-08-07 audit, deck R1).
+
+        Three distinct truths, three entries:
+          * respend — the always-on pacing throttle. Not an alarm, ever. Tokens
+            read through _respend_tokens_now so the deck's "paced" verdict and
+            the governor's real refusal share ONE accrual formula.
+          * regime  — a deliberate posture switch (accumulate only outside BULL).
+          * stack   — the growth gates in _stack_margin_ok (T/P flatten owns the
+            book / L_eff over survivable ceiling / margin level under the floor).
+
+        Display-only, computed here because the executor owns every one of these
+        truths — server.py must never re-derive any of this. Pure read except for
+        _stack_margin_ok's own edge-triggered pause note, which is idempotent and
+        already fires from the seed path at the same cadence. Never raises."""
+        out = {"respend": None, "regime": None, "stack": None}
+        try:
+            ok, why = self._accumulation_allowed()
+            out["regime"] = {"ok": bool(ok), "reason": why,
+                             "regime": store.meta_get(self.conn, "regime", None)}
+        except Exception:
+            log.exception("growth_detail: regime read failed (display only)")
+        try:
+            ok, why = self._stack_margin_ok()
+            out["stack"] = {"ok": bool(ok), "reason": why}
+        except Exception:
+            log.exception("growth_detail: stack read failed (display only)")
+        try:
+            rate = float(getattr(config, "RESPEND_BUDGET_USD_PER_HR", 0) or 0)
+            if rate <= 0:
+                out["respend"] = {"enabled": False}
+            else:
+                burst = float(getattr(config, "RESPEND_BURST_USD", 0) or 0) or rate
+                tokens = self._respend_tokens_now(rate, burst)
+                # Cheapest fundable order across the roster — the same lower-bound
+                # idiom as _respend_would_refuse (min volume x local price x
+                # SIZE_MULT, no conviction), so "paced" here can only be true when
+                # the pre-gate would refuse EVERY pair. Pairs without a local
+                # price are skipped; if none is computable we report the tokens
+                # and decline to claim PACED — a missing measurement must never
+                # render as a verdict (rails_detail's own rule).
+                smult = max(1.0, float(getattr(config, "SIZE_MULT", 1.0) or 1.0))
+                min_n = None
+                # config.PAIRS is a list of DICTS ({'ws': 'BTC/USD', ...}), not
+                # symbols — iterating it raw raises on the EXCLUDED_PAIRS
+                # membership test and this whole gate degrades to None silently.
+                # Found because the shipping test drove the real server module,
+                # whose own PAIRS read made the shape mismatch loud.
+                for sym in [p["ws"] for p in getattr(config, "PAIRS", ())]:
+                    if sym in getattr(config, "EXCLUDED_PAIRS", ()):
+                        continue
+                    px = self._last_local_price(sym)
+                    if not px or px <= 0:
+                        continue
+                    info = store.get_pair_info(self.conn, sym) or {}
+                    vol = self._min_volume(info.get("ordermin") or 0.0,
+                                           info.get("costmin") or 0.0,
+                                           px, info.get("lot_decimals"))
+                    if vol and vol > 0:
+                        n = vol * px * smult
+                        min_n = n if min_n is None else min(min_n, n)
+                paced = (min_n is not None) and (tokens + 1e-9) < min_n
+                eta = (max(0.0, min_n - tokens) / rate * 3600.0) if paced else 0.0
+                out["respend"] = {
+                    "enabled": True, "tokens": round(tokens, 2),
+                    "burst": burst, "rate_per_hr": rate,
+                    "min_notional": round(min_n, 2) if min_n is not None else None,
+                    "paced": bool(paced), "eta_secs": round(eta)}
+        except Exception:
+            log.exception("growth_detail: respend read failed (display only)")
+        return out
+
     # ── sizing ───────────────────────────────────────────────────────────────
 
     def compute_stop(self, symbol, entry, card, sl_pct=None):
@@ -629,6 +707,19 @@ class Executor:
         except Exception:
             log.exception("stack-pause note failed (trade path unaffected)")
 
+    def _respend_tokens_now(self, rate, burst, now=None):
+        """Current bucket level: stored tokens plus accrual since the last write,
+        capped at burst. THE accrual formula — the one place it exists. Both the
+        money-path check (_respend_budget_ok) and the display path (growth_detail)
+        read through here; before this helper the formula lived inline in three
+        places and a display copy would have been a fourth, drifting the deck's
+        "paced" verdict away from the governor's real one (the defect class this
+        repo keeps paying for). Pure read — never writes the bucket back."""
+        now = time.time() if now is None else now
+        b = json.loads(store.meta_get(self.conn, "respend_bucket") or "{}")
+        return min(burst, float(b.get("tokens", burst))
+                   + max(0.0, now - float(b.get("updated", now))) * rate / 3600.0)
+
     def _respend_budget_ok(self, notional):
         """Respend-RATE throttle: a leaky bucket over new book-growth notional
         (seeds + rungs). Returns (ok, reason, debit). Call debit() ONLY after the
@@ -644,9 +735,7 @@ class Executor:
         try:
             burst = float(getattr(config, "RESPEND_BURST_USD", 0) or 0) or rate
             now = time.time()
-            b = json.loads(store.meta_get(self.conn, "respend_bucket") or "{}")
-            tokens = min(burst, float(b.get("tokens", burst))
-                         + max(0.0, now - float(b.get("updated", now))) * rate / 3600.0)
+            tokens = self._respend_tokens_now(rate, burst, now)
             if tokens + 1e-9 < notional:
                 store.meta_set(self.conn, "respend_bucket",
                                json.dumps({"tokens": tokens, "updated": now}))
@@ -691,10 +780,8 @@ class Executor:
             return
         try:
             burst = float(getattr(config, "RESPEND_BURST_USD", 0) or 0) or rate
-            b = json.loads(store.meta_get(self.conn, "respend_bucket") or "{}")
             now = time.time()
-            tokens = min(burst, float(b.get("tokens", burst))
-                         + max(0.0, now - float(b.get("updated", now))) * rate / 3600.0)
+            tokens = self._respend_tokens_now(rate, burst, now)
             new = min(burst, tokens + float(notional))
             store.meta_set(self.conn, "respend_bucket",
                            json.dumps({"tokens": new, "updated": now}))
@@ -755,10 +842,7 @@ class Executor:
             if not vol or vol <= 0:
                 return False
             burst = float(getattr(config, "RESPEND_BURST_USD", 0) or 0) or rate
-            b = json.loads(store.meta_get(self.conn, "respend_bucket") or "{}")
-            now = time.time()
-            tokens = min(burst, float(b.get("tokens", burst))
-                         + max(0.0, now - float(b.get("updated", now))) * rate / 3600.0)
+            tokens = self._respend_tokens_now(rate, burst)
             # Every rung/seed sizes at min x SIZE_MULT (conviction stacks above, so
             # excluding it keeps this a lower bound). Without the multiplier the
             # bound went stale the moment SIZE_MULT left 1: a bucket holding between

@@ -474,6 +474,12 @@ def _assemble(conn):
         # reading off `updated` instead.
         "rails": live.get("rails"),
         "rails_block_since": live.get("rails_block_since"),
+        # Growth gates: respend pacing / regime / stack — why the book isn't
+        # growing while the rails read CLEAR (2026-08-07 audit, R1). Shipped
+        # verbatim from the executor via the blob; same not-gated-on-_fresh
+        # reasoning as rails: a stale PACED is still closer to truth than
+        # silence, and the deck ages it off `updated`.
+        "growth": live.get("growth"),
         # Every config number the console DISPLAYS, shipped from config itself.
         #
         # Three separate bugs on 2026-08-05 were one bug: a rule written down twice

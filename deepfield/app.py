@@ -639,6 +639,11 @@ async def _exec_state_refresh(appstate, conn, ing, interval=15):
                 vol_next = _t.monotonic() + vsecs
                 await asyncio.to_thread(_refresh_vol_table_threaded)
             rails_detail = ex.rails_detail(equity) if ex else None
+            # The growth gates (respend pacing / regime / stack) refuse seeds and
+            # rungs while every rail is green — computed by the executor, shipped
+            # verbatim, never re-derived downstream (2026-08-07 audit, deck R1:
+            # the deck read "clear to buy" through an empty respend bucket).
+            growth_detail = ex.growth_detail() if ex else None
             rails_ok, reason = ((rails_detail["ok"], rails_detail["reason"])
                                 if rails_detail else (True, ""))
             rails_block_since = _track_rails_block(conn, rails_ok, reason)
@@ -716,6 +721,7 @@ async def _exec_state_refresh(appstate, conn, ing, interval=15):
                 "positions": positions, "pending": pending,
                 "rails_ok": rails_ok, "rails_reason": reason,
                 "rails_detail": rails_detail, "rails_block_since": rails_block_since,
+                "growth_detail": growth_detail,
                 "halt": os.path.exists(config.HALT_FILE), "updated": _t.time(),
                 "balance": balance, "margin_used": margin_used, "free_margin": free_margin,
                 "by_pair": _build_by_pair(conn, appstate),
@@ -1216,6 +1222,10 @@ def _persist_web_live(conn, appstate, equity, margin_used, free_margin, balance)
         # kill switch for two boots looked perfectly healthy (2026-08-05).
         "rails": appstate.exec.get("rails_detail"),
         "rails_block_since": appstate.exec.get("rails_block_since"),
+        # Growth gates (respend pacing / regime / stack) — the refusals that keep
+        # the book from growing while the rails read CLEAR. Executor-computed;
+        # this is transport, not derivation.
+        "growth": appstate.exec.get("growth_detail"),
     }
     store.meta_set(conn, "web_live", _json.dumps(blob))
     if equity is not None:
