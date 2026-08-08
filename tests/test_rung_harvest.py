@@ -375,7 +375,15 @@ def test_ratchet_skipped_when_level_would_rest_at_or_above_market(tmp_path, monk
                  positions=_pos(100.0))
     # ratchet 10% -> 1.10, above the 1.03 bid: refuse rather than arm a live trigger
     monkeypatch.setattr(config, "TP_RUNG_RATCHET_PCT", 0.10, raising=False)
+    calls = _mock_broker(monkeypatch, quotes={REST: {"b": ["1.03"], "a": ["1.032"]}},
+                         positions=_pos(100.0))
     _mk_exec(conn, monkeypatch)._check_rung_harvest()
+    # The harvest sell MUST have been placed — that is the proof the flow reached
+    # _ratchet_stop_prot and it was the px>=bid guard that declined, not some
+    # upstream refusal (floor, backing, cancel) leaving _prot untouched for the
+    # wrong reason. Without this the assertion below passes under any future
+    # tightening of the harvest's earlier gates (2026-08-07 audit, finding 8).
+    assert len(calls["adds"]) == 1, "harvest never reached the ratchet at all"
     assert _prot(conn, oid) == 0.92                # untouched
 
 

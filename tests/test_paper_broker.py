@@ -365,6 +365,21 @@ class _Card:
     low_52w, score, required = 92.0, 5, 5
 
 
+def _exchange_stops():
+    """Resting stop-loss orders per the EXCHANGE, not the ledger.
+
+    The 'never both resting' invariant lives on Kraken's book. The ledger's
+    stop_txid is NULLed the moment the harvest believes it canceled — so a DB
+    read short-circuits (`not stx`) precisely when the invariant is at risk, and
+    a cancel that never reached the exchange leaves an orphaned stop no DB query
+    can see. Proven by mutation 2026-08-08: clearing stop_txid WITHOUT calling
+    broker.cancel_order left the sim holding stop AND harvest sell together —
+    a double-sell primed to short the lot — and every DB-based assertion passed."""
+    oo = broker.open_orders() or {}
+    return [t for t, o in oo.items()
+            if "stop" in str((o.get("descr") or {}).get("ordertype", "")).lower()]
+
+
 def _fill_one(sim, e, entry_hint=100.0):
     """Place an entry, let the market come to it, and promote it to an open lot."""
     _now_bar(sim, entry_hint)
@@ -399,8 +414,9 @@ def test_lifecycle_rung_harvest_banks_at_plus_4pct(sim, monkeypatch):
     assert sell["descr"]["type"] == "sell"
     assert float(sell["descr"]["price"]) >= entry * 1.04
     # stop and harvest sell must never rest together (they'd double-sell the lot)
-    stx = sim.execute("SELECT stop_txid FROM orders WHERE id=?", (oid,)).fetchone()[0]
-    assert not stx or broker.query_orders([stx])[stx]["status"] != "open"
+    # — judged on the EXCHANGE book; see _exchange_stops for why the DB can't.
+    assert _exchange_stops() == [], \
+        "harvest sell resting while a stop still sits on the exchange"
 
     # the sell is post-only ABOVE the market; lift the market through it
     _now_bar(sim, entry * 1.10)
@@ -445,11 +461,17 @@ def test_lifecycle_stop_and_harvest_never_rest_together(sim, monkeypatch):
     for px in (entry, entry * 1.02, entry * 1.05, entry * 1.08):
         _now_bar(sim, px)
         e.poll_fills()
-        stx, ctx = sim.execute("SELECT stop_txid,close_txid FROM orders WHERE id=?",
-                               (oid,)).fetchone()
-        live = [t for t in (stx, ctx) if t
-                and (broker.query_orders([t]).get(t) or {}).get("status") == "open"]
-        assert len(live) <= 1, f"stop AND harvest both resting at {px}: {live}"
+        # Judged on the EXCHANGE book, both halves: the ledger's stop_txid is
+        # NULLed at cancel time, so a DB read goes blind at the exact moment the
+        # invariant is exposed (see _exchange_stops).
+        oo = broker.open_orders() or {}
+        stops = [t for t, o in oo.items()
+                 if "stop" in str((o.get("descr") or {}).get("ordertype", "")).lower()]
+        sells = [t for t, o in oo.items()
+                 if (o.get("descr") or {}).get("type") == "sell"
+                 and "stop" not in str((o.get("descr") or {}).get("ordertype", "")).lower()]
+        assert not (stops and sells), \
+            f"stop AND harvest sell both resting at {px}: stops={stops} sells={sells}"
 
 
 def test_multi_rung_close_is_fifo_and_partial(sim, monkeypatch):
@@ -528,8 +550,9 @@ def test_lifecycle_book_flatten_at_tp_target(sim, monkeypatch):
     close_txid = sim.execute("SELECT close_txid FROM orders WHERE id=?", (oid,)).fetchone()[0]
     assert close_txid, "flatten must rest a close order for the open lot"
     # the protective stop and the flatten's close must never rest together
-    stx = sim.execute("SELECT stop_txid FROM orders WHERE id=?", (oid,)).fetchone()[0]
-    assert not stx or (broker.query_orders([stx]).get(stx) or {}).get("status") != "open"
+    # — judged on the EXCHANGE book; see _exchange_stops for why the DB can't.
+    assert _exchange_stops() == [], \
+        "flatten close resting while a stop still sits on the exchange"
 
     # let the close fill, then converge
     _now_bar(sim, entry * 1.02)

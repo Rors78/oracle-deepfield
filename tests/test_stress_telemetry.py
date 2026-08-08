@@ -181,15 +181,39 @@ def test_leverage_over_the_ceiling_alerts(live_book, monkeypatch):
 
 
 def test_never_touches_the_order_path(live_book, monkeypatch):
-    """defense/stress is telemetry: it may journal and alert, never trade."""
+    """defense/stress is telemetry: it may journal and alert, never trade.
+
+    The tripwire guards broker.private ITSELF, keyed on the endpoint. The first
+    version patched broker.add_order / broker.cancel_order — but broker has no
+    add_order function at all (every order in this codebase goes through
+    broker.private("/0/private/AddOrder", ...)), so the AddOrder half of the
+    tripwire never armed and the test body held no assertion. Proven vacuous by
+    mutation on 2026-08-08: a literal market-BUY AddOrder planted inside
+    _poll_stress_threaded passed this test (the conftest wall absorbed it after
+    ~10s of retry backoff). An armed tripwire fails that mutation instantly."""
     _stub_broker(monkeypatch)
     monkeypatch.setattr(app.alerter, "fire_safety", lambda *a, **k: None)
     from deepfield import broker
-    for fn in ("add_order", "cancel_order"):
-        if hasattr(broker, fn):
-            monkeypatch.setattr(broker, fn, lambda *a, **k: pytest.fail(
-                f"stress telemetry called broker.{fn} — it must never trade"))
+    calls = []
+
+    def _tripwire(endpoint, params=None, **kw):
+        calls.append(endpoint)
+        if any(x in str(endpoint) for x in ("AddOrder", "CancelOrder", "CancelAll",
+                                            "EditOrder", "ClosePosition")):
+            pytest.fail(f"stress telemetry hit the order path: {endpoint} "
+                        f"{params} — it must never trade")
+        return None                       # any other private read: harmless None
+
+    monkeypatch.setattr(broker, "private", _tripwire)
+    monkeypatch.setattr(broker, "cancel_order", lambda *a, **k: pytest.fail(
+        "stress telemetry called broker.cancel_order — it must never trade"))
     app._poll_stress_threaded()
+    # Positive control on the tripwire itself: prove the wire is live by touching
+    # it the way a regression would. Without this, a refactor that swaps the poll
+    # off broker.private (or a typo in the endpoint list) silently disarms the
+    # test again — the exact way it was vacuous the first time.
+    with pytest.raises(BaseException):
+        broker.private("/0/private/AddOrder", {"pair": "X", "type": "buy"})
 
 
 def test_poll_never_raises_into_the_loop(live_book, monkeypatch):

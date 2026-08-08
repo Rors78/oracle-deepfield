@@ -186,6 +186,34 @@ def test_deck_reads_the_two_balances_not_equity():
 
 # ── % above the 52-week low (2026-08-05) ─────────────────────────────────────
 
+def _pct_low_from_server(tmp_path, monkeypatch, price, lo52):
+    """The pctLow the page will actually receive, produced by the REAL
+    server._assemble — a fresh blob carrying `price` live, daily candles whose
+    minimum close is `lo52`. The first version of these tests recomputed
+    `round((price/lo52-1)*100, 1)` locally and asserted properties of its own
+    expression; server.py could have reverted to the stale-scored-close base OR
+    re-grown the max(0,...) clamp and both tests would have kept passing (proven
+    by mutation, 2026-08-08). Reuses test_web_console's harness so the value
+    takes the same path the deck's does."""
+    import time as _t
+    from .test_web_console import _blob, _candles_ada  # noqa: F401 (harness)
+    from .test_web_console import _mkdb
+    from deepfield.web import server
+    now = _t.time()
+    day = 86400
+    t0 = int(now // day * day)
+    candles = [("ADA/USD", 1440, t0 - 2 * day, lo52),
+               ("ADA/USD", 1440, t0 - day, lo52 * 1.15)]
+    _mkdb(tmp_path, monkeypatch,
+          blob=_blob(now, prices={"ADA/USD": price}, chg={}), candles=candles)
+    conn = server._ro_conn()
+    try:
+        st = server._assemble(conn)
+    finally:
+        conn.close()
+    return next(p for p in st["pairs"] if p["sym"] == "ADA")["pctLow"]
+
+
 def test_pct_low_is_measured_against_the_price_shown(tmp_path, monkeypatch):
     """One sentence, two different "now"s. The card's pct_above_low is computed off
     the last SCORED close (weekly/daily) while the sheet header carries the LIVE
@@ -194,22 +222,22 @@ def test_pct_low_is_measured_against_the_price_shown(tmp_path, monkeypatch):
         XRP  1.04909    "52-week 1.05162 — 3.2755 · now 1% above the low"
 
     a price BELOW the stated low, described as above it. The 52w bounds stay
-    weekly-close truth on purpose; only the percentage is re-based."""
-    price, lo52 = 1.04909, 1.05162
-    shown = round((price / lo52 - 1) * 100, 1)
-    assert shown == -0.2, "must reflect the price actually displayed"
+    weekly-close truth on purpose; only the percentage is re-based — and the
+    re-basing is asserted against the server's own output, not a local copy of
+    the formula."""
+    shown = _pct_low_from_server(tmp_path, monkeypatch, 1.04909, 1.05162)
+    assert shown == -0.2, f"server shipped {shown!r} for the incident's own numbers"
     assert shown < 0, "a price under the low cannot read as above it"
 
 
-def test_a_break_below_the_low_is_not_clamped_to_zero():
+def test_a_break_below_the_low_is_not_clamped_to_zero(tmp_path, monkeypatch):
     """It was `max(0, round(...))`. That reported a break below the 52-week low as
     "0% above" — silencing the exact event the bottom thesis exists to notice, and
-    rounding to whole percent turned every sub-1% breach into 0 as well."""
-    for price, lo52 in ((1.04909, 1.05162), (0.90, 1.00), (0.9996, 1.0000)):
-        pct = round((price / lo52 - 1) * 100, 1)
-        assert pct <= 0
-        assert max(0, round(pct)) == 0, "the old form collapsed all of these to 0"
-    assert round((0.90 / 1.00 - 1) * 100, 1) == -10.0, "a 10% break must survive"
+    rounding to whole percent turned every sub-1% breach into 0 as well. Asserted
+    on the server's emitted value: a 10% break and a sub-1% breach must both
+    arrive at the page negative and undamped."""
+    assert _pct_low_from_server(tmp_path, monkeypatch, 0.90, 1.00) == -10.0
+    assert _pct_low_from_server(tmp_path, monkeypatch, 0.994, 1.00) == -0.6
 
 
 def test_deck_phrases_below_the_low_rather_than_negative_above():

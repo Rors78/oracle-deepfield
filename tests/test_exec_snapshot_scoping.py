@@ -71,11 +71,31 @@ def test_realized_pnl_is_scoped_to_the_running_book(conn):
 def test_off_mode_stays_unscoped(conn):
     """'off' is not a book. No order row is ever written with mode='off', so scoping
     to the literal would report a flat $0.00 to an operator inspecting a real book
-    with execution disabled — a regression dressed as a fix."""
+    with execution disabled — a regression dressed as a fix.
+
+    Asserted through app._book_mode — the production mapping — for every mode.
+    The first version re-spelled the rule as a constant expression in the test
+    body (`"off" if "off" in ("live","paper") else None`), which pins nothing:
+    the TUI's realized-P&L closure held its own inline copy, and reverting THAT
+    to bare `mode` passed this test untouched. The closure now calls _book_mode
+    too, so this single assertion covers both consumers."""
+    assert app._book_mode("off") is None
+    assert app._book_mode("live") == "live"
+    assert app._book_mode("paper") == "paper"
+    assert app._book_mode("validate") is None
     assert store.realized_pnl_since(conn, DAY0, "off") == pytest.approx(0.0)
-    qmode = "off" if "off" in ("live", "paper") else None
-    assert qmode is None
-    assert store.realized_pnl_since(conn, DAY0, qmode) == pytest.approx(-13.0)
+    assert store.realized_pnl_since(conn, DAY0, app._book_mode("off")) == pytest.approx(-13.0)
+
+
+def test_no_inline_copy_of_the_book_mode_rule_survives():
+    """Grep guard: the `in ("live", "paper")` membership test is _book_mode's
+    body and must appear exactly once in app.py. A second occurrence is an
+    inline re-spelling — the exact shape that made the TUI closure unpinnable."""
+    import os
+    src = open(os.path.join(os.path.dirname(__file__), "..",
+                            "deepfield", "app.py")).read()
+    assert src.count('in ("live", "paper")') == 1, \
+        "the book-mode rule has been re-spelled outside _book_mode"
 
 
 @pytest.mark.parametrize("mode,want_open,want_pending,want_stops", [

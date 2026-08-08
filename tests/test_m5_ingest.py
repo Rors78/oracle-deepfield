@@ -92,7 +92,29 @@ def test_candle_closed_duplicate_is_not_logged_as_a_gap(tmp_path, caplog):
     import logging
     with caplog.at_level(logging.WARNING, logger="deepfield.ingest"):
         ing.handle_candle_closed(events.CandleClosed(SYM, 10080, ts))
-    assert not any("not in DB yet" in r.message for r in caplog.records)
+    assert not any("not in DB yet" in r.getMessage() for r in caplog.records)
+    conn.close()
+
+
+def test_candle_closed_for_a_missing_row_does_warn(tmp_path, caplog):
+    """Positive control for the negative assertion above — and the only place in
+    the suite that proves the 'not in DB yet' warning fires at all. Without it,
+    any rewording of the message in ingest.py vacuates the sibling test silently
+    and permanently: its `assert not any(...)` matches nothing forever (2026-08-07
+    audit, finding 7). This pins logger name, level and text in one go."""
+    conn = store.connect(str(tmp_path / "m5b.db"))
+    now = int(time.time())
+    _seed_minimal(conn, now)
+    ing = Ingest(conn, AppState(), profile=FULL)
+    import logging
+    with caplog.at_level(logging.WARNING, logger="deepfield.ingest"):
+        # A close event for a bar that was never upserted — the row is absent.
+        # NOT now-7*86400: _seed_minimal writes a closed weekly at exactly that
+        # ts, which routes to the 'duplicate' debug branch instead (the first
+        # draft of this control did exactly that and failed).
+        ing.handle_candle_closed(events.CandleClosed(SYM, 10080, now - 3 * 86400 - 12345))
+    assert any("not in DB yet" in r.getMessage() for r in caplog.records), \
+        "the missing-row warning no longer fires (or moved logger/level/text)"
     conn.close()
 
 

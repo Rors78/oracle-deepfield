@@ -89,10 +89,28 @@ def test_pivot_filter_still_finds_real_pivots():
 
 
 def test_unpriced_low_no_longer_fabricates_a_divergence():
-    """A gap-filled 0.0 used to become the lower low and satisfy p2 < p1."""
-    closes = [10.0] * 12 + [9.0, 10.0, 9.5, 10.0, 0.0, 10.0] + [10.0] * 6
-    rsi = [50.0] * 12 + [30.0, 50.0, 45.0, 50.0, 40.0, 50.0] + [50.0] * 6
+    """A gap-filled 0.0 used to become the lower low and satisfy p2 < p1.
+
+    The vectors matter more than the assertion. The first version put its two
+    price pivots 4 bars apart — inside the matcher's ±5 window — so BOTH RSI lows
+    matched BOTH pivots, r1 == r2, and the r2 > r1 leg failed regardless of the
+    pivot fix: the test returned False with the guard REVERTED (proven by
+    mutation, 2026-08-08). These vectors keep the pivots 10 bars apart, so with
+    the guard removed the 0.0 genuinely fabricates a divergence — see the
+    converse control below, which pins that this exact shape DOES fire when the
+    lower low is a real price."""
+    closes = [10.0] * 5 + [9.0] + [10.0] * 9 + [0.0] + [10.0] * 8
+    rsi = [50.0] * 5 + [30.0] + [50.0] * 9 + [40.0] + [50.0] * 8
     assert sg.find_bullish_divergence(closes, rsi, 60, 0.015, 3) is False
+
+
+def test_a_real_lower_low_in_the_same_shape_is_detected():
+    """Converse control: identical geometry, but the second low is a PRICE (8.5,
+    not 0.0). RSI 30 -> 40 over a lower low is the textbook bullish divergence;
+    if this stops returning True the vectors above prove nothing."""
+    closes = [10.0] * 5 + [9.0] + [10.0] * 9 + [8.5] + [10.0] * 8
+    rsi = [50.0] * 5 + [30.0] + [50.0] * 9 + [40.0] + [50.0] * 8
+    assert sg.find_bullish_divergence(closes, rsi, 60, 0.015, 3) is True
 
 
 def test_pivot_compat_path_untouched():

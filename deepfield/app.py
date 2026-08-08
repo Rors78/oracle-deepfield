@@ -664,14 +664,15 @@ async def _exec_state_refresh(appstate, conn, ing, interval=15):
                     # both ledgers; unscoped, the TUI's realized day/week showed REAL
                     # money losses against a simulated book.
                     #
-                    # 'off' scopes to None (the documented unscoped default) rather
-                    # than to the literal string: no order row is ever written with
-                    # mode='off', so scoping to it would report a flat $0.00 for an
-                    # operator who is inspecting a real book with execution disabled.
-                    # The web console reaches the same answer by a different road —
-                    # _active_mode falls through 'off' to the last working order.
-                    return store.realized_pnl_since(
-                        conn, since, mode if mode in ("live", "paper") else None)
+                    # The 'off'->None mapping is _book_mode's — call it, don't
+                    # re-spell it. This closure held its own inline copy of the
+                    # rule while the test that claimed to pin it asserted on a
+                    # third copy (a constant expression in the test body), so a
+                    # revert here to bare `mode` was invisible to the suite
+                    # (2026-08-07 audit, test-forge finding 6). One rule, one
+                    # implementation; the test now pins _book_mode and, through
+                    # it, this caller.
+                    return store.realized_pnl_since(conn, since, _book_mode(mode))
                 except Exception:
                     log.exception("realized_pnl_since failed (display value only)")
                     return 0.0

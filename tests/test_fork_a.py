@@ -68,15 +68,59 @@ def test_gate_disabled_allows_bull(tmp_path, monkeypatch):
     conn.close()
 
 
+def _fund_everything_downstream(monkeypatch):
+    """Stub every stage past the regime gate to SUCCEED, so the gate is the only
+    variable. The first version of this test stubbed nothing: in the test env
+    _place_entry returns None down at least three unrelated paths (broker wall ->
+    equity None -> rails refuse; missing keys; the AddOrder wall swallowed by the
+    catch-all), so `assert place_entry(...) is None` held with the gate DELETED —
+    proven by mutation on 2026-08-08. Worse, it constructed and signed real
+    Kraken requests that only the conftest wall stopped, burning ~8s in backoff.
+    A gate test is only a gate test when the gate is the only thing that can say
+    no."""
+    from deepfield import executor as ex_mod
+    monkeypatch.setattr(ex_mod.Executor, "portfolio_value", lambda self: 1000.0)
+    monkeypatch.setattr(ex_mod.Executor, "rails_ok", lambda self, eq: (True, ""))
+    monkeypatch.setattr(ex_mod.Executor, "compute_stop",
+                        lambda self, sym, px, card, sl_pct=None: px * 0.9)
+    # notional must sit UNDER config.EXEC_MAX_ORDER_NOTIONAL_USD (the $50 sanity
+    # ceiling) — at $100 the first draft was refused for SIZE, which made the
+    # gated test pass for yet another wrong reason. The converse control caught it.
+    monkeypatch.setattr(ex_mod.Executor, "size",
+                        lambda self, *a, **k: {"volume": 0.001, "notional": 20.0,
+                                               "margin": 10.0, "actual_risk": 1.0,
+                                               "floored_to_min": False, "capped": False,
+                                               "conviction_mult": 1.0, "size_mult": 1.0})
+    sent = []
+    monkeypatch.setattr(ex_mod.broker, "private",
+                        lambda ep, p=None, **k: (sent.append(ep) or {"txid": ["OGATE-1"]}))
+    return sent
+
+
 def test_place_entry_returns_none_when_gated(tmp_path, monkeypatch):
     """End-to-end: _place_entry short-circuits to None under the gate BEFORE any
-    sizing/broker call (BULL regime, gate on)."""
+    sizing/broker call (BULL regime, gate on) — with everything downstream funded,
+    so None can only mean the gate."""
     monkeypatch.setattr(config, "ACCUMULATE_ONLY_IN_BEAR", True)
     e, conn = _exec(tmp_path)
+    sent = _fund_everything_downstream(monkeypatch)
     store.meta_set(conn, "regime", "BULL")
-    # if the gate leaks, this would try to size/place and hit the network — the
-    # test's value is that it returns None without doing so.
     assert e.place_entry(SYM, 100.0, object()) is None
+    assert sent == [], f"the gate leaked — a broker call went out: {sent}"
+    conn.close()
+
+
+def test_place_entry_proceeds_when_gate_open(tmp_path, monkeypatch):
+    """Converse control, same stubs: in a BEAR regime the identical call must get
+    PAST the gate and reach the broker. Without this, a test env where placement
+    fails for any unrelated reason makes the gated test pass vacuously — which is
+    exactly what it did."""
+    monkeypatch.setattr(config, "ACCUMULATE_ONLY_IN_BEAR", True)
+    e, conn = _exec(tmp_path)
+    sent = _fund_everything_downstream(monkeypatch)
+    store.meta_set(conn, "regime", "BEAR")
+    e.place_entry(SYM, 100.0, object())
+    assert sent, "gate open but nothing reached the broker — the stubs no longer fund the path"
     conn.close()
 
 
