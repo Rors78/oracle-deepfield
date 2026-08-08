@@ -726,6 +726,24 @@ def _add_order(p, meta, cache):
                       "(Kraken would too)", symbol, price, dec)
             return None
 
+    # LOT PRECISION — the same strictness, other axis. The 2026-08-06 lesson was
+    # that a simulator more permissive than the venue certifies code that cannot
+    # work; the price check above was added for it and immediately caught a second
+    # latent bug. Volume had the identical blind spot (2026-08-07 audit, money-path
+    # finding 3): orders.volume can carry float-subtraction dust (a partial-harvest
+    # remainder like 0.044160000000000005) and str() sends every digit. Kraken
+    # rejects volume finer than the pair's lot_decimals; now paper does too.
+    lot_row = _conn.execute(
+        "SELECT lot_decimals FROM pairs WHERE ws_symbol=?", (symbol,)).fetchone()
+    if lot_row and lot_row[0] is not None:
+        ldec = int(lot_row[0])
+        if round(volume, ldec) != volume:
+            if meta is not None:
+                meta["error"] = "EGeneral:Invalid arguments:volume"
+            log.error("PAPER AddOrder %s: volume %r exceeds %d lot decimals — "
+                      "rejected (Kraken would too)", symbol, volume, ldec)
+            return None
+
     last = _last_price(symbol, cache)
     oflags = str(p.get("oflags", "") or "")
     # Post-only rejects anything that would cross and take liquidity — the very

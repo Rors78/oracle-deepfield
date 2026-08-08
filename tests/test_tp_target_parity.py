@@ -44,6 +44,41 @@ def conn(tmp_path):
     c.close()
 
 
+def test_the_target_rule_is_spelled_exactly_once():
+    """Grep guard: `* (1 + config.TP_PCT)` may appear in executable code only
+    inside tp_target itself. Every other occurrence is a private copy of the rule
+    — the app.py flow-shift narration held one until 2026-08-08 (it overstated
+    the target whenever the trough ratchet was active), and the ARM log line held
+    another that was merely correct by coincidence (baseline == trough at arm).
+    Comments are exempt: the incident docstrings quote the expression on purpose."""
+    import os, re
+    root = os.path.join(os.path.dirname(__file__), "..", "deepfield")
+    hits = []
+    for dirpath, _dirs, files in os.walk(root):
+        for fn in files:
+            if not fn.endswith(".py"):
+                continue
+            path = os.path.join(dirpath, fn)
+            in_doc = False
+            for i, line in enumerate(open(path), 1):
+                # crude but sufficient docstring tracker: a line with an odd
+                # number of triple-quotes toggles string context; incident
+                # docstrings quote the banned expression deliberately.
+                quotes = line.count('"""') + line.count("'''")
+                if in_doc:
+                    if quotes % 2:
+                        in_doc = False
+                    continue
+                if quotes % 2:
+                    in_doc = True
+                    continue
+                code = line.split("#", 1)[0]
+                if re.search(r"\(\s*1\s*\+\s*(config\.)?TP_PCT\s*\)", code):
+                    hits.append(f"{fn}:{i}")
+    assert hits == ["executor.py:62"], \
+        f"the T/P target rule is spelled outside tp_target: {hits}"
+
+
 def test_the_incident_deck_said_208_executor_said_289(conn, monkeypatch):
     """The exact live state at 20:55 on 2026-08-05."""
     monkeypatch.setattr(config, "TP_TARGET_FLOOR_BASELINE", True)

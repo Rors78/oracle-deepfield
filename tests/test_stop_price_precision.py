@@ -240,6 +240,89 @@ def test_reconcile_replace_rounds_the_stop_it_read_from_the_ledger(tmp_path, mon
     conn.close()
 
 
+# ── volume precision (2026-08-07 audit, money-path finding 3) ────────────────
+#
+# The other axis of the same defect. orders.volume can carry float-subtraction
+# dust — a partial harvest persists volf - vol_exec, e.g. 0.044160000000000005 —
+# and str() hands Kraken every digit. Zero over-precise volumes in 2,227 logged
+# AddOrders meant the hazard had never been EXERCISED, not that it was safe: the
+# paper simulator validated price precision but not volume, the exact
+# more-permissive-than-the-venue blind spot that let the price bug through.
+
+def test_vol_str_floors_float_dust_to_the_lot_grid(tmp_path):
+    """The real remainder shape through the real formatter. FLOOR, never round:
+    a stop volume rounded UP can exceed the position it protects."""
+    conn = _conn(tmp_path)
+    e = ex_mod.Executor(conn)
+    assert e._vol_str(SYM, 0.044160000000000005) == "0.04416000"
+    assert e._vol_str(SYM, 0.0001) == "0.00010000"      # on-grid: identity
+    # one lot above the grid line must floor DOWN, not round up
+    assert e._vol_str(SYM, 0.000109999) == "0.00010999"
+    conn.close()
+
+
+def test_rest_stop_sends_a_formatted_volume(tmp_path, monkeypatch):
+    """The dust value through the real _rest_stop path — the sender that read
+    orders.volume back and str()'d it."""
+    conn = _conn(tmp_path)
+    e = ex_mod.Executor(conn)
+    e.mode = "live"
+    sent = {}
+    monkeypatch.setattr(ex_mod.broker, "private",
+                        lambda ep, p=None, **k: (sent.update(p or {}) or {"txid": ["OS-1"]}))
+    oid = store.insert_order(conn, {
+        "ts": "2026-08-08T00:00:00+00:00", "symbol": SYM, "margin_pair": MPAIR,
+        "side": "buy", "ordertype": "limit", "mode": "live", "entry": 64484.1,
+        "volume": 0.044160000000000005, "leverage": 10, "status": "open"})
+    e._rest_stop(SYM, MPAIR, 62128.0, 0.044160000000000005, 10, oid, paper=False)
+    assert sent["volume"] == "0.04416000", \
+        f"raw float dust reached the exchange: {sent['volume']!r}"
+    conn.close()
+
+
+def test_paper_rejects_a_volume_finer_than_the_lot_grid(tmp_path):
+    """The simulator must be as strict as Kraken on BOTH axes."""
+    db = str(tmp_path / "vsim.db")
+    conn = store.connect(db)
+    store.upsert_pair(conn, "XXBTZUSD", SYM, "BTC", 0.00005, 0.5, 8)
+    conn.commit()
+    conn.close()
+    paper_broker.attach(db)
+    try:
+        meta = {}
+        res = broker.private("/0/private/AddOrder", {
+            "pair": MPAIR, "type": "sell", "ordertype": "stop-loss",
+            "price": "62128.0", "volume": "0.044160000000000005", "leverage": "10",
+        }, idempotent=False, meta=meta)
+        assert res is None
+        assert "Invalid arguments:volume" in meta.get("error", ""), meta
+    finally:
+        paper_broker.detach()
+
+
+def test_paper_accepts_a_lot_grid_volume(tmp_path):
+    """Converse — a strictness bug that rejected every volume would pass the test
+    above while disabling the simulator (the price check has the same control)."""
+    import time as _t
+    db = str(tmp_path / "vsim2.db")
+    conn = store.connect(db)
+    store.upsert_pair(conn, "XXBTZUSD", SYM, "BTC", 0.00005, 0.5, 8)
+    store.upsert_candle(conn, SYM, 15, int(_t.time()) - 300,
+                        64000.0, 64100.0, 63900.0, 64000.0, 1.0, 0)
+    conn.commit()
+    conn.close()
+    paper_broker.attach(db)
+    try:
+        meta = {}
+        res = broker.private("/0/private/AddOrder", {
+            "pair": MPAIR, "type": "sell", "ordertype": "stop-loss",
+            "price": "62128.0", "volume": "0.04416000", "leverage": "10",
+        }, idempotent=False, meta=meta)
+        assert res and res.get("txid"), f"a valid lot-grid volume was rejected: {meta}"
+    finally:
+        paper_broker.detach()
+
+
 def test_ladder_rung_snaps_the_stop_it_inherits(tmp_path, monkeypatch):
     """The propagation path. A rung inherits its parent's stop; if it inherits the raw
     value too, every row down the chain carries the same landmine."""

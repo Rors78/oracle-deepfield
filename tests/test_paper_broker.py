@@ -349,7 +349,15 @@ def _armed_exec(conn, monkeypatch):
         px = float(row[0]) if row else 0.0
         # b/a, not just c: the harvest prices its sell off the BOOK (min(bid+tick,
         # ask)) and skips the rung entirely when the quote has no bid.
-        return {p: {"c": [f"{px:.10f}"], "b": [f"{px:.10f}"], "a": [f"{px:.10f}"]}
+        #
+        # The ask sits ONE TICK above the bid (BTC tick_dec=1 -> 0.1). This stub
+        # used to serve bid == ask == last — a zero-spread book no venue ever
+        # shows — and the harvest's degenerate-book abort (2026-08-08) correctly
+        # refuses that state: a post-only sell at a price <= bid crosses. On a
+        # zero spread there IS no maker price, so the old quotes only worked
+        # because the old code sent a crossing sell the simulator happened to
+        # rest. A one-tick spread is the minimal honest book.
+        return {p: {"c": [f"{px:.10f}"], "b": [f"{px:.10f}"], "a": [f"{px + 0.1:.10f}"]}
                 for p in (pairs or [])}
 
     monkeypatch.setattr(rest_client, "fetch_ticker", _ticker)

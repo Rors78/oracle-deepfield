@@ -256,7 +256,19 @@ def _poll_external_flows(c, broker, now):
         cur = c.execute("UPDATE meta SET value=? WHERE key='tp_baseline' AND value=?",
                         ("0.0", raw_baseline))
     else:
-        target_note = f"${new * (1 + config.TP_PCT):.2f}"
+        # THROUGH executor.tp_target — never `new * (1 + TP_PCT)` inline. That
+        # exact re-spelling is the 39%-off deck bug of 2026-08-05 (the docstring on
+        # tp_target tells the story), and this narration line was the last caller
+        # still holding a private copy (2026-08-07 audit, money-path finding 6):
+        # whenever the trough ratchet was active it overstated the target it
+        # claimed to report. Log-only, but a log that states a number the executor
+        # will not act on is how operators learn to distrust the log.
+        from . import executor as _ex      # local import, as elsewhere in this file
+        try:
+            tro = float(store.meta_get(c, "tp_trough", new) or new)
+        except (TypeError, ValueError):
+            tro = new
+        target_note = f"${_ex.tp_target(new, min(tro, new)):.2f}"
         cur = c.execute("UPDATE meta SET value=? WHERE key='tp_baseline' AND value=?",
                         (str(round(new, 4)), raw_baseline))
     if cur.rowcount == 0:

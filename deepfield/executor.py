@@ -75,15 +75,29 @@ def _round_price(x, decimals):
 
 
 def _tick_round(symbol, px):
-    """Snap a price to the pair's own tick. THE rounding rule, in one place.
+    """Snap a price to the pair's own tick — the NEAREST-tick rule.
 
     Kraken rejects any price carrying more decimals than the pair allows, and a
-    rejected protective stop leaves a live leveraged long naked (2026-08-06). Use
-    this at every site that SENDS a price to the exchange or PERSISTS one into
-    `orders`, because a stored price is a price that will be sent later — reconcile
-    and reprotect read `orders.stop` back for the life of the row, and a ladder rung
-    copies its parent's stop down the whole chain.
-    """
+    rejected protective stop leaves a live leveraged long naked (2026-08-06). Every
+    site that SENDS a buy/stop price to the exchange or PERSISTS one into `orders`
+    calls this, because a stored price is a price that will be sent later —
+    reconcile and reprotect read `orders.stop` back for the life of the row, and a
+    ladder rung copies its parent's stop down the whole chain.
+
+    There are exactly TWO rounding rules in this file, on purpose:
+
+      * nearest tick (here) — entries, stops, rungs, the ratchet level. Nearest is
+        correct because these prices sit AWAY from the touch by construction.
+      * floor to tick (_round_down at the harvest/flatten sell legs) — a sell
+        priced off min(bid+tick, ask) that rounded UP could land above the ask and
+        be rejected as crossing by post-only, the very failure min() exists to
+        prevent. Those legs are not forgetting this helper; they need the other rule.
+
+    An earlier docstring here claimed this was used at "every" price site while two
+    buy-side sites still rounded inline (2026-08-07 audit). The claim mattered more
+    than the code: a false statement of coverage closes the question that would
+    have found the gap. If you add a third rule, or a site that uses neither, say
+    so here."""
     if px is None:
         return None
     return _round_price(float(px), config.MARGIN_TICK_DECIMALS.get(symbol, 2))
@@ -199,6 +213,32 @@ class Executor:
         log.log(logging.INFO if first else logging.DEBUG,
                 "LADDER %s: next rung @ %s would hit stop %s — ladder floor reached, holding",
                 symbol, target, stop)
+
+    def _vol_str(self, symbol, vol):
+        """Volume as Kraken accepts it: FLOORED to the pair's lot grid, formatted
+        to lot_decimals. THE volume-formatting rule — the counterpart of
+        _tick_round for the other axis of an order.
+
+        orders.volume is not guaranteed tick-clean: a partial harvest persists the
+        remainder volf - vol_exec, a raw float subtraction that can carry dust
+        (0.044160000000000005), and str() would hand Kraken 18 significant digits.
+        That hazard had never been exercised live — zero over-precise volumes in
+        2,227 logged AddOrders — which is absence of a test, not evidence of
+        safety (2026-08-07 audit, money-path finding 3). FLOOR, not round: a stop
+        or close volume rounded UP can exceed the position it protects, and the
+        sub-lot dust it leaves behind could not have been sold anyway. On-grid
+        values pass through unchanged, so routing every sender here costs the
+        clean paths nothing."""
+        try:
+            v = float(vol)
+            info = store.get_pair_info(self.conn, symbol) or {}
+            d = info.get("lot_decimals")
+            if d is not None:
+                d = int(d)
+                return f"{_round_down(v, d):.{d}f}"
+        except Exception:
+            pass
+        return f"{float(vol):.8f}"      # Kraken's max lot precision — safe fallback
 
     def _armed(self):
         """Modes that place orders against a real counterparty: `live`, or `paper`
@@ -939,13 +979,12 @@ class Executor:
                 return None
 
         margin_pair = config.MARGIN_PAIR[symbol]
-        tick = config.MARGIN_TICK_DECIMALS.get(symbol, 2)
         if config.ENTRY_ORDERTYPE == "limit":
             # Post-only maker BUY must not cross the ask, or Kraken rejects it and
             # the entry silently never rests. Bid just below last so it always rests.
-            px = _round_price(entry_price * (1 - config.POST_ONLY_SLIP_PCT), tick)
+            px = _tick_round(symbol, entry_price * (1 - config.POST_ONLY_SLIP_PCT))
         else:
-            px = _round_price(entry_price, tick)
+            px = _tick_round(symbol, entry_price)
         stop_px = _tick_round(symbol, stop)
         vol = sizing["volume"]
         tag = (f" ({cmult:g}x conviction)" if cmult > 1.0
@@ -956,7 +995,7 @@ class Executor:
                  sizing["margin"], sizing["actual_risk"], tag)
 
         params = {"pair": margin_pair, "type": "buy", "ordertype": config.ENTRY_ORDERTYPE,
-                  "volume": str(vol), "leverage": str(leverage)}
+                  "volume": self._vol_str(symbol, vol), "leverage": str(leverage)}
         if config.ENTRY_ORDERTYPE == "limit":
             params["price"] = str(px)
             params["oflags"] = "post"
@@ -1900,10 +1939,13 @@ class Executor:
                     store.meta_set(self.conn, "tp_trough", eq)
                     store.meta_set(self.conn, "tp_cycle_flows", 0.0)
                     _tp_trough_noted = None
+                    # tp_target(eq, eq) == eq*(1+TP_PCT) at arm time, but spell it
+                    # through the one definition anyway — a third private copy of
+                    # the rule is how the 39% deck divergence started.
                     log.warning("T/P ARMED: baseline $%.2f — flatten-everything target $%.2f (+%.0f%%)",
-                                eq, eq * (1 + config.TP_PCT), config.TP_PCT * 100)
+                                eq, tp_target(eq, eq), config.TP_PCT * 100)
                     self._journal("tp", "*", f"T/P armed: baseline ${eq:.2f}, "
-                                             f"target ${eq * (1 + config.TP_PCT):.2f}")
+                                             f"target ${tp_target(eq, eq):.2f}")
                     return False
                 # Trough ratchet (operator 2026-07-24): the target used to stay
                 # parked at baseline*(1+TP_PCT) through any drawdown — unreachable
@@ -2249,7 +2291,21 @@ class Executor:
             # min() exists to prevent in the first place.
             px = _round_down(min(_round_price(bid + tick, tick_dec), ask), tick_dec)
             if px <= bid:
-                px = ask                           # degenerate book — join the ask
+                # Degenerate book — join the ask, FLOORED. The raw ask can carry
+                # more decimals than the pair allows, and the f-string below rounds
+                # to NEAREST, which can round UP past the ask -> post-only crossing
+                # reject. Normalize BEFORE the guard's conclusion is acted on, not
+                # after (the adopt-path ordering trap, 2026-08-07 audit).
+                px = _round_down(float(ask), tick_dec)
+                if px <= bid:
+                    # No maker price exists between bid and ask at this tick size.
+                    # Abort THIS pass exactly like a failed placement: rows stay
+                    # open with stops cleared and reprotect re-arms them — never a
+                    # silent return that leaves the pair outside the retry loop.
+                    log.error("T/P %s: no maker price between bid %s and ask %s at "
+                              "tick %d — close skipped this pass; reprotect re-arms, "
+                              "next pass retries", sym, bid, ask, tick_dec)
+                    continue
             pxstr = f"{px:.{tick_dec}f}"
             volstr = f"{vol:.{lot_dec}f}" if lot_dec is not None else f"{vol:.8f}"
             params = {"pair": d["mpair"], "type": "sell", "ordertype": "limit",
@@ -2518,7 +2574,22 @@ class Executor:
             # min() exists to prevent in the first place.
             px = _round_down(min(_round_price(bid + tick, tick_dec), ask), tick_dec)
             if px <= bid:
-                px = ask                          # degenerate book — join the ask
+                # Degenerate book — join the ask, FLOORED (raw ticker ask; the
+                # f-string rounds to NEAREST and could cross). This matters MORE
+                # here than in the flatten: the rung's protective stop is already
+                # canceled by the time px is computed, so a rejected sell leaves
+                # this lot naked until reprotect's next cycle. Abort into the
+                # existing failed-placement path, which says exactly that.
+                px = _round_down(float(ask), tick_dec)
+                if px <= bid:
+                    log.error("HARVEST %s: no maker price between bid %s and ask %s "
+                              "at tick %d for rung %d — sell skipped, stop dropped; "
+                              "reprotect re-arms next cycle", sym, bid, ask, tick_dec, oid)
+                    self._journal("tp-rung", sym,
+                                  f"rung {oid} harvest sell SKIPPED (no maker price) "
+                                  f"— reprotect re-arms")
+                    continue
+
             info = store.get_pair_info(self.conn, sym) or {}
             lot_dec = info.get("lot_decimals")
             volstr = f"{volf:.{lot_dec}f}" if lot_dec is not None else f"{volf:.8f}"
@@ -2630,13 +2701,12 @@ class Executor:
                 return
             if store.has_pending_entry(self.conn, symbol, mode=self.mode):
                 return                                  # skip if a bid already rests (best-effort; see docstring)
-            tick = config.MARGIN_TICK_DECIMALS.get(symbol, 2)
             # Rung spacing is the pair's, not the roster's (2026-08-06 ruling):
             # clamp(0.5 x ATR14, 0.5%, 7%). Flat 1% spent ZEC's whole ladder in an hour
             # while PAXG never reached rung two.
             rd = self._distances(symbol)
             step = rd["rung_pct"] / 100.0
-            target = _round_price(filled_price * (1 - step), tick)
+            target = _tick_round(symbol, filled_price * (1 - step))
             # Floor PRE-gate — refuse before the ticker fetch, not after.
             #
             # The live clamp below can only ever LOWER the target, so a fill-anchored
@@ -2658,7 +2728,7 @@ class Executor:
             # fill-anchored target (old behavior); _ensure_ladder_rungs retries later.
             live = self._live_last(symbol)
             if live and live > 0:
-                lid = _round_price(live * (1 - config.POST_ONLY_SLIP_PCT), tick)
+                lid = _tick_round(symbol, live * (1 - config.POST_ONLY_SLIP_PCT))
                 if target > lid:
                     log.info("LADDER %s: fill-anchored rung %s at/above live %s — "
                              "clamped to %s so the post-only maker rests",
@@ -2714,7 +2784,7 @@ class Executor:
             vol = sizing["volume"]
             userref = _new_userref()
             params = {"pair": margin_pair, "type": "buy", "ordertype": "limit",
-                      "volume": str(vol), "leverage": str(leverage),
+                      "volume": self._vol_str(symbol, vol), "leverage": str(leverage),
                       "price": str(target), "oflags": "post",   # post-only can't fill instantly
                       "userref": str(userref)}
             tmeta = {}
@@ -3275,7 +3345,8 @@ class Executor:
                 self._journal("stop", sym, f"stop {stop} at/above live {live} — will trigger on rest")
             res = broker.private("/0/private/AddOrder", {
                 "pair": mpair, "type": "sell", "ordertype": "stop-loss",
-                "price": str(stop), "volume": str(vol), "leverage": str(lev), "trigger": "index"},
+                "price": str(stop), "volume": self._vol_str(sym, vol),
+                "leverage": str(lev), "trigger": "index"},
                 idempotent=False)
             if res and res.get("txid"):
                 self.conn.execute("UPDATE orders SET stop_txid=? WHERE id=?", (res["txid"][0], oid))
@@ -3465,7 +3536,7 @@ class Executor:
         # every send site and every persist site calls it.
         stop_px = _tick_round(symbol, stop_px)
         params = {"pair": margin_pair, "type": "sell", "ordertype": "stop-loss",
-                  "price": str(stop_px), "volume": str(volume),
+                  "price": str(stop_px), "volume": self._vol_str(symbol, volume),
                   "leverage": str(leverage), "trigger": "index"}  # :BTNL rejects 'last'
         res = broker.private("/0/private/AddOrder", params, idempotent=False)
         if res and res.get("txid"):

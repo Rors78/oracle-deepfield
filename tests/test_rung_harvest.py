@@ -296,6 +296,35 @@ def test_reconcile_leaves_flatten_shared_close_refs_alone(tmp_path, monkeypatch)
     assert calls["adds"] == []                     # and no stop re-placed beside them
 
 
+def test_degenerate_book_aborts_instead_of_selling_a_raw_ask(tmp_path, monkeypatch):
+    """No maker price exists between bid and ask at this tick size. The old
+    fallback assigned the RAW ticker ask after the crossing guard had already
+    run — an ordering trap (normalize-after-guard, the adopt-path class): the
+    f-string then rounds to NEAREST, which can land ON or ABOVE the ask and be
+    rejected as crossing by post-only. This matters more here than anywhere:
+    the rung's protective stop is already canceled when px is computed, so a
+    rejected sell leaves the lot naked until reprotect's next cycle. The fix
+    floors the ask and, when even that sits at/below the bid, aborts THIS pass
+    down the existing failed-placement path — stop dropped, reprotect re-arms,
+    and crucially NO order goes out."""
+    conn = _mk_conn(tmp_path)
+    oid = _seed_rung(conn, entry=1.0, vol=100.0)
+    _seed_candle(conn, 1.05)                       # +5% > 4% target
+    monkeypatch.setitem(config.MARGIN_TICK_DECIMALS, SYM, 2)
+    # bid 1.04, ask 1.0405: one tick above the bid is 1.05 > ask, so min() takes
+    # the raw ask; floored it equals the bid. No maker price exists.
+    calls = _mock_broker(monkeypatch,
+                         quotes={REST: {"b": ["1.04"], "a": ["1.0405"]}},
+                         positions=_pos(100.0))
+    _mk_exec(conn, monkeypatch)._check_rung_harvest()
+    assert calls["cancels"] == ["STOP-1"], "the stop cancel precedes px — unchanged"
+    assert calls["adds"] == [], \
+        f"a sell went out with no maker price available: {calls['adds']}"
+    status, stop_txid, close_txid, _, _ = _row(conn, oid)
+    assert status == "open" and close_txid is None, \
+        "the row must stay open with no close — reprotect re-arms its stop"
+
+
 # ── stop ratchet: a proved rung re-arms at breakeven, ladder floor unchanged ──
 #
 # The harvest layer is asymmetric (+4% target vs ~7.8% mean stop distance), so it
