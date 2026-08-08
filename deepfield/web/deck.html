@@ -982,7 +982,7 @@ function renderHarvest(h){
       `<div class="rrow"><span class="rsym">${esc(r.sym)}</span><span class="rwhen">${esc(r.label)}</span>
        ${r.pct!=null?`<span class="rpct">+${r.pct}%</span>`:""}
        <span class="rp ${cls(r.pnl)}">${fmtSigned(r.pnl)}</span></div>`).join("")}</div>`
-    :`<div class="dim" style="font-size:10.5px;margin-top:7px">no rungs banked yet — first +4% rip lands here</div>`}`;
+    :`<div class="dim" style="font-size:10.5px;margin-top:7px">no rungs banked yet — first rip in the ${esc(rungTargetRange())} band lands here</div>`}`;
   renderSkim(rh);
   const base=h.tp_baseline, tgt=h.tp_target, eq=h.equity!=null?h.equity:h.peak;
   // The target is TROUGH-ratcheted (fires at min(baseline,trough)x1.2), so after a
@@ -1024,7 +1024,7 @@ function renderHarvest(h){
   const tro=h.tp_trough, ratcheted=(tro!=null&&base!=null&&tro<base*0.999);
   $("hv-nums").innerHTML=`<span>base <b>${fmt$(base)}</b></span><span>equity <b>${fmt$(eq)}</b></span>`
     +`<span>target <b>${fmt$(tgt)}</b></span>`
-    +(ratcheted?`<span class="dim" title="take-profit fires at min(baseline, trough) × 1.2">↓ off trough <b>${fmt$(tro)}</b></span>`:"");
+    +(ratcheted?`<span class="dim" title="trough-ratcheted target, floored at the baseline — a fire can never bank a loss">trough <b>${fmt$(tro)}</b></span>`:"");
   const tot=TPC.reduce((a,c)=>a+(c.profit||0),0);
   const bk=$("hv-banked"); bk.textContent=fmtSigned(tot); bk.className="v num "+cls(tot);
   // one line only — the full history lives in the HARVEST LEDGER card, no duplication

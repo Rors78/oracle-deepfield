@@ -113,10 +113,26 @@ def _decommented(src):
 
 def test_no_stray_hardcoded_harvest_percentages():
     """The specific label that was wrong: "rung +4% · book +20% backstop", baked
-    into the markup where TP_RUNG_PCT and TP_PCT belong."""
+    into the markup where TP_RUNG_PCT and TP_PCT belong.
+
+    Strengthened 2026-08-08: the original grep matched "rung +4%" VERBATIM, and
+    the empty-state string "first +4% rip lands here" carried the same deleted
+    flat constant right past it on phrasing alone (2026-08-07 audit, R7). The
+    pattern now bans ANY hardcoded +N% adjacent to the harvest vocabulary, so a
+    rewording has to actually render from data to pass."""
+    import re
     src = _decommented(DECK.read_text())
     assert "rung +4%" not in src and "book +20% backstop" not in src, \
         "harvest header is hardcoded again — it must render from thresholds"
+    stray = re.findall(r"\+\d+(?:\.\d+)?%[^\n${]{0,20}(?:rip|rung|target|backstop)"
+                       r"|(?:rip|rung|target|backstop)[^\n${]{0,20}\+\d+(?:\.\d+)?%",
+                       src)
+    assert not stray, f"hardcoded harvest percentage in live markup: {stray}"
+    # The banned T/P formula must not be STATED anywhere the operator reads —
+    # the executor's rule is trough-ratcheted-floored-at-baseline, and a tooltip
+    # asserting min(baseline, trough) x 1.2 describes the $208.54 incident bot.
+    assert "min(baseline, trough) ×" not in src and "× 1.2" not in src, \
+        "the pre-floor T/P formula is being shown to the operator again"
 
 
 def test_thresholds_survive_a_json_round_trip(tmp_path):
