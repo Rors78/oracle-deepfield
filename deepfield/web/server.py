@@ -174,16 +174,22 @@ def _ladder(conn, mode=None):
     # COALESCE(stop_prot, stop): stop distance is a RISK reading — it must show the
     # level a stop would actually rest at, which for a rung that proved the harvest
     # target is its ratcheted breakeven, not the chain invalidation level below it.
-    for oid, sym, vol, lev, entry, stop, txid, ctxid in conn.execute(
+    for oid, sym, vol, lev, entry, stop, txid, ctxid, ftp, fsl, frung in conn.execute(
             "SELECT id,symbol,volume,leverage,entry,COALESCE(stop_prot,stop),"
-            "stop_txid,close_txid FROM orders "
+            "stop_txid,close_txid,tp_pct,sl_pct,rung_pct FROM orders "
             "WHERE status='open' AND (? IS NULL OR mode=?) ORDER BY symbol,id", (mode, mode)):
         d = by.setdefault(sym, blank())
         # close_txid on an open row = mid-harvest (tp-rung) or mid-flatten: the
         # stop is OFF because a resting sell owns the exit — a deliberate state
         # the UI must show as harvest, never as "unprotected".
+        #
+        # tp/sl/rung here are the FROZEN row values — the terms this lot actually
+        # trades on, fixed at fill (ruling §c). NOT today's vol_table: a held lot
+        # rendered against the current table would show targets the executor will
+        # never act on for it, the display lie the freeze rule exists to prevent.
         d["fills"].append({"vol": vol, "lev": lev, "entry": entry, "stop": stop,
-                           "stop_txid": txid or "", "harv": bool(ctxid)})
+                           "stop_txid": txid or "", "harv": bool(ctxid),
+                           "tp": ftp, "sl": fsl, "rung": frung})
         if txid:
             d["stopped"] += 1
         elif ctxid:
@@ -285,7 +291,7 @@ def _assemble(conn):
 
         lad = ladder.get(sym)
         pnl = None
-        rungs = vols = bids = fstops = prot = None
+        rungs = vols = bids = fstops = prot = ftp = fsl = frung = None
         avg = stop = bid = None
         fills = 0
         size = 0.0
@@ -298,6 +304,10 @@ def _assemble(conn):
             vols = [f["vol"] for f in lad["fills"]]      # real per-fill vols (unequal under conviction sizing)
             fstops = [f["stop"] for f in lad["fills"]]   # W4: per-fill stops (they DIVERGE across chains)
             prot = [bool(f["stop_txid"]) for f in lad["fills"]]  # W3: per-fill protection truth
+            # FROZEN per-fill terms (audit R7): what each lot actually trades on.
+            ftp = [f["tp"] for f in lad["fills"]]
+            fsl = [f["sl"] for f in lad["fills"]]
+            frung = [f["rung"] for f in lad["fills"]]
             fills = len(lad["fills"])
             size = round(lad["vol_sum"], 8)
             avg = lad["avg"]; stop = lad["stop"]
@@ -327,7 +337,8 @@ def _assemble(conn):
         if fills:
             tier = "active"
             below = stop and price and price < stop
-            near = stop and price and (price - stop) / stop < 0.03
+            near = (stop and price and
+                    (price - stop) / stop < config.NEAR_STOP_PCT / 100.0)
             if below:
                 # price under the stop = the stop should have FIRED — loudest state
                 status, stStyle, fault = "BELOW-STOP", "near", True
@@ -392,6 +403,7 @@ def _assemble(conn):
             "harv": (lad["harvesting"] if lad else 0),  # fills mid-harvest (sell resting, stop off)
             "bid": bid, "bids": bids, "rungs": rungs, "vols": vols,
             "fstops": fstops, "prot": prot,            # per-fill stop / protection (W3/W4)
+            "ftp": ftp, "fsl": fsl, "frung": frung,    # FROZEN per-fill terms (R7)
             "fault": fault,
             # config.EXCLUDED_PAIRS takes NO new entries. Without this the row is
             # indistinguishable from a live scout — SHIB sat at status=WCH, which
@@ -502,7 +514,17 @@ def _assemble(conn):
             "ml_stack_floor": getattr(config, "MARGIN_LEVEL_STACK_FLOOR_PCT", None),
             "kill_switch_dd_pct": getattr(config, "KILL_SWITCH_DD_PCT", None),
             "size_mult": getattr(config, "SIZE_MULT", None),
+            # Audit R6: these three were invented client-side (the buffer bands
+            # as 30/12 and 25/10 literals, the near-stop band as a literal 3 in
+            # six places). Shipped so the page can stop keeping its own copies.
+            "near_stop_pct": getattr(config, "NEAR_STOP_PCT", None),
+            "buffer_nominal_pct": getattr(config, "DEFENSE_BUFFER_NOMINAL_PCT", None),
+            "buffer_critical_pct": getattr(config, "DEFENSE_BUFFER_CRITICAL_PCT", None),
         },
+        # Roster pairs that take NO new exposure — shipped once so page-wide
+        # aggregates (rungTargetRange) can exclude them instead of ranging over
+        # bands no reachable order can use. Per-row flags stay on the book rows.
+        "excluded_pairs": sorted(getattr(config, "EXCLUDED_PAIRS", ())),
         # Per-pair volatility distances, straight from the table the executor resolves
         # against (ruling §d: "persist the computed table ... so the TUI and web blob
         # can display current values"). Shipped whole so the deck never recomputes.

@@ -79,10 +79,23 @@ def test_thresholds_track_config_rather_than_a_snapshot(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "TP_PCT", 0.35)
     monkeypatch.setattr(config, "MARGIN_LEVEL_ALERT_PCT", 145)
     monkeypatch.setattr(config, "MARGIN_LEVEL_STACK_FLOOR_PCT", 260)
+    # The 2026-08-07 audit's named coverage gap: these two were pinned
+    # equal-at-import but omitted HERE, the only test that catches a
+    # snapshot/copy regression. Plus the three shipped for R6.
+    monkeypatch.setattr(config, "KILL_SWITCH_DD_PCT", 0.31)
+    monkeypatch.setattr(config, "SIZE_MULT", 7)
+    monkeypatch.setattr(config, "NEAR_STOP_PCT", 4.5)
+    monkeypatch.setattr(config, "DEFENSE_BUFFER_NOMINAL_PCT", 13.0)
+    monkeypatch.setattr(config, "DEFENSE_BUFFER_CRITICAL_PCT", 7.0)
     t = _health(tmp_path)["thresholds"]
     assert t["tp_pct"] == 0.35
     assert t["ml_alert"] == 145
     assert t["ml_stack_floor"] == 260
+    assert t["kill_switch_dd_pct"] == 0.31
+    assert t["size_mult"] == 7
+    assert t["near_stop_pct"] == 4.5
+    assert t["buffer_nominal_pct"] == 13.0
+    assert t["buffer_critical_pct"] == 7.0
 
 
 def test_deck_fallbacks_match_config(tmp_path):
@@ -109,6 +122,54 @@ def _decommented(src):
     src = re.sub(r"/\*.*?\*/", "", src, flags=re.S)          # block comments + CSS
     src = re.sub(r"^\s*//.*$", "", src, flags=re.M)          # whole-line JS comments
     return src
+
+
+def test_position_rows_ship_frozen_terms_not_todays_table(tmp_path, monkeypatch):
+    """The freeze-at-fill trap, display edition. A held lot's tp/sl/rung are the
+    FROZEN row values (orders.tp_pct/sl_pct/rung_pct, fixed at fill) — the terms
+    the executor will actually act on for it. Today's vol_table is what a NEW
+    entry would get. If the server ever ships table values on position rows, the
+    deck renders targets the bot will never honor for that lot — the exact
+    display lie the freeze rule exists to prevent. Seeded with a frozen value
+    deliberately absurd (9.99) so it cannot coincide with any real table."""
+    import time as _t
+    from .test_web_console import _mkdb, _blob
+    from deepfield.web import server
+    now = _t.time()
+    _mkdb(tmp_path, monkeypatch,
+          blob=_blob(now, prices={"ADA/USD": 0.30}),
+          candles=[("ADA/USD", 1440, int(now // 86400 * 86400) - 86400, 0.22)],
+          orders=[{"ts": "2026-08-08T00:00:00+00:00", "symbol": "ADA/USD",
+                   "side": "buy", "mode": "live", "entry": 0.28, "stop": 0.25,
+                   "volume": 20.0, "leverage": 10, "status": "open",
+                   "txid": "T1", "stop_txid": "S1",
+                   "tp_pct": 9.99, "sl_pct": 8.88, "rung_pct": 7.77}])
+    conn = server._ro_conn()
+    try:
+        st = server._assemble(conn)
+    finally:
+        conn.close()
+    row = next(p for p in st["pairs"] if p["sym"] == "ADA")
+    assert row["ftp"] == [9.99], f"frozen tp not shipped from the ROW: {row.get('ftp')}"
+    assert row["fsl"] == [8.88]
+    assert row["frung"] == [7.77]
+    assert "excluded_pairs" in st["health"], "page-wide excluded list missing"
+
+
+def test_deck_reads_shipped_bands_not_literals():
+    """Grep guards for the R6 client-side inventions, each proven present before
+    the fix: the near-stop band as a literal 3 in six places, the buffer bands as
+    30/12 and 25/10, and `lev_ceiling||4` turning an absent ceiling into a
+    comfortable number."""
+    src = _decommented(DECK.read_text())
+    assert "lev_ceiling||4" not in src.replace(" ", ""), \
+        "an absent leverage ceiling is being replaced with an invented 4"
+    for lit in ("d<3?", "dPct<3?", "o.d<3?", ".d<3?"):
+        assert lit not in src.replace(" ", ""), \
+            f"near-stop literal {lit!r} is back — it must read thr('near_stop_pct')"
+    assert "buffer_liq_pct>30" not in src.replace(" ", ""), \
+        "liq-buffer band literal is back — it must read thr('buffer_nominal_pct')"
+    assert 'thr("near_stop_pct"' in src and 'thr("buffer_nominal_pct"' in src
 
 
 def test_no_stray_hardcoded_harvest_percentages():

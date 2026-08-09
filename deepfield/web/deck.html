@@ -949,14 +949,46 @@ function carryRow(h,rh){
 }
 /* Per-pair harvest targets, summarised. The deck must not invent a distance: this
    reads deepfield/vol.py's persisted table verbatim and only chooses how to draw it. */
+function termsRow(p){
+  // The terms a lot ACTUALLY trades on. For held fills these are the FROZEN row
+  // values (orders.tp_pct/sl_pct, fixed at fill — ruling §c), shipped per fill as
+  // p.ftp/p.fsl; rendering today's vol_table beside a held lot would show targets
+  // the executor will never act on for it — the display lie the freeze rule
+  // exists to prevent. Only a pair with NO fills shows the current table, and
+  // says so ("today's table"), because for a prospective entry that IS the truth.
+  const band=a=>{ const v=(a||[]).filter(x=>typeof x==="number"&&isFinite(x));
+    if(!v.length) return null; const lo=Math.min(...v), hi=Math.max(...v);
+    return (hi-lo<0.05)?`${lo.toFixed(1)}%`:`${lo.toFixed(1)}–${hi.toFixed(1)}%`; };
+  if(p.fills){
+    const tp=band(p.ftp), sl=band(p.fsl);
+    if(!tp&&!sl) return "";
+    return `<tr><td class="l dim">terms · frozen at fill</td>
+      <td>tp +${tp||"—"} · stop −${sl||"—"}</td></tr>`;
+  }
+  const vt=S.health&&S.health.vol_table;
+  const pv=vt&&vt.pairs&&vt.pairs[`${detailSym}/USD`];
+  if(!pv||pv.tp_pct==null) return "";
+  return `<tr><td class="l dim">terms · today's table</td>
+    <td class="dim">tp +${pv.tp_pct.toFixed(1)}% · stop −${(pv.sl_pct??0).toFixed(1)}%</td></tr>`;
+}
+
 function rungTargetRange(){
   const vt=S.health&&S.health.vol_table;
   if(!vt||!vt.pairs) return "pending";
-  const v=Object.values(vt.pairs).map(p=>p.tp_pct).filter(x=>x!=null).sort((a,b)=>a-b);
+  // Excluded pairs take no NEW exposure, so their bands are unreachable by any
+  // placeable order — ranging over them stretched the printed band beyond
+  // anything the bot can actually do (audit R7). The list ships in health.
+  const ex=new Set((S.health&&S.health.excluded_pairs)||[]);
+  const v=Object.entries(vt.pairs).filter(([sym])=>!ex.has(sym))
+          .map(([,p])=>p.tp_pct).filter(x=>x!=null).sort((a,b)=>a-b);
   if(!v.length) return "pending";
+  // The refresher deliberately never recomputes server-side; if it stops, the
+  // range would render as current forever. age_secs ships with the table —
+  // mark it stale past 2x the daily cadence instead of trusting it blind.
+  const stale=(typeof vt.age_secs==="number"&&vt.age_secs>2*86400)?" · STALE TABLE":"";
   const lo=v[0], hi=v[v.length-1];
-  return (Math.abs(hi-lo)<0.05) ? `+${lo.toFixed(1)}%`
-                                : `+${lo.toFixed(1)}–${hi.toFixed(1)}% (ATR-scaled)`;
+  return ((Math.abs(hi-lo)<0.05) ? `+${lo.toFixed(1)}%`
+                                 : `+${lo.toFixed(1)}–${hi.toFixed(1)}% (ATR-scaled)`)+stale;
 }
 
 function renderHarvest(h){
@@ -1141,14 +1173,25 @@ function renderDefense(h){
     :`<text x="${W/2}" y="60" fill="var(--ink4)" font-size="9" text-anchor="middle">margin level populates on next bot cycle</text>`}
   </svg>`;
   const st=h.stress||{};
-  const lev=h.eff_leverage, levC=(st.lev_ceiling||4);
+  // levC: NO invented fallback. `|| 4` converted an absent (or legitimately 0)
+  // ceiling into a comfortable 4x while the L_eff gate paused growth against the
+  // real one — a missing measurement must never render as a number (audit R6).
+  const lev=h.eff_leverage, levC=(typeof st.lev_ceiling==="number"&&isFinite(st.lev_ceiling))?st.lev_ceiling:null;
+  // Buffer bands are CONFIG's, shipped via thresholds — the cell must agree with
+  // the defense_tier badge beside it, which reads the same two numbers. The old
+  // literals (30/12, 25/10) painted an 11% and a 3% buffer the same color while
+  // the badge distinguished CAUTION from CRITICAL.
+  const BN=thr("buffer_nominal_pct",12), BC=thr("buffer_critical_pct",6);
+  const tierCol=h.defense_tier==null?"":h.defense_tier==="NOMINAL"?"gain":h.defense_tier==="CAUTION"?"warn":"loss";
   const cells=[
     // fmtPct, not toFixed(1): a light book pushes these into four digits, where a
     // trailing decimal is noise ("2734.9%" reads worse than "2735%").
     ["liq buffer", fmtPct(h.buffer_liq_pct),
-      "price-space to forced liq", h.buffer_liq_pct==null?"":h.buffer_liq_pct>30?"gain":h.buffer_liq_pct>12?"warn":"loss"],
+      "price-space to forced liq", h.buffer_liq_pct==null?"":h.buffer_liq_pct>BN?"gain":h.buffer_liq_pct>BC?"warn":"loss"],
+    // The call buffer has no config bands of its own — color it by the shipped
+    // defense tier rather than inventing a second band set client-side.
     ["call buffer", fmtPct(h.buffer_call_pct),
-      "to margin call (ml 80)", h.buffer_call_pct==null?"":h.buffer_call_pct>25?"gain":h.buffer_call_pct>10?"warn":"loss"],
+      "to margin call (ml 80)", h.buffer_call_pct==null?"":tierCol],
     ["stops", `${h.stops_covered??"—"}${h.harvesting?`+${h.harvesting}◆`:""}/${h.stops_total??"—"}`,
       h.harvesting?`protected · ${h.harvesting} harvesting`:"open lots protected",
       ((h.stops_covered||0)+(h.harvesting||0)===h.stops_total)?"gain":"loss"],
@@ -1163,8 +1206,8 @@ function renderDefense(h){
     +`<div class="defcell" style="grid-column:1/-1"><div class="k">effective leverage</div>
       <div style="display:flex;align-items:baseline;gap:10px">
         <div class="v">${lev!=null?lev.toFixed(2)+"×":"—"}</div>
-        <div class="levbar" style="flex:1"><i style="width:${lev!=null?Math.min(100,lev/levC*100).toFixed(0):0}%;background:${lev!=null&&lev>levC*.85?"var(--loss)":lev>levC*.6?"var(--warn)":"var(--ice)"}"></i></div>
-        <div class="s">ceiling ${levC.toFixed(1)}×</div></div></div>`;
+        <div class="levbar" style="flex:1"><i style="width:${(lev!=null&&levC)?Math.min(100,lev/levC*100).toFixed(0):0}%;background:${(lev!=null&&levC&&lev>levC*.85)?"var(--loss)":(lev!=null&&levC&&lev>levC*.6)?"var(--warn)":"var(--ice)"}"></i></div>
+        <div class="s">ceiling ${levC!=null?levC.toFixed(1)+"×":"—"}</div></div></div>`;
 }
 
 /* ═══ STRESS — survivability against the moves that actually happened ═══
@@ -1404,7 +1447,7 @@ function renderField(){
   // every placed label — above, below, then farther out; give up to the tooltip
   objs.forEach(o=>{
     const fill=(o.p.pnl||0)>=0?"var(--gain)":"var(--loss)";
-    svg+=`<circle class="fdot ${o.d<3?"danger":""}" data-sym="${o.p.sym}" cx="${o.x.toFixed(1)}" cy="${o.y.toFixed(1)}" r="${o.r.toFixed(1)}"
+    svg+=`<circle class="fdot ${o.d<thr("near_stop_pct",3)?"danger":""}" data-sym="${o.p.sym}" cx="${o.x.toFixed(1)}" cy="${o.y.toFixed(1)}" r="${o.r.toFixed(1)}"
       fill="${fill}" fill-opacity=".85" stroke="var(--panel)" stroke-width="2" style="cursor:pointer"/>`;
   });
   naked.forEach((o,i)=>{
@@ -1422,8 +1465,8 @@ function renderField(){
       const nx=Math.max(x-w/2,Math.min(q.x,x+w/2)), ny=Math.max(y-h,Math.min(q.y,y));
       return (q.x-nx)**2+(q.y-ny)**2 < (q.r+1.5)**2; });
   };
-  [...objs].sort((a,b)=>(a.d<3?0:1)-(b.d<3?0:1) || b.r-a.r).forEach(o=>{   // danger, then biggest, label first
-    const w=o.p.sym.length*6.4+4, h=9, danger=o.d<3;
+  [...objs].sort((a,b)=>(a.d<thr("near_stop_pct",3)?0:1)-(b.d<thr("near_stop_pct",3)?0:1) || b.r-a.r).forEach(o=>{   // danger, then biggest, label first
+    const w=o.p.sym.length*6.4+4, h=9, danger=o.d<thr("near_stop_pct",3);
     const spots=[o.y-o.r-5, o.y+o.r+12, o.y-o.r-16, o.y+o.r+23];
     for(const ly of spots){
       if(clear(o.x,ly,w,h)){
@@ -1446,7 +1489,7 @@ function wireFieldDots(){
       showTip(`<b>${p.sym}</b> · ${p.fills} fill${p.fills>1?"s":""}
         <div class="row"><span>price</span><b>${fmtPx(p.price)}</b></div>
         <div class="row"><span>stop</span><b class="${has?"":"loss"}">${has?fmtPx(p.stop):"NONE RESTING"}</b></div>
-        ${d!=null?`<div class="row"><span>distance</span><b class="${d<3?"loss":"sec"}">${d.toFixed(1)}%</b></div>`:""}
+        ${d!=null?`<div class="row"><span>distance</span><b class="${d<thr("near_stop_pct",3)?"loss":"sec"}">${d.toFixed(1)}%</b></div>`:""}
         <div class="row"><span>p&l</span><b class="${cls(p.pnl||0)}">${fmtSigned(p.pnl)}</b></div>
         <div class="row"><span>notional</span><b>${fmt$(p.size*p.price)}</b></div>
         ${(p.stops+(p.harv||0))<p.fills?`<div class="row"><span class="loss">protection</span><b class="loss">${p.stops}/${p.fills} lots</b></div>`
@@ -1506,7 +1549,7 @@ function renderBook(){
     `<th class="${l||""} ${sortKey===k?"on":""}" data-k="${k}">${lab} ${sortKey===k?`<span class="dir">${sortDir>0?"▲":"▼"}</span>`:""}</th>`).join("")}</tr></thead>`;
   const rows=held.map(p=>{
     const d=(p.price&&p.stop)?((p.price-p.stop)/p.stop*100):null;
-    const dCol=d==null?"var(--ink4)":d<3?"var(--loss)":d<6?"var(--warn)":"var(--gain)";
+    const dCol=d==null?"var(--ink4)":d<thr("near_stop_pct",3)?"var(--loss)":d<thr("near_stop_pct",3)*2?"var(--warn)":"var(--gain)";
     const dW=d==null?0:Math.max(4,Math.min(100,(d-dLo)/(dHi-dLo)*100));
     // mid-harvest lots (stop off, sell resting) are ACCOUNTED FOR, not naked —
     // brass state, never the red that means genuinely unprotected
@@ -1738,7 +1781,8 @@ function renderDetail(){
         <tr><td class="l dim">notional</td><td>${fmt$((p.size||0)*(p.price||0))}</td></tr>
         <tr><td class="l dim">avg entry</td><td>${fmtPx(p.avg)}</td></tr>
         <tr><td class="l dim">unrealized</td><td class="${cls(p.pnl||0)}">${fmtSigned(p.pnl)}</td></tr>
-        <tr><td class="l dim">stop distance</td><td class="${dPct!=null&&dPct<3?"loss":""}">${dPct==null?"—":dPct.toFixed(1)+"%"}</td></tr>
+        <tr><td class="l dim">stop distance</td><td class="${dPct!=null&&dPct<thr("near_stop_pct",3)?"loss":""}">${dPct==null?"—":dPct.toFixed(1)+"%"}</td></tr>
+        ${termsRow(p)}
         <tr><td class="l dim">leverage</td><td>${p.lev}×</td></tr>
         <tr><td class="l dim">protection</td><td>${p.stops}/${p.fills} lots stopped</td></tr>
         <tr><td class="l dim">signal</td><td>${p.denom?`${p.score}/${p.denom} <span class="dim">need ${p.req}</span>`

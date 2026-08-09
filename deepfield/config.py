@@ -506,6 +506,14 @@ RESPEND_BURST_USD         = 40.0
 DEFENSE_BUFFER_NOMINAL_PCT = 12.0   # price-space twin of ml-160 (see NOTE above)
 DEFENSE_BUFFER_CRITICAL_PCT = 6.0   # < this liq buffer pages an escalated 'liq-risk' alert
 
+# A position whose price sits within this % of its stop is NEAR-STOP: the display
+# state that outranks everything except BELOW-STOP. Display-only — never gates an
+# order. Until 2026-08-08 this band was the literal 0.03 in server.py and the
+# literal 3 in six places across deck.html — one rule, seven spellings, shipped
+# from nowhere (audit R6). It now lives here, ships via health.thresholds, and
+# both renderers read the shipped value.
+NEAR_STOP_PCT = 3.0
+
 # --- Intraday stress telemetry (2026-07-19) -------------------------------------
 # buffer_liq_pct is denominated in ADVERSE BASKET MOVE, so the honest question is
 # "how big a basket move actually happens?" Measured over 2y of daily bars on 20
