@@ -597,17 +597,7 @@ def test_lifecycle_book_flatten_at_tp_target(sim, monkeypatch):
     to reach this naturally, so it had never run against the simulator: the flatten
     cancels resting orders, rests limit closes sized to LIVE exchange volume, and
     books a cycle once the book is confirmed flat."""
-    monkeypatch.setattr(config, "TP_ENABLED", True)
-    monkeypatch.setattr(config, "TP_PCT", 0.20)
-    monkeypatch.setattr(config, "TP_RUNG_ENABLED", False)
-    monkeypatch.setattr(config, "LADDER_CONTINUOUS", False)
-    e = _armed_exec(sim, monkeypatch)
-    oid, entry = _fill_one(sim, e)
-
-    # arm the baseline low enough that current equity already clears the target
-    store.meta_set(sim, "tp_baseline", 800.0)
-    store.meta_set(sim, "tp_trough", 800.0)
-    store.meta_set(sim, "tp_cycle_flows", 0.0)
+    e, oid, entry = _arm_flatten(sim, monkeypatch)
 
     _now_bar(sim, entry)
     e.poll_fills()                                   # should START the flatten
