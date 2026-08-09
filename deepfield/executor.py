@@ -533,6 +533,29 @@ class Executor:
             pass
         return float(self._distances(symbol).get("tp_pct"))
 
+    def _notional_ceiling_ok(self, tag, symbol, sizing):
+        """The order-size sanity guard, in ONE place. Ceiling = base x conviction x
+        SIZE_MULT (audit 2026-07-13 M5: the operator's multiplier is a legitimate
+        part of every order's size, so the guard must budget for it — otherwise a
+        rally silently trips the refuse path on high-ordermin pairs). This was
+        written out twice, in _place_entry and _place_ladder_rung, with identical
+        arithmetic — a future ceiling change had to land in both or diverge them
+        (2026-08-07 audit, money-path finding 5). Returns True when the order may
+        proceed; logs the refusal itself so the callers cannot word it apart."""
+        base = config.EXEC_MAX_ORDER_NOTIONAL_USD
+        if base <= 0:
+            return True
+        cmult = sizing.get("conviction_mult", 1.0)
+        smult = max(1.0, float(sizing.get("size_mult", 1.0) or 1.0))
+        ceiling = base * cmult * smult
+        if sizing["notional"] > ceiling:
+            log.error("%s %s REFUSED: order notional $%.2f exceeds %gx-conviction x "
+                      "%gx-size ceiling $%.2f — not sending (sanity guard, not a rail; "
+                      "check the pairs row / EXEC_SIZE_MODE)",
+                      tag, symbol, sizing["notional"], cmult, smult, ceiling)
+            return False
+        return True
+
     def _min_volume(self, ordermin, costmin, entry, lot_dec):
         """Smallest placeable order: >= ordermin AND cost >= costmin, on the lot
         grid (rounded UP so it never lands under either floor)."""
@@ -616,7 +639,13 @@ class Executor:
         volume = min(volume, max_vol_by_margin)
         # Kraken floors
         floored_to_min = False
-        min_vol = max(ordermin, (costmin / entry) if entry > 0 else 0.0)
+        # THROUGH _min_volume — the canonical smallest-placeable-order floor. This
+        # dormant branch (EXEC_SIZE_MODE="risk") kept a third spelling without the
+        # grid-ceil, so one env flip would have put a THIRD variant of the floor on
+        # the money path (2026-08-07 audit, money-path finding 4). engine.tranche's
+        # copy stays: it is provably equivalent while every ordermin is on-grid,
+        # and engine cannot import executor without a cycle.
+        min_vol = self._min_volume(ordermin, costmin, entry, lot_dec)
         if volume < min_vol:
             volume = min_vol
             floored_to_min = True
@@ -947,19 +976,9 @@ class Executor:
         # gets an Nx budget, so the steepened 2x/3x curve's strongest signals aren't
         # refused, while a corrupt row (orders of magnitude larger) still trips at every
         # tier. Guard on the BASE ceiling>0 so 0 still fully disables.
-        cmult = sizing.get("conviction_mult", 1.0)
-        # SIZE_MULT scales the notional too (audit 2026-07-13 M5): the operator's 3x
-        # multiplier is a LEGITIMATE part of every order's size, so the sanity ceiling
-        # must budget for it — otherwise a price rally silently trips the refuse path
-        # on high-ordermin pairs (an unintended blocker). Corrupt-row protection is
-        # preserved: the ceiling still catches orders orders-of-magnitude oversized.
-        smult = max(1.0, float(sizing.get("size_mult", 1.0) or 1.0))
-        ceiling = config.EXEC_MAX_ORDER_NOTIONAL_USD * cmult * smult
-        if config.EXEC_MAX_ORDER_NOTIONAL_USD > 0 and sizing["notional"] > ceiling:
-            log.error("EXEC %s REFUSED: order notional $%.2f exceeds %gx-conviction x %gx-size "
-                      "ceiling $%.2f — not sending (sanity guard, not a rail; check the pairs "
-                      "row / EXEC_SIZE_MODE)", symbol, sizing["notional"], cmult, smult, ceiling)
+        if not self._notional_ceiling_ok("EXEC", symbol, sizing):
             return None
+        cmult = sizing.get("conviction_mult", 1.0)
 
         # Respend-rate throttle (seeds/rungs only; signals pass respend=False and
         # bypass). Meters new book-growth notional so a T/P cushion re-levers over
@@ -2764,12 +2783,7 @@ class Executor:
             if sizing is None:
                 log.warning("LADDER %s: sizing produced nothing — no rung", symbol)
                 return
-            cmult = sizing.get("conviction_mult", 1.0)
-            smult = max(1.0, float(sizing.get("size_mult", 1.0) or 1.0))
-            ceiling = config.EXEC_MAX_ORDER_NOTIONAL_USD * cmult * smult   # conviction+size scaled (see _place_entry)
-            if config.EXEC_MAX_ORDER_NOTIONAL_USD > 0 and sizing["notional"] > ceiling:
-                log.error("LADDER %s REFUSED: rung notional $%.2f exceeds %gx-conviction x %gx-size "
-                          "ceiling $%.2f", symbol, sizing["notional"], cmult, smult, ceiling)
+            if not self._notional_ceiling_ok("LADDER", symbol, sizing):
                 return
             # Respend-rate throttle: rungs grow the book, so they meter the same as
             # seeds (debit only once the rung definitely rests). Signals never ladder.
