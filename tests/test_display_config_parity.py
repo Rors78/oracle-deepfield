@@ -258,12 +258,12 @@ def test_off_collateral_is_not_unrealized_pnl():
 
     Both eb and tb are pre-unrealized, so their difference is exactly the money
     Kraken will not accept as collateral, whatever the book is doing."""
-    eb, tb = 225.2995, 173.8278
-    gap = round(eb - tb, 2)
-    assert gap == 51.47
-    for equity in (tb - 40.0, tb + 40.0):            # open loss, open gain
-        assert round(eb - equity, 2) != gap, \
-            "eb - equity drifts with open P/L; eb - tb does not"
+    # (The incident numbers — eb 225.2995, tb 173.8278, gap $51.47 — and the
+    # property that eb−equity drifts with open P/L while eb−tb does not, are
+    # recorded here as prose. The asserts that computed them from literals were
+    # deleted 2026-08-09, same shape as the four removed the day before: both
+    # sides test-computed, pinning nothing. The _assemble test below and the
+    # grep sibling are the real guards.)
 
     # (The paper case that exposed it — $199.97 fully collateralised, and the old
     # `eb - equity` form manufacturing a phantom $0.30 line from an unrealized
