@@ -108,6 +108,13 @@ def test_deck_fallbacks_match_config(tmp_path):
         "tp_pct": config.TP_PCT,
         "ml_alert": float(config.MARGIN_LEVEL_ALERT_PCT),
         "ml_stack_floor": float(config.MARGIN_LEVEL_STACK_FLOOR_PCT),
+        # The three R6 keys created 2026-08-08 — new fallback literals enter this
+        # dict the same commit they enter the page, or the test's contract
+        # ("fallbacks are the last hardcoded copies and must track config") is a
+        # claim of coverage it doesn't have.
+        "near_stop_pct": float(config.NEAR_STOP_PCT),
+        "buffer_nominal_pct": float(config.DEFENSE_BUFFER_NOMINAL_PCT),
+        "buffer_critical_pct": float(config.DEFENSE_BUFFER_CRITICAL_PCT),
     }
     found = dict(re.findall(r'thr\(\s*"([a-z0-9_]+)"\s*,\s*([0-9.]+)\s*\)', src))
     for key, want in expect.items():
