@@ -1279,9 +1279,26 @@ function renderStress(h){
   // Uniform-move approximation: every pair falls together. Basket correlation is
   // ~0.60, so this is a reasonable first cut and errs toward showing the cascade
   // as tighter than reality, which is the safe direction for a risk read.
-  const lots=PAIRS.filter(p=>(p.fills||0)>0&&p.price&&p.stop)
-    .map(p=>({d:(p.price-p.stop)/p.stop*100, n:(p.size||0)*p.price}))
-    .filter(o=>o.d>0).sort((a,b)=>a.d-b.d);
+  // PER FILL, not per pair (audit R8, closed 2026-08-08): p.stop is the pair's
+  // NEAREST stop (max of the chain), so attributing the whole notional to it
+  // swept a pair's entire position at its tightest level — a ratcheted rung's
+  // breakeven would drag its siblings' notional 4% closer than their real stops.
+  // The per-fill arrays (fstops/vols, W4) carry each lot's own level; a chain
+  // now cascades fill by fill. Old blobs without the arrays fall back to the
+  // pair-level read, which errs tighter — the safe direction.
+  const lots=[];
+  PAIRS.filter(p=>(p.fills||0)>0&&p.price).forEach(p=>{
+    if(Array.isArray(p.fstops)&&Array.isArray(p.vols)
+       &&p.fstops.length===p.vols.length&&p.fstops.length){
+      p.fstops.forEach((st,i)=>{ if(st&&p.vols[i])
+        lots.push({d:(p.price-st)/st*100, n:p.vols[i]*p.price}); });
+    } else if(p.stop){
+      lots.push({d:(p.price-p.stop)/p.stop*100, n:(p.size||0)*p.price});
+    }
+  });
+  lots.sort((a,b)=>a.d-b.d);
+  const swept=lots.filter(o=>o.d>0);
+  lots.length=0; lots.push(...swept);
   const totN=lots.reduce((s,o)=>s+o.n,0);
   let halfAt=null, allAt=null, run=0;
   for(const o of lots){ run+=o.n;

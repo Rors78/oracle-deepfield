@@ -179,6 +179,18 @@ def test_deck_reads_shipped_bands_not_literals():
     assert 'thr("near_stop_pct"' in src and 'thr("buffer_nominal_pct"' in src
 
 
+def test_cascade_sweeps_per_fill_stops_not_the_pair_nearest():
+    """Audit R8: the stress cascade used p.stop — the pair's NEAREST stop — for
+    the pair's whole notional, so a ratcheted rung's breakeven dragged its
+    siblings 4% closer than their real stops. The per-fill arrays (fstops/vols)
+    are shipped for exactly this; the cascade builder must read them."""
+    src = _decommented(DECK.read_text())
+    i = src.index("HALF STOPPED")
+    seg = src[max(0, i - 2500):i]
+    assert "p.fstops" in seg and "p.vols" in seg, \
+        "the cascade builder no longer sweeps per-fill stops"
+
+
 def test_no_stray_hardcoded_harvest_percentages():
     """The specific label that was wrong: "rung +4% · book +20% backstop", baked
     into the markup where TP_RUNG_PCT and TP_PCT belong.
