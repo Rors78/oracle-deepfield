@@ -534,6 +534,64 @@ def test_partial_close_splits_one_lot(sim, monkeypatch):
     assert paper_broker._long_open_vol(MPAIR) == pytest.approx(0.003)
 
 
+def _arm_flatten(sim, monkeypatch):
+    """Shared setup: one filled lot, baseline armed so equity already clears the
+    +20% target — the next poll starts the flatten."""
+    monkeypatch.setattr(config, "TP_ENABLED", True)
+    monkeypatch.setattr(config, "TP_PCT", 0.20)
+    monkeypatch.setattr(config, "TP_RUNG_ENABLED", False)
+    monkeypatch.setattr(config, "LADDER_CONTINUOUS", False)
+    e = _armed_exec(sim, monkeypatch)
+    oid, entry = _fill_one(sim, e)
+    store.meta_set(sim, "tp_baseline", 800.0)
+    store.meta_set(sim, "tp_trough", 800.0)
+    store.meta_set(sim, "tp_cycle_flows", 0.0)
+    return e, oid, entry
+
+
+def test_flatten_backstop_cancels_a_stop_the_sweep_missed(sim, monkeypatch):
+    """Stage 1b — the per-stop backstop behind the CancelOrderBatch sweep. Until
+    2026-08-08 this branch was UNREACHABLE in tests: the simulator's batch cancel
+    always succeeds, so clearing stop_txid WITHOUT cancelling (the naked-short
+    landmine) passed every flatten test — a mutation the suite provably could not
+    catch. Fault injection at the broker boundary: the batch 'loses' the stop
+    txid, the backstop must cancel it individually, and the exchange book must
+    end with the close resting and NO stop beside it."""
+    e, oid, entry = _arm_flatten(sim, monkeypatch)
+    stx = sim.execute("SELECT stop_txid FROM orders WHERE id=?", (oid,)).fetchone()[0]
+    real_batch = broker.cancel_order_batch
+    monkeypatch.setattr(broker, "cancel_order_batch",
+                        lambda txids: real_batch([t for t in txids if t != stx]))
+    _now_bar(sim, entry)
+    e.poll_fills()                                   # flatten starts, sweep "misses" stx
+    assert str(store.meta_get(sim, "tp_flatten_active", "") or "") == "1"
+    assert sim.execute("SELECT close_txid FROM orders WHERE id=?", (oid,)).fetchone()[0], \
+        "backstop cancel succeeded — the close must still rest"
+    assert _exchange_stops() == [], \
+        "the sweep-missed stop is STILL on the exchange beside the close (double-sell)"
+
+
+def test_flatten_backstop_failure_keeps_the_pair_protected(sim, monkeypatch):
+    """The other branch: sweep misses the stop AND the individual cancel fails.
+    The pair must be BLOCKED — no close rested (a close beside a live stop is the
+    double-sell), the stop still resting, the row still referencing it."""
+    e, oid, entry = _arm_flatten(sim, monkeypatch)
+    stx = sim.execute("SELECT stop_txid FROM orders WHERE id=?", (oid,)).fetchone()[0]
+    real_batch = broker.cancel_order_batch
+    real_cancel = broker.cancel_order
+    monkeypatch.setattr(broker, "cancel_order_batch",
+                        lambda txids: real_batch([t for t in txids if t != stx]))
+    monkeypatch.setattr(broker, "cancel_order",
+                        lambda t: None if t == stx else real_cancel(t))
+    _now_bar(sim, entry)
+    e.poll_fills()
+    assert sim.execute("SELECT close_txid FROM orders WHERE id=?", (oid,)).fetchone()[0] is None, \
+        "a close was rested beside a stop that could not be cancelled"
+    assert len(_exchange_stops()) == 1, "the uncancellable stop must stay resting — protected"
+    assert sim.execute("SELECT stop_txid FROM orders WHERE id=?", (oid,)).fetchone()[0] == stx, \
+        "the ledger dropped its reference to a stop that is still live"
+
+
 def test_lifecycle_book_flatten_at_tp_target(sim, monkeypatch):
     """The book-level +20% T/P backstop, end to end. Paper would need days of gains
     to reach this naturally, so it had never run against the simulator: the flatten

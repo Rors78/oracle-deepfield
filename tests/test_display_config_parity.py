@@ -246,9 +246,12 @@ def test_off_collateral_is_not_unrealized_pnl():
         assert round(eb - equity, 2) != gap, \
             "eb - equity drifts with open P/L; eb - tb does not"
 
-    # The paper case that exposed it: no gap at all, only an unrealized loss.
-    assert 199.97 - 199.97 < 0.01, "fully collateralised -> no line"
-    assert round(199.97 - 199.67, 2) == 0.30, "the old formula's phantom 30 cents"
+    # (The paper case that exposed it — $199.97 fully collateralised, and the old
+    # `eb - equity` form manufacturing a phantom $0.30 line from an unrealized
+    # loss — is history recorded here in prose. Two asserts that recomputed those
+    # literals against themselves were deleted 2026-08-08: an assertion whose
+    # both sides the test computes pins nothing. The grep sibling below is the
+    # load-bearing guard.)
 
 
 def test_deck_reads_the_two_balances_not_equity():

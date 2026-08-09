@@ -168,9 +168,8 @@ def test_state_ships_divergent_per_fill_stops_and_protection(tmp_path, monkeypat
     assert ada["fstops"] == [0.14821, 0.1475]        # per-chain stops DIVERGE
     assert ada["prot"] == [True, False]              # per-fill protection truth
     assert ada["stops"] == 1 and ada["fills"] == 2   # count feeds the coherence badge
-    # the correct swept figure derivable from the payload (client mirrors this):
-    swept = sum((s - e) * 20.0 for s, e in ((0.14821, 0.174), (0.1475, 0.166)))
-    assert swept == pytest.approx((0.14821 - 0.174) * 20 + (0.1475 - 0.166) * 20)
+    # (A swept-figure assert that compared a sum to itself re-spelled was deleted
+    # 2026-08-08 — the payload assertions above are the real pins.)
 
 
 # ── W6: HOLD vs BUY ───────────────────────────────────────────────────────────

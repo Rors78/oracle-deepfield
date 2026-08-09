@@ -75,7 +75,9 @@ def test_the_target_rule_is_spelled_exactly_once():
                 code = line.split("#", 1)[0]
                 if re.search(r"\(\s*1\s*\+\s*(config\.)?TP_PCT\s*\)", code):
                     hits.append(f"{fn}:{i}")
-    assert hits == ["executor.py:62"], \
+    # Filename only, ONE occurrence — pinning the exact line number made every
+    # unrelated edit above tp_target a spurious failure (advisor nit, 2026-08-08).
+    assert [h.split(":")[0] for h in hits] == ["executor.py"], \
         f"the T/P target rule is spelled outside tp_target: {hits}"
 
 
@@ -87,8 +89,10 @@ def test_the_incident_deck_said_208_executor_said_289(conn, monkeypatch):
     store.meta_set(conn, "tp_trough", 173.7825)
 
     assert ex_mod.tp_target(289.8299, 173.7825) == pytest.approx(289.83, abs=0.01)
-    # The old deck formula, kept here as the thing that must NEVER come back.
-    assert min(289.8299, 173.7825) * 1.20 == pytest.approx(208.54, abs=0.01)
+    # (The old deck formula min(baseline, trough) x 1.2 evaluates to the incident's
+    # $208.54 — stated as prose, not an assert: a self-computed arithmetic check
+    # pins nothing. tp_target's floor-off branch below pins the same fact against
+    # PRODUCTION code.)
     assert _blob_target(conn) == pytest.approx(289.83, abs=0.01)
 
     # And the meaning that was inverted: equity 223.30 is BELOW target, holding.
