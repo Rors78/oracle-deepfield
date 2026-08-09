@@ -2840,6 +2840,14 @@ class Executor:
             row["txid"] = res["txid"][0]
             store.insert_order(self.conn, row)
             debit()                                  # respend budget: the rung rests
+            # cmult is re-read here because bfee1fc moved the original assignment
+            # into _notional_ceiling_ok and left this consumer behind — every
+            # successful rung then raised NameError into the catch-all, replacing
+            # its "next rung resting" INFO + journal entry with a false ERROR
+            # traceback (20 of them in the first live boot; order placement,
+            # persistence and the respend debit were all already done, so money
+            # was never affected). Found by log-forensics on 2026-08-09.
+            cmult = sizing.get("conviction_mult", 1.0)
             conv_tag = f", {cmult:g}x conviction" if cmult > 1.0 else ""
             log.info("LADDER %s: next rung resting @ %s (%.6g%s) — one step below fill %s",
                      symbol, target, vol, conv_tag, filled_price)

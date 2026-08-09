@@ -137,6 +137,32 @@ def test_a_moved_floor_narrates_again(ex, monkeypatch, caplog):
     assert len(floor) == 2, f"expected two INFO lines, got {len(floor)}"
 
 
+def test_successful_rung_narrates_at_info_not_error(ex, monkeypatch, caplog):
+    """A successful placement must produce its 'next rung resting' INFO line and
+    NO error — pinning the narration tail explicitly, because it sits inside the
+    catch-all: bfee1fc (2026-08-08) deleted the ladder's cmult assignment while
+    extracting the ceiling helper, and every successful rung then raised
+    NameError AFTER insert_order+debit — order fine, money fine, but the INFO
+    and journal entry were replaced by a false ERROR traceback, one per rung,
+    for a full live boot before log-forensics caught it. No test asserted the
+    happy path's own narration; now one does. The conviction variant runs too:
+    the lost variable only mattered when a score rode the chain."""
+    import logging
+    _counting_live_last(ex, monkeypatch, 1.00)
+    _let_it_place(monkeypatch)
+    with caplog.at_level(logging.DEBUG, logger="deepfield.exec"):
+        ex._place_ladder_rung(SYM, MPAIR, 10, 0.50, 1.00)
+        # clear the resting bid — one pending per symbol, and the second call must
+        # actually PLACE for the conviction narration branch to run
+        ex.conn.execute("DELETE FROM orders WHERE status='pending'")
+        ex.conn.commit()
+        ex._place_ladder_rung(SYM, MPAIR, 10, 0.50, 0.90, score=7, required=5)
+    msgs = [r for r in caplog.records if "next rung resting" in r.getMessage()]
+    errs = [r for r in caplog.records if r.levelno >= logging.ERROR]
+    assert len(msgs) == 2, f"successful rungs did not narrate: {[r.getMessage() for r in caplog.records]}"
+    assert not errs, f"a successful placement logged an error: {[r.getMessage() for r in errs]}"
+
+
 def test_refusal_is_re_evaluated_every_call_not_cached(ex, monkeypatch):
     """Only the NARRATION is deduplicated. A chain that refused once must still be
     able to place a rung the moment its floor allows one — caching the refusal itself
