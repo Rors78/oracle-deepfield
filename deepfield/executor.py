@@ -213,6 +213,13 @@ class Executor:
         # refusal narrates once instead of every cycle. Module state, same reason.
         self._floor_seen = _FLOOR_SEEN
 
+    def _at_ladder_floor(self, target, stop):
+        """THE floor rule, one home: a rung at/under the chain stop (plus buffer)
+        is not placed. Three callers — _reladder's pre-announce screen, and
+        _place_ladder_rung's pre-gate and post-clamp check — so the rule cannot
+        drift between the announcer and the decider."""
+        return bool(stop) and target <= stop * (1 + config.LADDER_STOP_BUFFER)
+
     def _ladder_floor_reached(self, symbol, target, stop):
         """The chain has descended as far as its invalidation level allows.
 
@@ -224,7 +231,13 @@ class Executor:
         hours on 2026-08-07, which buried every genuine reladder event on the deck.
         The condition is still re-checked every cycle; only the narration is
         deduplicated."""
-        key = (target, stop)
+        # Key on the STOP alone — the floor is the news. The target is clamped to
+        # the LIVE price, so it wobbles a tick between 600s retries and a
+        # (target, stop) key re-narrated on every wobble: observed live 11 minutes
+        # after the module-state fix deployed (0.188559 -> 0.18857, same stop,
+        # both at INFO). A chain leaves its floor by the STOP moving (ratchet, new
+        # chain) or by placing a rung — never by target jitter under it.
+        key = stop
         first = self._floor_seen.get(symbol) != key
         self._floor_seen[symbol] = key
         log.log(logging.INFO if first else logging.DEBUG,
@@ -1609,8 +1622,19 @@ class Executor:
                               "— skipping before the ticker fetch", sym)
                     continue
                 _reladder_next[sym] = now + _RELADDER_RETRY_SECS
-                # Stays INFO: past the pre-gate this fires only when a rung will really be
-                # attempted, which is the self-heal this safety net exists to surface.
+                # Floor screen BEFORE the announce and the journal entry. A chain
+                # holding at its floor retried here every 600s, and each retry
+                # wrote a "reladder: chain had no resting bid" JOURNAL line onto
+                # the deck plus an INFO announce — one noise pair per cycle,
+                # forever, for a refusal whose outcome was already known (the ADA
+                # chain, observed 2026-08-10). The deduped floor narration is the
+                # whole record such a cycle deserves.
+                target = _tick_round(sym, entry * (1 - self._distances(sym)["rung_pct"] / 100.0))
+                if self._at_ladder_floor(target, stop):
+                    self._ladder_floor_reached(sym, target, stop)
+                    continue
+                # Stays INFO: past the pre-gates this fires only when a rung will really
+                # be attempted, which is the self-heal this safety net exists to surface.
                 log.info("RELADDER %s: open chain with no resting bid — re-placing "
                          "next rung below lowest open fill %s", sym, entry)
                 self._journal("order", sym, f"reladder: chain had no resting bid — "
@@ -2752,7 +2776,7 @@ class Executor:
             # transient — XRP re-derived the identical refusal every 607s for 15.5h on
             # 2026-08-07, fetching a ticker each time to reach a foregone conclusion.
             # Same idiom the respend pre-gate already uses.
-            if stop and target <= stop * (1 + config.LADDER_STOP_BUFFER):
+            if self._at_ladder_floor(target, stop):
                 self._ladder_floor_reached(symbol, target, stop)
                 return
             # Post-only survivability (2026-07-12 offline-gap incident): target is
@@ -2773,7 +2797,7 @@ class Executor:
             # Re-check AFTER the clamp: the clamp lowers the target, so a rung that
             # cleared the pre-gate can still land on the floor once it is pulled below
             # a fallen live price. The pre-gate is an early-out, not a replacement.
-            if stop and target <= stop * (1 + config.LADDER_STOP_BUFFER):
+            if self._at_ladder_floor(target, stop):
                 self._ladder_floor_reached(symbol, target, stop)
                 return
             # Level dedupe: own each price level ONCE. In a choppy range the daily

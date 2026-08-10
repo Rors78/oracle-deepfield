@@ -35,6 +35,10 @@ from deepfield import config, executor as ex_mod, store
 SYM = "ADA/USD"
 MPAIR = "ADAUSD:BTNL"
 
+# Captured at import, BEFORE conftest's autouse fixture inerts it (same idiom as
+# test_paper_broker's _REAL_QUERY_ORDERS capture).
+_REAL_ENSURE = ex_mod.Executor._ensure_ladder_rungs
+
 
 @pytest.fixture
 def ex(tmp_path, monkeypatch):
@@ -192,6 +196,64 @@ def test_dedup_survives_the_per_cycle_executor_rebuild(tmp_path, monkeypatch, ca
     floor = [r for r in caplog.records if "ladder floor reached" in r.getMessage()]
     assert len(floor) == 1, \
         f"the rebuild reset the dedup again — {len(floor)} INFO lines from 2 cycles"
+
+
+def test_target_jitter_at_the_same_floor_stays_quiet(ex, monkeypatch, caplog):
+    """The gap the first live cycle exposed (2026-08-10 11:30): the target is
+    clamped to the LIVE price, so it wobbles a tick between retries — and a
+    (target, stop) dedup key re-narrated on every wobble. Same stop = same news:
+    a moved target under an unmoved floor must stay at DEBUG."""
+    import logging
+    calls = _counting_live_last(ex, monkeypatch, 1.00)
+    with caplog.at_level(logging.INFO, logger="deepfield.exec"):
+        ex._place_ladder_rung(SYM, MPAIR, 10, 0.995, 1.00)     # target 0.99
+        ex._place_ladder_rung(SYM, MPAIR, 10, 0.995, 1.003)    # target 0.9929 — jitter
+    floor = [r for r in caplog.records if "ladder floor reached" in r.getMessage()]
+    assert len(floor) == 1, \
+        f"target jitter under the same floor re-narrated: {[r.getMessage() for r in floor]}"
+
+
+def test_floored_chain_reladders_without_announce_or_journal(tmp_path, monkeypatch, caplog):
+    """The other half of the ADA noise (2026-08-10): even with the floor line
+    deduped, every 600s retry logged 'RELADDER ... re-placing next rung' at INFO
+    AND wrote a journal entry onto the deck — an announce for an attempt whose
+    refusal was already knowable. _reladder now screens the floor BEFORE the
+    announce, through the same _at_ladder_floor predicate the placer uses. A
+    floored chain's whole record per cycle is the deduped floor narration:
+    first cycle one INFO line, second cycle (fresh Executor, cleared backoff —
+    production 600s later) nothing at INFO, zero journal rows, ever."""
+    import logging
+    monkeypatch.setattr(config, "LADDER_CONTINUOUS", True)
+    monkeypatch.setattr(config, "EXCLUDED_PAIRS", frozenset())
+    monkeypatch.setattr(ex_mod.Executor, "_ensure_ladder_rungs", _REAL_ENSURE)
+    monkeypatch.setattr(ex_mod.Executor, "_live_last", lambda self, s: 1.00)
+    conn = store.connect(str(tmp_path / "silent.db"))
+    store.upsert_pair(conn, "ADAUSD", SYM, "ADA", 1.0, 0.5, 8)
+    pin_vol(conn, tp=4.0, sl=10.0, rung=1.0, symbols=[SYM])
+    # an open lot whose next rung (1.00 x 0.99 = 0.99) sits under its stop 0.995
+    conn.execute("INSERT INTO orders(ts,symbol,margin_pair,side,ordertype,mode,entry,"
+                 "stop,volume,leverage,status,txid,stop_txid) VALUES"
+                 "('2026-08-10T00:00:00+00:00',?,?,'buy','limit','live',1.00,0.995,"
+                 "100,10,'open','T1','S1')", (SYM, MPAIR))
+    conn.commit()
+
+    def _cycle():
+        e = ex_mod.Executor(conn)
+        e.mode = "live"
+        e._ensure_ladder_rungs()
+
+    with caplog.at_level(logging.INFO, logger="deepfield.exec"):
+        _cycle()
+        ex_mod._reladder_next.clear()          # production: 600s later, fresh instance
+        _cycle()
+    announce = [r for r in caplog.records if "RELADDER" in r.getMessage()]
+    floor = [r for r in caplog.records if "ladder floor reached" in r.getMessage()]
+    journal = conn.execute("SELECT COUNT(*) FROM journal").fetchone()[0]
+    assert announce == [], \
+        f"floored chain still announces: {[r.getMessage() for r in announce]}"
+    assert len(floor) == 1, f"floor narration not deduped across cycles: {len(floor)}"
+    assert journal == 0, f"floored chain wrote {journal} journal rows onto the deck"
+    conn.close()
 
 
 def test_refusal_is_re_evaluated_every_call_not_cached(ex, monkeypatch):
