@@ -186,6 +186,38 @@ def test_kill_switch_disables_adoption(ex, monkeypatch):
     assert adopted(ex) == []
 
 
+def test_adoption_clock_survives_the_per_cycle_executor_rebuild(tmp_path):
+    """Production builds a FRESH Executor every poll cycle. With the grace clock
+    on the instance, first_seen could never survive to the next sighting — age
+    stayed ~0 forever and NO untracked position could ever reach ADOPTED from
+    the runtime path (zero ADOPTED lines in the entire live log; every one of
+    the 12 historical surplus sightings was rescued by the pending-row path
+    first). The clock is module state now; three sightings by three separate
+    instances — sight, age, adopt — must produce exactly one adopted row. Found
+    by log-forensics 2026-08-10 as the latent sibling of the floor-dedup reset."""
+    import time as _t
+    from deepfield import executor as ex_mod2
+    conn = sqlite3.connect(":memory:")
+    conn.executescript(SCHEMA)
+
+    def _fresh():
+        e = ex_mod2.Executor(conn)
+        e._live_last = lambda s: MARK
+        e._safety = lambda *a, **k: None
+        e._journal = lambda *a, **k: None
+        return e
+
+    _fresh()._adopt_surplus("t", SYM, MP, SURPLUS)      # cycle 1: clock starts
+    # age the SHARED clock past the grace window (the helper writes through the
+    # module dict via the instance alias)
+    ex_mod2._SURPLUS_SEEN[SYM] = (SURPLUS, _t.time() - config.ADOPT_GRACE_SECS - 1)
+    _fresh()._adopt_surplus("t", SYM, MP, SURPLUS)      # cycle 2: NEW instance adopts
+    rows = conn.execute(
+        "SELECT COUNT(*) FROM orders WHERE ordertype='adopted'").fetchone()[0]
+    assert rows == 1, \
+        "a fresh executor lost the adoption clock — untracked volume can never adopt"
+
+
 # ── tick precision (2026-08-06) ────────────────────────────────────────────
 #
 # This row is PERSISTED and read back by reprotect and reconcile for the rest of its

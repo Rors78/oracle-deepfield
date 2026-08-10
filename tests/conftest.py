@@ -144,6 +144,13 @@ def _isolate_executor_module_state(monkeypatch):
     monkeypatch.setattr(ex_mod, "_seed_next", {})
     monkeypatch.setattr(ex_mod, "_stack_pause_since", None)
     monkeypatch.setattr(ex_mod, "_tp_trough_noted", None)
+    # 2026-08-10: _FLOOR_SEEN/_SURPLUS_SEEN moved to module level (the per-cycle
+    # Executor rebuild was resetting them in production — the floor dedup never
+    # engaged, the adoption clock never aged). Fresh dicts per test, or the floor
+    # keys and adoption clocks of one test leak into the next — the exact roaming
+    # cross-test contamination this fixture already prevents for _recon_next.
+    monkeypatch.setattr(ex_mod, "_FLOOR_SEEN", {})
+    monkeypatch.setattr(ex_mod, "_SURPLUS_SEEN", {})
     monkeypatch.setattr(ex_mod.Executor, "_ensure_ladder_rungs", lambda self: None)
 
 

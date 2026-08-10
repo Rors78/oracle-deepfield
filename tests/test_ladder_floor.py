@@ -163,6 +163,37 @@ def test_successful_rung_narrates_at_info_not_error(ex, monkeypatch, caplog):
     assert not errs, f"a successful placement logged an error: {[r.getMessage() for r in errs]}"
 
 
+def test_dedup_survives_the_per_cycle_executor_rebuild(tmp_path, monkeypatch, caplog):
+    """THE production shape, which every earlier test in this file missed:
+    _poll_fills_threaded builds a FRESH Executor each poll cycle, so per-instance
+    dedup state was empty on every call and the dedup never engaged live — 103
+    identical ADA INFO lines in one window while this file was green, because
+    its fixtures hold ONE instance across calls (log-forensics, 2026-08-10; the
+    same convenient-world sin as the PAIRS-tuple fixture). The state is module
+    level now; this test constructs a new Executor per refusal, exactly like
+    production, and the second identical refusal must be quiet at INFO."""
+    import logging
+    monkeypatch.setattr(config, "LADDER_CONTINUOUS", True)
+    monkeypatch.setattr(config, "EXCLUDED_PAIRS", frozenset())
+    conn = store.connect(str(tmp_path / "rebuild.db"))
+    store.upsert_pair(conn, "ADAUSD", SYM, "ADA", 1.0, 0.5, 8)
+    pin_vol(conn, tp=4.0, sl=10.0, rung=1.0, symbols=[SYM])
+    conn.commit()
+
+    def _fresh():
+        e = ex_mod.Executor(conn)
+        e.mode = "live"
+        return e
+
+    monkeypatch.setattr(ex_mod.Executor, "_live_last", lambda self, s: 1.00)
+    with caplog.at_level(logging.INFO, logger="deepfield.exec"):
+        _fresh()._place_ladder_rung(SYM, MPAIR, 10, 0.995, 1.00)
+        _fresh()._place_ladder_rung(SYM, MPAIR, 10, 0.995, 1.00)   # new instance!
+    floor = [r for r in caplog.records if "ladder floor reached" in r.getMessage()]
+    assert len(floor) == 1, \
+        f"the rebuild reset the dedup again — {len(floor)} INFO lines from 2 cycles"
+
+
 def test_refusal_is_re_evaluated_every_call_not_cached(ex, monkeypatch):
     """Only the NARRATION is deduplicated. A chain that refused once must still be
     able to place a rung the moment its floor allows one — caching the refusal itself

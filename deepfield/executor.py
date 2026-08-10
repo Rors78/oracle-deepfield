@@ -157,6 +157,20 @@ _seed_next = {}         # symbol -> time.monotonic() of next allowed seed attemp
 # an Executor is constructed per poll cycle. 0.0 = run on the first live cycle so a
 # stop that fired during a bot outage is caught minutes after boot, not next restart.
 _recon_next = 0.0
+# Ladder-floor narration dedup + adoption grace clock: MODULE-level for the same
+# rebuilt-per-cycle reason as every clock above — and this line exists because both
+# were first written as instance attributes and silently never worked. The 821bfef
+# floor dedup shipped, tested green, and then logged 103 identical ADA INFO lines
+# in one window: its tests held ONE Executor across calls while production builds a
+# fresh one every poll cycle, so self._floor_seen was always empty and every repeat
+# was "first". Same defect made _surplus_seen's 30-minute adoption clock reset
+# every cycle — structurally unable to ever reach ADOPTED from the runtime path
+# (zero ADOPTED lines in the entire log bear this out). Found by log-forensics
+# 2026-08-10. The instances alias these dicts so state survives the rebuild; a
+# PROCESS restart still clears both, which is the behavior the adoption docstring
+# actually promises ("a restart restarts the clock").
+_FLOOR_SEEN = {}        # symbol -> (target, stop) of the last narrated floor refusal
+_SURPLUS_SEEN = {}      # symbol -> (volume, first_seen_ts) — the adoption grace clock
 # Stack-floor pause narration (audit Wave 1): module-level (Executor is rebuilt
 # per cycle) so the "seeds/rungs paused" line is EDGE-triggered — journaled once
 # on entry and once on exit (with duration) — instead of the per-attempt spam the
@@ -189,12 +203,15 @@ class Executor:
         self.mode = config.EXEC_MODE
         # sym -> (surplus_volume, first_seen_ts): how long a stable untracked surplus
         # has gone unclaimed, so _adopt_surplus can tell a standing external position
-        # from a fill that has not been booked yet. In-memory by design — a restart
-        # restarts the clock rather than adopting on stale evidence.
-        self._surplus_seen = {}
+        # from a fill that has not been booked yet. ALIASES the module dict — an
+        # Executor is rebuilt every poll cycle, and a per-instance clock could never
+        # reach the 30-minute grace (see the _SURPLUS_SEEN note). In-memory by
+        # design: a PROCESS restart restarts the clock rather than adopting on
+        # stale evidence.
+        self._surplus_seen = _SURPLUS_SEEN
         # sym -> (target, stop) of the last ladder-floor refusal, so an unchanged
-        # refusal narrates once instead of every cycle. See _ladder_floor_reached.
-        self._floor_seen = {}
+        # refusal narrates once instead of every cycle. Module state, same reason.
+        self._floor_seen = _FLOOR_SEEN
 
     def _ladder_floor_reached(self, symbol, target, stop):
         """The chain has descended as far as its invalidation level allows.
