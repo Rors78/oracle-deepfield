@@ -34,11 +34,26 @@ reasoning, and move on — re-litigating them is the waste this section prevents
   This is the TEMPLATE for anything that must exist twice.
 - **The stress cascade errs tighter under old blobs** (pair-level fallback when
   per-fill arrays are absent) — the safe direction for a risk read.
-- **ADA/AVAX stay in the roster at 10x** despite Gate A clamping their stops
-  inside one average day's range (SL/ATR 0.76 / 0.89). Zero and one lifetime
-  stop exits respectively — the churn case is a forecast, not a measurement.
-  **Pre-registered tripwire: stop exits at the 4.20% clamp on either pair =
-  revisit the geometry.**
+- **The ADA/AVAX clamp tripwire FIRED 2026-08-11 and was adjudicated by
+  measurement** (risk-rails, 31-day paired first-touch race over our own
+  candles — clamped vs unclamped stop on identical entries/paths):
+  * **AVAX: EXCLUDED.** The one pair where the clamp flips expectancy negative
+    (+2.33% -> -1.08%/cycle, 63% stop-first at ~1:1 reward, worsening at every
+    horizon), with ZERO harvests in 29 orders — no income forfeited. Removed
+    while flat.
+  * **ADA: KEPT.** Its 08-11 exits were correct invalidation (price fell a
+    further 3.7%, never reclaimed entry — the stops SAVED $0.37 vs holding),
+    the unclamped ATR stop missed firing by only 0.11 ATR, and clamped EV stays
+    positive (+1.68%/cycle) on a 1.25:1 TP:SL. **Numeric re-arm threshold: two
+    further clamp-fired ADA exits that reclaim entry within 24h without a lower
+    low first, OR SL/ATR < 0.70 on the daily refresh (0.80 today) = exclude.**
+  * **XRP: KEPT** (was never in the tripwire). Its 08-11 stops were
+    clamp-independent — the unclamped floor was breached too, 8h later at a
+    worse price. Its churn/harvest ratio is pair-weakness (beta), not geometry.
+  * Control worth remembering: RENDER, unclamped at the full 1.5xATR floor,
+    took the day's LARGEST stop loss with price 2.4% below even the ATR floor —
+    on a genuine down day, ATR stops die too. The clamp is not the only thing
+    that fires.
 - **`tp_baseline` $289.83 is CORRECT** (settled 2026-08-08 from the raw Ledgers
   responses: three deposits netting +$85.04, zero withdrawals; the "$54 equity"
   counter-read was the eb/tb collateral pocket). When auditing external flows,

@@ -333,6 +333,14 @@ except ValueError:
 # protection — the removal above is what stops it, not this list.
 EXCLUDED_PAIRS = frozenset({
     "WLD/USD", "SHIB/USD", "NEAR/USD", "ALGO/USD", "ZEC/USD",   # stop-churn, 08-05
+    # AVAX 2026-08-11, the pre-registered clamp tripwire's verdict: the only pair
+    # where Gate A's 4.20% clamp (vs 6.78% ATR stop) flips the paired 31-day
+    # first-touch expectancy NEGATIVE (+2.33% -> -1.08%/cycle, 63% stop-first),
+    # and with ZERO harvests in 29 orders there is no income to forfeit. Excluded
+    # while flat. ADA stays (EV positive, today's exits were correct invalidation
+    # that SAVED $0.37); XRP stays (its stops were clamp-independent). Numeric
+    # re-arm threshold for ADA lives in docs/LATER.md.
+    "AVAX/USD",
 })
 
 SEED_PAIRS = tuple(p["ws"] for p in PAIRS if p["ws"] not in EXCLUDED_PAIRS)
