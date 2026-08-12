@@ -58,3 +58,39 @@ reasoning, and move on — re-litigating them is the waste this section prevents
   responses: three deposits netting +$85.04, zero withdrawals; the "$54 equity"
   counter-read was the eb/tb collateral pocket). When auditing external flows,
   compare against **eb**, never tb/equity.
+
+
+## Edge-hunt null registry (2026-08-12) — tested and DEAD, do not re-ship
+
+Three-agent research sweep (train <07-21, validate 07-21->08-12, paired
+first-touch races on our own candles; full outputs in the session record).
+Everything here FAILED its out-of-sample gate. Re-proposing any of it without
+NEW evidence is re-litigating a measured null:
+
+- **Pair concentration** (top-quartile respend): ranking reshuffles across the
+  split (72h Spearman +0.20); UNI was fit-#1 then went 0-for-61. Regime-
+  dependent on ~2-week timescales. Only the CRV/PEPE-first SERVICE ORDER
+  survived (shipped as RESPEND_PRIORITY).
+- **"Buy the turn, not the fall"** as a placement gate: NULL. First actual test
+  of the July slogan — falling-knife entries measure no worse (val diff -0.13pp,
+  sign-agreement 68%, MTM sensitivity -0.008). The memory phrase is a design
+  rationale for close-driven laddering, not a tested edge.
+- **Vol-expansion gate**: +1.67pp in train at 97% bootstrap agreement, -0.80pp
+  in validation. The textbook overfit of the whole sweep. Its in-sample chart
+  will look convincing again someday; it is dead.
+- **Session-of-day gate**: null (val sign 53% = coin flip), though the bot's
+  real stops do cluster 18-24 UTC and at daily close.
+- **BTC<EMA20 gate**: stably HARMFUL both windows (below-EMA entries were the
+  better ones). Inverting it = a new entry signal = banned by the no-edge
+  finding.
+- **Post-stop-cluster respend burst**: per-event bounce (+0.9%/24h) collapses
+  on independent windows (-1.1%); ~1.2pp of the apparent rebound is mechanical
+  (stop fills at the depressed print). Best defensible effect ~+0.2-0.8pp/72h
+  does not clear ~0.27pp carry + fees.
+- **Harvest TP multiple**: 0.75x/1.25x/1.5x ATR all rejected (sign-flips or
+  <=0 on independent sets, both windows). 1.0xATR CONFIRMED as the ATR-era
+  successor of the 446-rung 4% finding.
+- Sweep-wide regime note: the ENTIRE placement stream went EV-negative after
+  07-21 (-0.18%/rung, worse with censoring). No measurable placement state
+  concentrates it. The ladder pays to run in bear chop; the payoff remains the
+  regime turn. No gate fixes beta.

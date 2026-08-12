@@ -213,6 +213,18 @@ class Executor:
         # refusal narrates once instead of every cycle. Module state, same reason.
         self._floor_seen = _FLOOR_SEEN
 
+    @staticmethod
+    def _service_order(symbols):
+        """Order pairs for budget service: RESPEND_PRIORITY first (Edge Research A,
+        2026-08-12 — the pairs that passed fit, validation AND the realized ledger),
+        then the rest alphabetically. A drained bucket funds roughly one min-lot
+        per refill interval; whoever is served first gets it. This is a tie-break
+        on the same budget, not an allocation change — the out-of-sample test
+        rejected concentration, so equal eligibility stands and only the ORDER of
+        service encodes the surviving evidence."""
+        prio = getattr(config, "RESPEND_PRIORITY", ())
+        return sorted(symbols, key=lambda s: (s not in prio, s))
+
     def _at_ladder_floor(self, target, stop):
         """THE floor rule, one home: a rung at/under the chain stop (plus buffer)
         is not placed. Three callers — _reladder's pre-announce screen, and
@@ -1601,7 +1613,8 @@ class Executor:
             for sym, mpair, entry, stop, lev, score, required in rows:
                 lowest.setdefault(sym, (mpair, entry, stop, lev, score, required))
             now = time.monotonic()
-            for sym, (mpair, entry, stop, lev, score, required) in lowest.items():
+            for sym in self._service_order(lowest.keys()):
+                mpair, entry, stop, lev, score, required = lowest[sym]
                 if store.has_pending_entry(self.conn, sym, mode=self.mode):
                     continue
                 if now < _reladder_next.get(sym, 0.0):
@@ -1662,7 +1675,7 @@ class Executor:
             return
         try:
             now = time.monotonic()
-            for sym in config.SEED_PAIRS:
+            for sym in self._service_order(config.SEED_PAIRS):
                 if now < _seed_next.get(sym, 0.0):
                     continue
                 if store.has_pending_entry(self.conn, sym, mode=self.mode):

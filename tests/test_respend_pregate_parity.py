@@ -245,3 +245,16 @@ def test_a_stale_local_price_cannot_produce_a_dangling_announcement(tmp_path, mo
         f"announced on a stale price the fresh tick cannot fund: {msgs}"
     assert not placed
     conn.close()
+
+
+def test_service_order_puts_priority_pairs_first(monkeypatch):
+    """Edge Research A (2026-08-12): when the bucket rations, CRV/PEPE — the pairs
+    that passed fit, validation AND the realized ledger — are served first. A
+    tie-break on the same budget, not concentration (that failed its
+    out-of-sample gate). Non-priority pairs keep deterministic alphabetical
+    order behind them; empty priority degrades to plain alphabetical."""
+    monkeypatch.setattr(config, "RESPEND_PRIORITY", ("CRV/USD", "PEPE/USD"))
+    got = ex_mod.Executor._service_order(["XRP/USD", "ADA/USD", "PEPE/USD", "CRV/USD"])
+    assert got == ["CRV/USD", "PEPE/USD", "ADA/USD", "XRP/USD"]
+    monkeypatch.setattr(config, "RESPEND_PRIORITY", ())
+    assert ex_mod.Executor._service_order(["B/USD", "A/USD"]) == ["A/USD", "B/USD"]

@@ -341,7 +341,22 @@ EXCLUDED_PAIRS = frozenset({
     # that SAVED $0.37); XRP stays (its stops were clamp-independent). Numeric
     # re-arm threshold for ADA lives in docs/LATER.md.
     "AVAX/USD",
+    # RENDER 2026-08-12, Edge Research A (same paired-race method as AVAX):
+    # fit EV -0.23, validation -5.2%/cycle at a 1-8% TP-first rate, realized
+    # -$1.06 with 4 stops and ZERO harvests since the cutover — and only 2-16%
+    # of its races resolve at all: capital parked at 3x that neither banks nor
+    # exits. Failed all three lenses (fit, validation, realized ledger).
+    "RENDER/USD",
 })
+
+# Respend SERVICE ORDER (Edge Research A, 2026-08-12): when the bucket cannot
+# fund every eligible pair, serve these first. CRV and PEPE passed all three
+# evidence lenses (fit-window rank, out-of-sample validation, realized ledger —
+# CRV was validation #1 at both horizons with ~100% TP-first resolution). This
+# is a TIE-BREAK on existing budget, not a concentration bet: the full-quartile
+# concentration test failed its out-of-sample gate and equal-spread remains the
+# base allocation. Pairs listed here still obey every rail and gate.
+RESPEND_PRIORITY = ("CRV/USD", "PEPE/USD")
 
 SEED_PAIRS = tuple(p["ws"] for p in PAIRS if p["ws"] not in EXCLUDED_PAIRS)
 
