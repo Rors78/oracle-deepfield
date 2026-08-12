@@ -491,8 +491,15 @@ MARGIN_LEVEL_STACK_FLOOR_PCT = 200
 # Starting calibration for a ~$375-notional book: PER_HR ~5, BURST ~40 → full
 # re-lever takes ~3 days instead of ~1. Watch the ml curve after a T/P and tune
 # the one number.
-RESPEND_BUDGET_USD_PER_HR = 5.0
-RESPEND_BURST_USD         = 40.0
+# 5.0/hr -> 15.0/hr, burst 40 -> 60 (operator directive 2026-08-12, "$154 free
+# and nothing deploying"). At $5/hr, margin freed by a stop wave took ~3 DAYS to
+# redeploy — 70% of equity idle paying nothing while carry accrued on the rest.
+# $15/hr redeploys a stop wave's freed margin the SAME DAY (~10h) while still
+# pacing ~10x slower than the pre-governor ladder that spent the whole 07-22
+# cushion in 24h. The real risk rails are unchanged and binding: L_eff ceiling,
+# kill switch, Gate A stops, reverse gear. This constant is tempo, not exposure.
+RESPEND_BUDGET_USD_PER_HR = 15.0
+RESPEND_BURST_USD         = 60.0
 
 # Defense buffer engine (audit Wave 1, DEEPFIELD_AUDIT_EVIDENCE.md §B/§G). The
 # ml floor above is a ratio; the DEFENSE tiers below are the SAME comfort zone
