@@ -1,13 +1,20 @@
-"""The $20 that tripped the kill switch (2026-08-15): a prop-eval fee purchase
-left the account as a ledger type the flow walk never queried, so the equity
-drop read as pure drawdown and latched the switch. Operator-approved fix:
-extend the typed Ledgers walk (transfer/spend/receive + USD-stable 1:1) and
-recheck flows once before NEWLY latching a kill-switch block.
+"""The $24 that tripped the kill switch (2026-08-15), and the -$72.11 that the
+first fix invented. Two incidents, one afternoon, both pinned here:
 
-The fake Kraken here is faithful on the one property that matters: a typed
-Ledgers query returns ONLY entries of that type. The old two-type walk never
-asks for 'transfer', so under it the fee nets $0 and these tests FAIL — the
-fix is what they pin, not a tautology.
+1. A prop-eval fee purchase (ledger type 'transfer', subtype
+   proptradingplanpurchase, ZUSD -24) was invisible to the deposit/withdrawal
+   walk — the equity drop read as pure drawdown and latched the kill switch.
+
+2. The first extension walked once per type and passed 'spend'/'receive' —
+   values Kraken's Ledgers API does not recognize. Kraken IGNORES an unknown
+   type filter and returns the WHOLE window, so the fee was counted three times
+   and rollover FEES leaked in as flows: net -$72.11 against a true -$24.00,
+   over-shifting the kill-switch peak and T/P baseline. The rewrite walks ONCE,
+   unfiltered, and classifies client-side.
+
+The fake Kraken here reproduces the venue's actual filter behavior (unknown
+type -> unfiltered results), so the multi-type design FAILS these tests and the
+single-walk design passes — the tests pin the mechanism, not a tautology.
 """
 import datetime as dt
 
@@ -16,56 +23,78 @@ import pytest
 from deepfield import broker, store
 from deepfield import app as app_mod
 
+# The real 2026-08-15 window, shrunk: the fee transfer + internal entries that
+# must be classified OUT (their fees are the rollover poll's business).
+WINDOW = {
+    "LF1": {"type": "rollover", "asset": "ZUSD", "amount": "0.0000", "fee": "0.0020"},
+    "LF2": {"type": "transfer", "subtype": "proptradingplanpurchase",
+            "asset": "ZUSD", "amount": "-24.0000", "fee": "0.0000"},
+    "LF3": {"type": "rollover", "asset": "ZUSD", "amount": "0.0000", "fee": "0.0047"},
+    "LF4": {"type": "margin", "asset": "ZUSD", "amount": "0.0000", "fee": "0.0274"},
+    "LF5": {"type": "trade", "asset": "ZUSD", "amount": "-12.3400", "fee": "0.0100"},
+}
 
-def _fake_private_factory(entries_by_type, requested):
+
+def _kraken_like_private(requested):
+    """Faithful on the property that caused the bug: an unknown or absent type
+    filter returns the whole window; a known type returns only that type."""
+    known = ("deposit", "withdrawal", "trade", "margin", "rollover", "transfer",
+             "credit", "settled", "staking")
+
     def fake_private(path, params, **kw):
         assert path == "/0/private/Ledgers"
-        typ = params["type"]
+        typ = params.get("type")
         requested.append(typ)
         if int(params.get("ofs", 0)) > 0:
             return {"ledger": {}}
-        return {"ledger": entries_by_type.get(typ, {})}
+        if typ is None or typ not in known:
+            return {"ledger": dict(WINDOW)}          # Kraken ignores the filter
+        return {"ledger": {k: v for k, v in WINDOW.items() if v["type"] == typ}}
     return fake_private
 
 
-def test_transfer_entry_counts_as_external_flow(monkeypatch):
-    """A -$20 ZUSD 'transfer' nets -20.0 — the exact shape of the eval fee."""
+def test_eval_fee_transfer_nets_exactly_minus_24(monkeypatch):
+    """The incident window must net -24.00: the transfer counted ONCE, rollover
+    and margin fees NOT counted, the trade entry NOT counted."""
     requested = []
-    monkeypatch.setattr(broker, "private", _fake_private_factory(
-        {"transfer": {"L1": {"asset": "ZUSD", "amount": "-20.0000", "fee": "0.0000"}}},
-        requested))
+    monkeypatch.setattr(broker, "private", _kraken_like_private(requested))
     monkeypatch.setattr(broker, "LEDGERS_PAGE_PACE_SECS", 0)
     net, count, complete = broker.external_flows_since(1786829700)
-    assert net == pytest.approx(-20.0), (
-        f"transfer entry contributed {net} — the typed walk never asked for it")
+    assert net == pytest.approx(-24.0), (
+        f"window netted {net}, not -24.00 — either the transfer is invisible "
+        f"(the original gap) or entries were double-counted / internal fees "
+        f"leaked in (the -$72.11 bug)")
     assert count == 1 and complete
-    assert set(requested) >= {"deposit", "withdrawal", "transfer", "spend", "receive"}, (
-        f"walk only queried {set(requested)} — the type extension is missing")
+    assert len(requested) == 1 and requested[0] is None, (
+        f"walked {len(requested)} typed queries {requested} — the multi-type walk "
+        f"is what triple-counted the fee when Kraken ignored unknown filters")
 
 
-def test_usdt_spend_valued_one_to_one(monkeypatch):
-    """The fee may have routed through USDT — a stable 'spend' is a dollar out."""
-    monkeypatch.setattr(broker, "private", _fake_private_factory(
-        {"spend": {"L2": {"asset": "USDT", "amount": "-20.0000", "fee": "0.0000"}}}, []))
+def test_usdt_transfer_valued_one_to_one(monkeypatch):
+    monkeypatch.setattr(broker, "private", _kraken_like_private([]))
     monkeypatch.setattr(broker, "LEDGERS_PAGE_PACE_SECS", 0)
+    win = {"L1": {"type": "transfer", "asset": "USDT", "amount": "-20.0", "fee": "0"}}
+    monkeypatch.setattr(broker, "private",
+                        lambda path, params, **kw: {"ledger": win if int(params.get("ofs", 0)) == 0 else {}})
     net, count, complete = broker.external_flows_since(1786829700)
     assert net == pytest.approx(-20.0), (
-        f"USDT spend contributed {net} — stables must value 1:1, not $0")
+        f"USDT transfer contributed {net} — stables must value 1:1, not $0")
 
 
 def test_non_stable_asset_still_contributes_zero(monkeypatch):
-    monkeypatch.setattr(broker, "private", _fake_private_factory(
-        {"transfer": {"L3": {"asset": "XXBT", "amount": "-0.0003", "fee": "0"}}}, []))
+    win = {"L1": {"type": "transfer", "asset": "XXBT", "amount": "-0.0003", "fee": "0"}}
+    monkeypatch.setattr(broker, "private",
+                        lambda path, params, **kw: {"ledger": win if int(params.get("ofs", 0)) == 0 else {}})
     monkeypatch.setattr(broker, "LEDGERS_PAGE_PACE_SECS", 0)
     net, count, complete = broker.external_flows_since(1786829700)
     assert net == 0.0 and count == 1
 
 
 class _StubBroker:
-    """Poll-level stub: the walk already summed to -20."""
+    """Poll-level stub: the walk already summed to -24 (the real fee)."""
     @staticmethod
     def external_flows_since(start_ts):
-        return (-20.0, 1, True)
+        return (-24.0, 1, True)
 
 
 def _seeded_conn(tmp_path):
@@ -78,14 +107,14 @@ def _seeded_conn(tmp_path):
 
 
 def test_poll_shifts_peak_by_transfer_flow(tmp_path):
-    """The incident replay: -$20 external flow must shift the kill-switch peak
+    """The incident replay: -$24 external flow must shift the kill-switch peak
     (and baseline, and trough) so the switch measures trading drawdown only."""
     conn = _seeded_conn(tmp_path)
     app_mod._poll_external_flows(conn, _StubBroker, dt.datetime.now(dt.timezone.utc))
-    assert float(store.meta_get(conn, "peak_equity")) == pytest.approx(206.7062), (
-        "peak did not shift — a $20 purchase would still read as pure drawdown")
-    assert float(store.meta_get(conn, "tp_baseline")) == pytest.approx(269.8299)
-    assert float(store.meta_get(conn, "tp_trough")) == pytest.approx(153.7825)
+    assert float(store.meta_get(conn, "peak_equity")) == pytest.approx(202.7062), (
+        "peak did not shift — a $24 purchase would still read as pure drawdown")
+    assert float(store.meta_get(conn, "tp_baseline")) == pytest.approx(265.8299)
+    assert float(store.meta_get(conn, "tp_trough")) == pytest.approx(149.7825)
 
 
 class _StubEx:
