@@ -256,6 +256,40 @@ def test_floored_chain_reladders_without_announce_or_journal(tmp_path, monkeypat
     conn.close()
 
 
+def test_excluded_chain_reladders_in_total_silence(tmp_path, monkeypatch, caplog):
+    """The RENDER phantom (log-forensics, 2026-08-15): an EXCLUDED pair with open
+    rows hit the reladder announce + deck journal every ~10 minutes — 397 journal
+    rows claiming 're-placing next rung' with zero orders ever sent — because the
+    exclusion gate lived inside _place_ladder_rung, after the narration. The
+    screen now sits at the top of the reladder loop: an excluded chain produces
+    NO announce, NO journal row, NO floor line, nothing. Its lots stay managed;
+    the reconcile suite pins that separately."""
+    import logging
+    monkeypatch.setattr(config, "LADDER_CONTINUOUS", True)
+    monkeypatch.setattr(config, "EXCLUDED_PAIRS", frozenset({SYM}))
+    monkeypatch.setattr(ex_mod.Executor, "_ensure_ladder_rungs", _REAL_ENSURE)
+    monkeypatch.setattr(ex_mod.Executor, "_live_last", lambda self, s: 1.00)
+    conn = store.connect(str(tmp_path / "excl.db"))
+    store.upsert_pair(conn, "ADAUSD", SYM, "ADA", 1.0, 0.5, 8)
+    pin_vol(conn, tp=4.0, sl=10.0, rung=1.0, symbols=[SYM])
+    conn.execute("INSERT INTO orders(ts,symbol,margin_pair,side,ordertype,mode,entry,"
+                 "stop,volume,leverage,status,txid,stop_txid) VALUES"
+                 "('2026-08-15T00:00:00+00:00',?,?,'buy','limit','live',1.00,0.90,"
+                 "100,10,'open','T1','S1')", (SYM, MPAIR))
+    conn.commit()
+    e = ex_mod.Executor(conn)
+    e.mode = "live"
+    with caplog.at_level(logging.DEBUG, logger="deepfield.exec"):
+        e._ensure_ladder_rungs()
+    noisy = [r for r in caplog.records
+             if "RELADDER" in r.getMessage() or "floor reached" in r.getMessage()]
+    journal = conn.execute("SELECT COUNT(*) FROM journal").fetchone()[0]
+    assert noisy == [], \
+        f"excluded chain narrated: {[r.getMessage() for r in noisy]}"
+    assert journal == 0, f"excluded chain wrote {journal} journal rows"
+    conn.close()
+
+
 def test_refusal_is_re_evaluated_every_call_not_cached(ex, monkeypatch):
     """Only the NARRATION is deduplicated. A chain that refused once must still be
     able to place a rung the moment its floor allows one — caching the refusal itself

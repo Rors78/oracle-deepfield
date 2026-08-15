@@ -1615,6 +1615,16 @@ class Executor:
             now = time.monotonic()
             for sym in self._service_order(lowest.keys()):
                 mpair, entry, stop, lev, score, required = lowest[sym]
+                # Excluded pairs FIRST, before any narration. The real gate sits
+                # inside _place_ladder_rung, which is too late for the announce +
+                # journal above it: RENDER, excluded 08-12, wrote a phantom
+                # "re-placing next rung" to the deck journal every ~10 minutes —
+                # 397 rows, zero orders — until log-forensics caught it on 08-15.
+                # Same noise class as the floor screen below, one gate earlier.
+                # Existing lots stay fully managed (stops, harvest, reconcile);
+                # they just stop pretending to grow.
+                if sym in getattr(config, "EXCLUDED_PAIRS", ()):
+                    continue
                 if store.has_pending_entry(self.conn, sym, mode=self.mode):
                     continue
                 if now < _reladder_next.get(sym, 0.0):
