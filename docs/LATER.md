@@ -94,3 +94,19 @@ NEW evidence is re-litigating a measured null:
   07-21 (-0.18%/rung, worse with censoring). No measurable placement state
   concentrates it. The ladder pays to run in bear chop; the payoff remains the
   regime turn. No gate fixes beta.
+- **Prop-feed validation: req-1 crossings x R-multiple geometry (2026-08-15)**:
+  NULL — negative in BOTH splits, EVERY cell. Paired split (train 2024-08 ->
+  07-21, validate 07-21 -> 08-15), 145/9 strict rising crossings (funnel's
+  11 included decays from BUY; strict-rising is the tickable event). Center
+  3.2R/1.5xATR (pre-registered): train 14.3% hit, -0.40R resolved (break-even
+  needs 23.8%); validate 0-for-5. Full 3x3 grid (2.5/3.2/4.0R x
+  1.0/1.5/2.0xATR): no positive cell in either split — a floor, not a ridge.
+  Confirmed BUYs on identical geometry: train -0.38R, validate 0-for-2 (the
+  no-edge finding re-confirmed in R-space). Effective-N: 145 raw train events
+  = ~9 overlap-independent clusters; validate = 1. Only positive subgroup:
+  sig4-divergence-fresh at the crossing (train +0.12R resolved, n=28, ~2-3
+  clusters, validate n=2 both losers) — post-hoc, thin, NOT evidence; noted
+  for a future pre-registered test only. Gate A context: the 8.4% 5x-liq cap
+  bound on 99/145 events at 1.5xATR. VERDICT: the DEEPFIELD signal stack does
+  not produce 3R-shaped winners at daily geometry in any stage; prop feed
+  stays on confirmed BUYs (near-silent by construction) and NOTHING is armed.
