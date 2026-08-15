@@ -110,3 +110,22 @@ NEW evidence is re-litigating a measured null:
   bound on 99/145 events at 1.5xATR. VERDICT: the DEEPFIELD signal stack does
   not produce 3R-shaped winners at daily geometry in any stage; prop feed
   stays on confirmed BUYs (near-silent by construction) and NOTHING is armed.
+- **ORACLE detector x prop geometry (2026-08-15)**: NULL — same protocol as the
+  req-1 study (pre-registered in Oracle/reports/prop_feed_validation_PROTOCOL_
+  20260815.md BEFORE the run; full results + runner archived alongside).
+  Replayed ORACLE's shipped pipeline (4h primary + 1d, 200-bar windows, 1h
+  omitted uniformly) daily over 93 pairs x 92 days; fresh fires into
+  {DEEP VALUE, DIVERGENCE BUY, PULLBACK BUY}: 383 train / 172 validate.
+  Center 3.2R/1.5xATR: train 15.4% hit -0.35R resolved; validate 6.7% hit
+  -0.72R resolved (break-even 23.8%) — WORSE out-of-sample. All 9 grid cells
+  negative in both splits. MAE median ~1.04R train (the same visits-not-
+  reverses tell as DEEPFIELD). Effective-N = 1 per split: 555 fires blanket
+  every single day — the detector is effectively always-on (6.6 fires/day in
+  validate), disqualifying as a hand feed regardless of expectancy. Per class:
+  DIVERGENCE BUY (bulk) -0.36R/-0.75R; DEEP VALUE closest but negative
+  resolved both splits (n 35/17); PULLBACK BUY 0-for-14. Regime caveat: bear
+  tape both splits (BTC -17.2%/-3.4%). VERDICT: no system in the fleet
+  produces 3R-shaped winners at daily ATR geometry. The prop wallet's feed,
+  if built, must be level-structural (reclaim/higher-low, stop under
+  structure, sub-1R MAE by construction) — built new and validated by this
+  same protocol before it ever emits a ticket.
