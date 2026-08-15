@@ -195,6 +195,77 @@ def _poll_fees(c, broker, now):
                         "under-counts this window; cursor advanced to stay converged")
 
 
+def _anchor_flows_eb(c, broker):
+    """Record eb (equivalent balance) at the flow cursor. eb is the reconciliation
+    yardstick because it EXCLUDES open-position unrealized P&L (e = tb + n), so on
+    a USD-collateral account it moves only with external flows, realized P&L and
+    fees — market drift on the open book cannot fake or mask a flow. Guarded: an
+    anchor miss only means the next window's gate falls back to allow-with-log."""
+    try:
+        tb = broker.trade_balance_full()
+        eb = float(tb["eb"]) if tb and tb.get("eb") not in (None, "") else None
+        if eb is not None:
+            store.meta_set(c, "flows_eb_anchor", str(round(eb, 4)))
+    except Exception:
+        log.exception("flows eb anchor failed (reconciliation gate degrades to allow)")
+
+
+def _reconcile_external_flow(c, broker, cursor, net):
+    """The gate that would have caught the -$72.11 (operator order 2026-08-15).
+
+    That number was a triple-counted $24: the typed Ledgers walk passed filter
+    values Kraken ignores, re-summing the whole window per type. The hand-check
+    that caught it live — ledger-claimed flow vs what the account actually lost —
+    is now permanent: reconciled = eb_now - eb_anchor - realized P&L over the
+    same window. REFUSE the shift when |ledger - reconciled| > max($2, 5% of the
+    flow); log both numbers, page the operator, and leave every switch yardstick
+    (peak/baseline/trough) and the cursor untouched.
+
+    Tolerance notes: rollover fees (~$0.03/hr) bias reconciled slightly negative
+    and are folded into the $2 floor rather than window-matched — the rollover
+    poll's cursor does not align with this one. Missing anchor or failed eb read
+    degrades to ALLOW with a loud line (the gate must not brick legitimate flow
+    accounting on its own telemetry gap); the anchor re-arms on every advance."""
+    try:
+        anchor_raw = store.meta_get(c, "flows_eb_anchor", None)
+        anchor = float(anchor_raw) if anchor_raw not in (None, "") else None
+    except (TypeError, ValueError):
+        anchor = None
+    eb_now = None
+    try:
+        tb = broker.trade_balance_full()
+        eb_now = float(tb["eb"]) if tb and tb.get("eb") not in (None, "") else None
+    except Exception:
+        pass
+    if anchor is None or eb_now is None:
+        log.warning("external-flow reconciliation UNAVAILABLE (eb anchor=%s, eb now=%s) "
+                    "— allowing the $%+.2f shift unreconciled this once", anchor_raw, eb_now, net)
+        return True
+    cursor_iso = datetime.datetime.fromtimestamp(
+        float(cursor), datetime.timezone.utc).isoformat()
+    try:
+        realized = float(store.realized_pnl_since(c, cursor_iso, config.EXEC_MODE) or 0.0)
+    except Exception:
+        log.exception("realized-P&L read failed in flow reconciliation — treating as 0")
+        realized = 0.0
+    reconciled = eb_now - anchor - realized
+    tol = max(2.0, 0.05 * abs(net))
+    if abs(net - reconciled) > tol:
+        msg = (f"ledger claims ${net:+.2f} external flow but the account moved "
+               f"${reconciled:+.2f} over the same window (eb {anchor:.2f} -> {eb_now:.2f}, "
+               f"realized ${realized:+.2f}) — gap ${abs(net - reconciled):.2f} > "
+               f"tol ${tol:.2f}. SHIFT REFUSED; peak/baseline/trough untouched.")
+        log.error("external-flow RECONCILIATION FAILED: %s", msg)
+        try:
+            alerter.fire_safety("flow-mismatch", "*", msg)
+        except Exception:
+            log.exception("flow-mismatch alert failed (refusal already logged)")
+        return False
+    log.info("external flow $%+.2f reconciled against account delta $%+.2f "
+             "(tol $%.2f) — shift allowed", net, reconciled, tol)
+    return True
+
+
 def _poll_external_flows(c, broker, now):
     """Deposit/withdrawal awareness for the equity T/P (operator 2026-07-21).
 
@@ -225,6 +296,7 @@ def _poll_external_flows(c, broker, now):
     cursor = _mf("flows_cursor")
     if not cursor:
         store.meta_set(c, "flows_cursor", now.timestamp())
+        _anchor_flows_eb(c, broker)
         log.info("external-flow accounting anchored at %s — deposits/withdrawals "
                  "shift the T/P baseline from here on",
                  now.isoformat(timespec="seconds"))
@@ -233,13 +305,22 @@ def _poll_external_flows(c, broker, now):
     if r is None:                        # API failure: keep the cursor, retry next poll
         return
     net, count, complete = r
-    store.meta_set(c, "flows_cursor", now.timestamp())
     if not complete:
         log.warning("external-flow window truncated at the page ceiling — net flow is "
                     "a partial sum; the missed remainder shifts nothing (baseline may "
                     "lag until the operator reconciles)")
     if count == 0 or abs(net) < 0.01:
+        store.meta_set(c, "flows_cursor", now.timestamp())
+        _anchor_flows_eb(c, broker)
         return
+    if not _reconcile_external_flow(c, broker, cursor, net):
+        # REFUSED (operator decision 2026-08-15, after the -$72.11 incident): the
+        # cursor and eb anchor deliberately do NOT advance, so the window stays
+        # open for adjudication and the next poll re-checks — a transient
+        # mismatch heals itself, a real one keeps refusing (alert throttled).
+        return
+    store.meta_set(c, "flows_cursor", now.timestamp())
+    _anchor_flows_eb(c, broker)
     raw_baseline = store.meta_get(c, "tp_baseline", None)
     baseline = 0.0
     try:

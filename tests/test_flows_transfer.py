@@ -91,15 +91,23 @@ def test_non_stable_asset_still_contributes_zero(monkeypatch):
 
 
 class _StubBroker:
-    """Poll-level stub: the walk already summed to -24 (the real fee)."""
+    """Poll-level stub: the walk already summed to -24 (the real fee), and the
+    account's eb moved 205.39 -> 181.32 over the window (the real readings)."""
+    flow = (-24.0, 1, True)
+
+    @classmethod
+    def external_flows_since(cls, start_ts):
+        return cls.flow
+
     @staticmethod
-    def external_flows_since(start_ts):
-        return (-24.0, 1, True)
+    def trade_balance_full():
+        return {"eb": "181.3194"}
 
 
-def _seeded_conn(tmp_path):
+def _seeded_conn(tmp_path, anchor="205.3862"):
     conn = store.connect(str(tmp_path / "flows_test.db"))
     store.meta_set(conn, "flows_cursor", "1786829700.0")
+    store.meta_set(conn, "flows_eb_anchor", anchor)
     store.meta_set(conn, "peak_equity", "226.7062")
     store.meta_set(conn, "tp_baseline", "289.8299")
     store.meta_set(conn, "tp_trough", "173.7825")
@@ -107,14 +115,74 @@ def _seeded_conn(tmp_path):
 
 
 def test_poll_shifts_peak_by_transfer_flow(tmp_path):
-    """The incident replay: -$24 external flow must shift the kill-switch peak
-    (and baseline, and trough) so the switch measures trading drawdown only."""
+    """The incident replay: -$24 external flow, reconciling against the account's
+    own -$24.07 move, must shift the kill-switch peak (and baseline, and trough)
+    so the switch measures trading drawdown only."""
     conn = _seeded_conn(tmp_path)
     app_mod._poll_external_flows(conn, _StubBroker, dt.datetime.now(dt.timezone.utc))
     assert float(store.meta_get(conn, "peak_equity")) == pytest.approx(202.7062), (
         "peak did not shift — a $24 purchase would still read as pure drawdown")
     assert float(store.meta_get(conn, "tp_baseline")) == pytest.approx(265.8299)
     assert float(store.meta_get(conn, "tp_trough")) == pytest.approx(149.7825)
+
+
+class _TripleCountBroker(_StubBroker):
+    """The db3a9a6 bug's exact numbers: ledger claims -72.11 across 27 entries
+    while the account only moved -24.07."""
+    flow = (-72.11, 27, True)
+
+
+def test_triple_count_shift_refused(tmp_path, monkeypatch):
+    """The permanent version of the hand-check that caught the incident: a ledger
+    flow the account's own eb delta cannot corroborate (gap $48 > max($2, 5%))
+    must be REFUSED — no yardstick moves, the cursor stays put for re-check, and
+    the operator is paged."""
+    from deepfield import alerter
+    conn = _seeded_conn(tmp_path)
+    paged = []
+    monkeypatch.setattr(alerter, "fire_safety",
+                        lambda kind, sym, msg, loud=None: paged.append((kind, msg)))
+    app_mod._poll_external_flows(conn, _TripleCountBroker, dt.datetime.now(dt.timezone.utc))
+    assert float(store.meta_get(conn, "peak_equity")) == pytest.approx(226.7062), (
+        "peak shifted on an unreconcilable flow — the -$72.11 corruption again")
+    assert float(store.meta_get(conn, "tp_baseline")) == pytest.approx(289.8299)
+    assert float(store.meta_get(conn, "tp_trough")) == pytest.approx(173.7825)
+    assert store.meta_get(conn, "flows_cursor") == "1786829700.0", (
+        "cursor advanced past a refused window — the flow is now permanently lost")
+    assert paged and paged[0][0] == "flow-mismatch" and "REFUSED" in paged[0][1]
+
+
+def test_reconciliation_tolerance_scales_with_flow(tmp_path, monkeypatch):
+    """A large flow is allowed 5% slack: -$500 ledger vs -$490 account (gap $10
+    < $25 tol) passes; the same $10 gap on a -$30 flow (tol $2) refuses."""
+    from deepfield import alerter
+    monkeypatch.setattr(alerter, "fire_safety", lambda *a, **k: None)
+
+    class BigFlow(_StubBroker):
+        flow = (-500.0, 2, True)
+
+        @staticmethod
+        def trade_balance_full():
+            return {"eb": str(205.3862 - 490.0)}
+    conn = _seeded_conn(tmp_path)
+    app_mod._poll_external_flows(conn, BigFlow, dt.datetime.now(dt.timezone.utc))
+    # the shift APPLIED: a withdrawal bigger than the peak clears it to 0 by the
+    # documented floor (executor re-seeds from live equity) — the gate let it through
+    assert float(store.meta_get(conn, "peak_equity")) == 0.0
+
+    class SmallFlowBigGap(_StubBroker):
+        flow = (-30.0, 1, True)
+
+        @staticmethod
+        def trade_balance_full():
+            return {"eb": str(205.3862 - 20.0)}
+    conn2 = store.connect(str(tmp_path / "flows_test2.db"))
+    store.meta_set(conn2, "flows_cursor", "1786829700.0")
+    store.meta_set(conn2, "flows_eb_anchor", "205.3862")
+    store.meta_set(conn2, "peak_equity", "226.7062")
+    store.meta_set(conn2, "tp_baseline", "289.8299")
+    app_mod._poll_external_flows(conn2, SmallFlowBigGap, dt.datetime.now(dt.timezone.utc))
+    assert float(store.meta_get(conn2, "peak_equity")) == pytest.approx(226.7062)
 
 
 class _StubEx:
