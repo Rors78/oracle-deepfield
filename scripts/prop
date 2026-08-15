@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# Prop signal mode CLI:  prop status | open <pair> <side> <entry> <size> <stop> <tp>
+#                        | close <pair> <exit_price> | mark | reset-day
+cd "$(dirname "$0")/.." || exit 1
+exec python3 -m deepfield.prop_signal "$@"

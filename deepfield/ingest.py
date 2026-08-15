@@ -581,3 +581,11 @@ class Ingest:
         except Exception:
             log.exception("alerter.fire failed for %s (kind=%s) — order already handled; alert dropped",
                           symbol, kind)
+        # PROP advisory hook (2026-08-15): tap at the SIGNAL point, never the
+        # execution point. Runs after the live order and alert are both handled;
+        # its own guard because the prop re-scorer must never break this writer.
+        try:
+            from . import prop_signal
+            prop_signal.on_signal(conn, symbol, price, kind=kind)
+        except Exception:
+            log.exception("prop_signal evaluation failed (advisory only — live path unaffected)")

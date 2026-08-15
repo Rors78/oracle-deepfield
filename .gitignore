@@ -14,3 +14,4 @@ deepfield.HALT_ENTRIES
 .deepfield_keys
 .claude/skills/run-deepfield/last-frame.txt
 .shots/
+prop_state.json

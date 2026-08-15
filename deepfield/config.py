@@ -845,3 +845,24 @@ MARGIN_TICK_DECIMALS = {
     "WLD/USD": 4,
     "XLM/USD": 6,
 }
+
+# ── PROP SIGNAL MODE (2026-08-15) — advisory re-scorer for the operator's
+# hand-traded Kraken Prop evaluation. See deepfield/prop_signal.py. NOTHING in
+# the live money path reads these; the ingest._dispatch hook is gated on
+# PROP_ENABLED and wrapped in its own try/except.
+PROP_ENABLED = True
+PROP_START_BALANCE = 5000.0
+PROP_MDD_FLOOR = 4850.0        # lifetime drawdown floor — never resets
+PROP_MDL_PCT = 3.0             # daily loss cap, % of balance at 00:30 UTC
+PROP_RISK_PER_TRADE = 40.0
+PROP_MIN_RR = 3.0
+PROP_FEE_SIDE = 0.0004         # 0.04% per side
+PROP_FUNDING_DAY = 0.00033     # 0.033%/day on notional, charged every 4h
+PROP_FUNDING_MAX_FRAC = 0.05   # 24h funding must stay under 5% of expected profit
+PROP_MAX_LEV = 5
+PROP_PROFIT_TARGET = 450.0
+# None -> ticket TP = DEEPFIELD's vol-table tp (native geometry: rr 0.667 by
+# construction, so the R:R>=3 gate rejects everything — deliberately honest).
+# Set to e.g. 3.2 to derive the ticket TP at that R-multiple of the stop distance.
+PROP_TP_R = None
+PROP_NTFY_TOPIC = ""           # ntfy.sh topic for ticket delivery ("" = desktop only)
