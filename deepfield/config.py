@@ -741,6 +741,12 @@ RAILS_TIGHT_PCT = 15.0
 # hydra-style. Verified 2026-07-04 == max Kraken leverage_buy per pair. HARDCODED TO
 # THE PER-PAIR MAX ON PURPOSE — do NOT lower. (The fork-A 2x de-lever was a mistake and
 # was reverted 2026-07-11 at operator direction.)
+# 2026-08-15: Kraken raised ALGO 2->5, NEAR 3->5, RENDER 3->5, XLM 2->5 (spot
+# AssetPairs leverage_buy; the :BTNL book is not queryable publicly, so the first
+# live XLM entry is the venue confirmation — an entry rejection is safe-fail, and
+# resting stops on open lots use the leverage FROZEN in their DB row, never this
+# table). Gate A checked at 5x: clamp ceiling 8.40% vs raw ATR SLs 5.55-7.23%,
+# none bind. ALGO/NEAR/RENDER are EXCLUDED_PAIRS — inert until re-armed.
 PER_PAIR_LEVERAGE = {
     "BTC/USD": 10,
     "ETH/USD": 10,
@@ -756,7 +762,7 @@ PER_PAIR_LEVERAGE = {
     "UNI/USD": 5,
     "DOT/USD": 5,
     "BCH/USD": 5,
-    "ALGO/USD": 2,
+    "ALGO/USD": 5,
     "CRV/USD": 5,
     "HBAR/USD": 5,
     "PEPE/USD": 5,
@@ -765,11 +771,11 @@ PER_PAIR_LEVERAGE = {
     "ZEC/USD": 5,
     "HYPE/USD": 5,
     "PAXG/USD": 5,
-    "NEAR/USD": 3,
+    "NEAR/USD": 5,
     "PENGU/USD": 3,
-    "RENDER/USD": 3,
+    "RENDER/USD": 5,
     "WLD/USD": 3,
-    "XLM/USD": 2,
+    "XLM/USD": 5,
 }
 # Leveraged orders MUST use the :BTNL margin-book name (Non-ECP rejects spot name).
 MARGIN_PAIR = {
