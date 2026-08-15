@@ -379,21 +379,33 @@ def rollover_fees_since(start_ts):
     return total, count, newest, complete
 
 
+EXTERNAL_FLOW_TYPES = ("deposit", "withdrawal", "transfer", "spend", "receive")
+# Valued 1:1 with USD in the flow sum. USDT/USDC are how Kraken books product
+# purchases that route through a stable — the 2026-08-15 $20 prop-eval fee left
+# the account as neither 'deposit' nor 'withdrawal', which is why the kill
+# switch fired on it unexplained (operator-approved extension, same day).
+STABLE_USD_ASSETS = ("ZUSD", "USD", "USDT", "USDC")
+
+
 def external_flows_since(start_ts):
     """Net external USD moved in/out of the account since `start_ts` (unix), from
-    the Ledgers API (entry types 'deposit' and 'withdrawal' — two typed walks).
-    Returns (net_usd, entry_count, complete) or None when EITHER walk fails (a
+    the Ledgers API — one typed walk per EXTERNAL_FLOW_TYPES entry. Originally
+    deposit/withdrawal only; extended 2026-08-15 (operator decision) with
+    transfer/spend/receive after a $20 eval-fee purchase proved invisible to the
+    two-type walk and tripped the kill switch as phantom drawdown. Internal
+    transfer pairs (e.g. spot<->staking) net to ~0 across their two entries.
+    Returns (net_usd, entry_count, complete) or None when ANY walk fails (a
     half-summed window must not advance a cursor). Net per entry is amount - fee,
     so a withdrawal (amount<0, fee>0) contributes its full equity impact.
-    Non-USD entries count toward entry_count but contribute $0 — converting them
-    needs a price, and this feeds the T/P baseline shift, not accounting; they are
-    logged loudly so the operator knows the shift is missing them.
+    USD-stable entries (STABLE_USD_ASSETS) are valued 1:1; other assets count
+    toward entry_count but contribute $0 — converting them needs a price, and
+    they are logged loudly so the operator knows the shift is missing them.
     Same discipline as rollover_fees_since (fix 2026-07-19): paced pages, hard
     ceiling, callers keep walks SHORT by anchoring their cursor forward."""
     net, count = 0.0, 0
     complete = True
     paced = False
-    for typ in ("deposit", "withdrawal"):
+    for typ in EXTERNAL_FLOW_TYPES:
         ofs = 0
         for page in range(LEDGERS_MAX_PAGES):
             if paced:                  # pace between every request after the first
@@ -414,7 +426,7 @@ def external_flows_since(start_ts):
                 except (TypeError, ValueError):
                     continue
                 count += 1
-                if asset not in ("ZUSD", "USD"):
+                if asset not in STABLE_USD_ASSETS:
                     log.warning("external %s of %.8g %s IGNORED for the T/P baseline "
                                 "shift (non-USD asset — no conversion here)", typ, amt, asset)
                     continue

@@ -225,11 +225,12 @@ def journal(record, path=JOURNAL_PATH):
 
 
 def _format_ticket(t):
+    tag = " · [EXCLUDED on live bot]" if t.get("excluded_on_live") else ""
     return (f"PROP {t['symbol']} LONG · entry {t['entry']:g} · stop {t['stop']:g} · "
             f"tp {t['tp']:g} · size {t['size_base']:g} (${t['notional_usd']:,.2f} @ "
             f"{t['leverage']}x) · risk ${t['risk_usd']:.2f} · reward ${t['reward_usd']:.2f} · "
             f"R:R {t['rr']:.2f} · room MDD ${t['mdd_room_after_fill']:.2f} / "
-            f"MDL ${t['mdl_room_after_fill']:.2f}")
+            f"MDL ${t['mdl_room_after_fill']:.2f}{tag}")
 
 
 def deliver(ticket):
@@ -305,6 +306,10 @@ def on_signal(conn, symbol, price, kind="confirmed"):
                       lot_decimals=lot_dec)
     result["kind"] = "signal"
     result["tp_source"] = f"{tp_r}R" if tp_r else "deepfield-vol-table"
+    # TAG, never filter (operator 2026-08-15): the live exclusions are 10x-clamp
+    # economics that do not map to the 5x prop envelope. The ticket says so; the
+    # hand-trader decides.
+    result["excluded_on_live"] = symbol in getattr(config, "EXCLUDED_PAIRS", ())
     journal(result)
     st.setdefault("seen", {})[key] = now.isoformat()
     cutoff = (now - _dt.timedelta(days=7)).isoformat()

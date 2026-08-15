@@ -656,6 +656,7 @@ async def _exec_state_refresh(appstate, conn, ing, interval=15):
             # verbatim, never re-derived downstream (2026-08-07 audit, deck R1:
             # the deck read "clear to buy" through an empty respend bucket).
             growth_detail = ex.growth_detail() if ex else None
+            rails_detail = _kill_switch_flow_recheck(conn, ex, equity, rails_detail)
             rails_ok, reason = ((rails_detail["ok"], rails_detail["reason"])
                                 if rails_detail else (True, ""))
             rails_block_since = _track_rails_block(conn, rails_ok, reason)
@@ -899,6 +900,40 @@ def _stop_coverage(conn, mode):
         "SELECT COUNT(*), COALESCE(SUM(CASE WHEN stop_txid IS NOT NULL "
         "AND stop_txid<>'' THEN 1 ELSE 0 END),0) FROM orders WHERE status='open'"
         + clause, args).fetchone()
+
+
+def _kill_switch_flow_recheck(conn, ex, equity, rails_detail):
+    """Pre-latch flow check (operator decision 2026-08-15). When the kill switch
+    is about to NEWLY latch a block, run one immediate external-flow poll before
+    trusting the drawdown — a ledger-explained equity drop (deposit, withdrawal,
+    transfer, spend) is money changing pockets, not losses, and must never trip
+    the switch. The 2026-08-15 incident: a $20 eval-fee purchase between hourly
+    polls read as pure drawdown for 42+ minutes because the switch evaluated
+    every cycle while the flow accountant slept.
+
+    Fires ONLY on the transition into a new block (rails_block_since empty) and
+    only for the kill-switch reason — a standing block never re-polls, so a real
+    drawdown costs exactly one extra Ledgers walk. If the poll shifts the peak,
+    the fresh verdict simply never latches; if it doesn't, the original verdict
+    stands. NEVER raises into the poll loop."""
+    try:
+        if (rails_detail is None or rails_detail.get("ok")
+                or "KILL SWITCH" not in str(rails_detail.get("reason", ""))
+                or (store.meta_get(conn, "rails_block_since", None) or "")):
+            return rails_detail
+        log.warning("kill switch would newly latch (%s) — immediate external-flow "
+                    "poll before trusting the drawdown", rails_detail.get("reason"))
+        from . import broker as _broker
+        _poll_external_flows(conn, _broker,
+                             datetime.datetime.now(datetime.timezone.utc))
+        fresh = ex.rails_detail(equity)
+        if fresh.get("ok"):
+            log.warning("kill-switch trip EXPLAINED by external flow — peak shifted, "
+                        "block not latched")
+        return fresh
+    except Exception:
+        log.exception("pre-latch flow recheck failed — latching on the original verdict")
+        return rails_detail
 
 
 def _track_rails_block(conn, rails_ok, reason):

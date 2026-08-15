@@ -863,6 +863,8 @@ PROP_MAX_LEV = 5
 PROP_PROFIT_TARGET = 450.0
 # None -> ticket TP = DEEPFIELD's vol-table tp (native geometry: rr 0.667 by
 # construction, so the R:R>=3 gate rejects everything — deliberately honest).
-# Set to e.g. 3.2 to derive the ticket TP at that R-multiple of the stop distance.
-PROP_TP_R = None
+# 3.2 (operator decision 2026-08-15): ticket TP at 3.2x the stop distance.
+# NOTE the fee shave: 3.2R gross lands ~2.97-3.12 net of fees+funding depending
+# on stop width — tight stops (<~3%) still fail the 3.0 gate; wide ones pass.
+PROP_TP_R = 3.2
 PROP_NTFY_TOPIC = ""           # ntfy.sh topic for ticket delivery ("" = desktop only)
