@@ -143,3 +143,18 @@ NEW evidence is re-litigating a measured null:
   decision, not automatic. Fleet + structural summary: five feeds measured
   under one protocol (confirmed BUY, req-1, ORACLE, A, B, C) — every one
   fails; median MAE >= 1R everywhere on daily bars.
+- **4h close-entry vs retest-entry (2026-08-15, Phase 1b)**: ALL SIX cells
+  FAIL (3 events x 2 modes; protocol pre-committed dcbaf28; results + runner
+  docs/PROP_STRUCTURAL_4H_*). THE MECHANISM ANSWER: retest entry AT the level
+  (gapR 0.00 by construction, fill rates 66-89%) made MAE WORSE, not better —
+  C 1.19->1.36, A 1.24->1.40, B 1.29->1.46 median R — and median resolution
+  is 1 bar: on revisit the level either holds instantly or (more often)
+  slices straight through the 0.5xATR-4h stop, with fill-bar stop-outs at up
+  to 5.5R MAE. PROVEN, not assumed: these pairs do not respect structure at
+  5x-viable stop widths — a revisit is usually a violation, not a bounce.
+  The high fill rates are themselves the evidence (the market routinely goes
+  BACK through reclaimed structure). C mode-1 at 4h: -0.16R validate (the
+  daily near-miss did not survive finer bars either). Campaign total: EIGHT
+  feed candidates measured under one pre-registered protocol, eight dead.
+  Operator's pre-declared landing: prop wallet = hand-discretion account,
+  prop module = sizing calculator + envelope guard only.

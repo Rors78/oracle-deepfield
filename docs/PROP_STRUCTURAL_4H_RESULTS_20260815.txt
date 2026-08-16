@@ -1,0 +1,126 @@
+cache hit: 28 pairs
+coverage: 2026-04-18 -> 2026-08-15 · pairs 28 · events 6842
+rejections: {('B-higherlow', 'm1', 'stop>8.4%'): 16, ('A-reclaim', 'm1', 'stop>8.4%'): 4}
+unfilled mode-2 triggers: {('B-higherlow', 'train'): 599, ('A-reclaim', 'train'): 114, ('B-higherlow', 'validate'): 135, ('A-reclaim', 'validate'): 37, ('C-failedbd', 'train'): 21, ('C-failedbd', 'validate'): 12}
+regime BTC: train -15.5%  validate -3.4%
+
+===== C-failedbd =====
+  [m1] fires/day: tr 2.10 va 2.27 · effN tr=1 va=1
+    TP 2.5R
+      train    n=197 (tp 47/stop 148/open 2) hit= 24.1% (BE 28.6%) expR(res)=-0.16R expR(all)=-0.15R MAE=1.20/1.50/4.33 stop_med=2.07% gapR=0.35/0.52 t_med=4
+      validate n= 59 (tp 13/stop 38/open 8) hit= 25.5% (BE 28.6%) expR(res)=-0.11R expR(all)=-0.07R MAE=1.17/1.42/6.87 stop_med=1.29% gapR=0.28/0.40 t_med=4
+    TP 3.2R  <== CENTER
+      train    n=197 (tp 42/stop 153/open 2) hit= 21.5% (BE 23.8%) expR(res)=-0.10R expR(all)=-0.09R MAE=1.22/1.54/4.33 stop_med=2.07% gapR=0.35/0.52 t_med=4
+      validate n= 59 (tp 10/stop 40/open 9) hit= 20.0% (BE 23.8%) expR(res)=-0.16R expR(all)=-0.10R MAE=1.19/1.48/6.87 stop_med=1.29% gapR=0.28/0.40 t_med=4.0
+    TP 4.0R
+      train    n=197 (tp 37/stop 158/open 2) hit= 19.0% (BE 20.0%) expR(res)=-0.05R expR(all)=-0.05R MAE=1.23/1.54/4.33 stop_med=2.07% gapR=0.35/0.52 t_med=4
+      validate n= 59 (tp 7/stop 42/open 10) hit= 14.3% (BE 20.0%) expR(res)=-0.29R expR(all)=-0.19R MAE=1.20/1.50/6.87 stop_med=1.29% gapR=0.28/0.40 t_med=4
+    ACCEPTANCE (va 3.2R): MAE<1R=False expR>0=False rate<=1/day=False ==> FAIL
+  [m2] fires/day: tr 1.87 va 1.81 · effN tr=1 va=1 · fill rate tr 176/197=89% va 47/59=80%
+    TP 2.5R
+      train    n=176 (tp 44/stop 132/open 0) hit= 25.0% (BE 28.6%) expR(res)=-0.12R expR(all)=-0.12R MAE=1.42/2.01/6.69 stop_med=1.03% gapR=0.00/0.00 t_med=1.0
+      validate n= 47 (tp 14/stop 32/open 1) hit= 30.4% (BE 28.6%) expR(res)=+0.07R expR(all)=+0.06R MAE=1.13/1.60/6.90 stop_med=0.73% gapR=0.00/0.00 t_med=1.0
+    TP 3.2R  <== CENTER
+      train    n=176 (tp 36/stop 140/open 0) hit= 20.5% (BE 23.8%) expR(res)=-0.14R expR(all)=-0.14R MAE=1.50/2.04/6.69 stop_med=1.03% gapR=0.00/0.00 t_med=1.0
+      validate n= 47 (tp 9/stop 36/open 2) hit= 20.0% (BE 23.8%) expR(res)=-0.16R expR(all)=-0.13R MAE=1.36/1.77/6.90 stop_med=0.73% gapR=0.00/0.00 t_med=1
+    TP 4.0R
+      train    n=176 (tp 31/stop 145/open 0) hit= 17.6% (BE 20.0%) expR(res)=-0.12R expR(all)=-0.12R MAE=1.59/2.11/6.69 stop_med=1.03% gapR=0.00/0.00 t_med=1.0
+      validate n= 47 (tp 6/stop 37/open 4) hit= 14.0% (BE 20.0%) expR(res)=-0.30R expR(all)=-0.19R MAE=1.38/1.98/6.90 stop_med=0.73% gapR=0.00/0.00 t_med=1
+    ACCEPTANCE (va 3.2R): MAE<1R=False expR>0=False rate<=1/day=False ==> FAIL
+
+===== A-reclaim =====
+  [m1] fires/day: tr 10.93 va 12.65 · effN tr=1 va=1
+    TP 2.5R
+      train    n=1027 (tp 256/stop 771/open 0) hit= 24.9% (BE 28.6%) expR(res)=-0.13R expR(all)=-0.13R MAE=1.22/1.57/6.64 stop_med=1.65% gapR=0.36/0.52 t_med=3
+      validate n=329 (tp 80/stop 234/open 15) hit= 25.5% (BE 28.6%) expR(res)=-0.11R expR(all)=-0.10R MAE=1.20/1.57/8.44 stop_med=1.09% gapR=0.34/0.52 t_med=3.0
+    TP 3.2R  <== CENTER
+      train    n=1027 (tp 214/stop 812/open 1) hit= 20.9% (BE 23.8%) expR(res)=-0.12R expR(all)=-0.12R MAE=1.24/1.59/6.64 stop_med=1.65% gapR=0.36/0.52 t_med=4.0
+      validate n=329 (tp 63/stop 250/open 16) hit= 20.1% (BE 23.8%) expR(res)=-0.15R expR(all)=-0.14R MAE=1.24/1.64/8.44 stop_med=1.09% gapR=0.34/0.52 t_med=3
+    TP 4.0R
+      train    n=1027 (tp 174/stop 846/open 7) hit= 17.1% (BE 20.0%) expR(res)=-0.15R expR(all)=-0.13R MAE=1.26/1.61/6.64 stop_med=1.65% gapR=0.36/0.52 t_med=4.0
+      validate n=329 (tp 45/stop 265/open 19) hit= 14.5% (BE 20.0%) expR(res)=-0.27R expR(all)=-0.24R MAE=1.26/1.71/8.44 stop_med=1.09% gapR=0.34/0.52 t_med=4.0
+    ACCEPTANCE (va 3.2R): MAE<1R=False expR>0=False rate<=1/day=False ==> FAIL
+  [m2] fires/day: tr 9.76 va 11.23 · effN tr=1 va=1 · fill rate tr 917/1031=89% va 292/329=89%
+    TP 2.5R
+      train    n=917 (tp 255/stop 662/open 0) hit= 27.8% (BE 28.6%) expR(res)=-0.03R expR(all)=-0.03R MAE=1.32/1.89/8.13 stop_med=0.97% gapR=0.00/0.00 t_med=1
+      validate n=292 (tp 67/stop 219/open 6) hit= 23.4% (BE 28.6%) expR(res)=-0.18R expR(all)=-0.18R MAE=1.35/2.04/11.83 stop_med=0.70% gapR=0.00/0.00 t_med=1.0
+    TP 3.2R  <== CENTER
+      train    n=917 (tp 212/stop 705/open 0) hit= 23.1% (BE 23.8%) expR(res)=-0.03R expR(all)=-0.03R MAE=1.37/1.93/8.13 stop_med=0.97% gapR=0.00/0.00 t_med=1
+      validate n=292 (tp 54/stop 230/open 8) hit= 19.0% (BE 23.8%) expR(res)=-0.20R expR(all)=-0.19R MAE=1.40/2.15/11.83 stop_med=0.70% gapR=0.00/0.00 t_med=1.0
+    TP 4.0R
+      train    n=917 (tp 175/stop 742/open 0) hit= 19.1% (BE 20.0%) expR(res)=-0.05R expR(all)=-0.05R MAE=1.41/2.00/8.13 stop_med=0.97% gapR=0.00/0.00 t_med=1
+      validate n=292 (tp 42/stop 239/open 11) hit= 14.9% (BE 20.0%) expR(res)=-0.25R expR(all)=-0.22R MAE=1.43/2.19/11.83 stop_med=0.70% gapR=0.00/0.00 t_med=1
+    ACCEPTANCE (va 3.2R): MAE<1R=False expR>0=False rate<=1/day=False ==> FAIL
+
+===== B-higherlow =====
+  [m1] fires/day: tr 18.63 va 19.50 · effN tr=1 va=1
+    TP 2.5R
+      train    n=1751 (tp 521/stop 1211/open 19) hit= 30.1% (BE 28.6%) expR(res)=+0.05R expR(all)=+0.06R MAE=1.20/1.60/15.76 stop_med=1.46% gapR=1.00/1.00 t_med=3.0
+      validate n=507 (tp 122/stop 364/open 21) hit= 25.1% (BE 28.6%) expR(res)=-0.12R expR(all)=-0.12R MAE=1.26/1.86/39.80 stop_med=0.94% gapR=1.00/1.00 t_med=2.0
+    TP 3.2R  <== CENTER
+      train    n=1751 (tp 425/stop 1295/open 31) hit= 24.7% (BE 23.8%) expR(res)=+0.04R expR(all)=+0.06R MAE=1.23/1.66/15.76 stop_med=1.46% gapR=1.00/1.00 t_med=3.0
+      validate n=507 (tp 97/stop 385/open 25) hit= 20.1% (BE 23.8%) expR(res)=-0.15R expR(all)=-0.15R MAE=1.29/1.95/39.80 stop_med=0.94% gapR=1.00/1.00 t_med=2.0
+    TP 4.0R
+      train    n=1751 (tp 353/stop 1356/open 42) hit= 20.7% (BE 20.0%) expR(res)=+0.03R expR(all)=+0.06R MAE=1.26/1.68/15.76 stop_med=1.46% gapR=1.00/1.00 t_med=4
+      validate n=507 (tp 80/stop 399/open 28) hit= 16.7% (BE 20.0%) expR(res)=-0.16R expR(all)=-0.15R MAE=1.32/1.97/39.80 stop_med=0.94% gapR=1.00/1.00 t_med=2
+    ACCEPTANCE (va 3.2R): MAE<1R=False expR>0=False rate<=1/day=False ==> FAIL
+  [m2] fires/day: tr 12.43 va 14.31 · effN tr=1 va=1 · fill rate tr 1168/1767=66% va 372/507=73%
+    TP 2.5R
+      train    n=1168 (tp 302/stop 866/open 0) hit= 25.9% (BE 28.6%) expR(res)=-0.10R expR(all)=-0.10R MAE=1.37/1.96/20.30 stop_med=0.96% gapR=0.00/0.00 t_med=1.0
+      validate n=372 (tp 74/stop 287/open 11) hit= 20.5% (BE 28.6%) expR(res)=-0.28R expR(all)=-0.28R MAE=1.43/2.28/10.86 stop_med=0.69% gapR=0.00/0.00 t_med=1
+    TP 3.2R  <== CENTER
+      train    n=1168 (tp 243/stop 925/open 0) hit= 20.8% (BE 23.8%) expR(res)=-0.13R expR(all)=-0.13R MAE=1.42/1.99/20.30 stop_med=0.96% gapR=0.00/0.00 t_med=1.0
+      validate n=372 (tp 61/stop 298/open 13) hit= 17.0% (BE 23.8%) expR(res)=-0.29R expR(all)=-0.27R MAE=1.46/2.29/10.86 stop_med=0.69% gapR=0.00/0.00 t_med=1
+    TP 4.0R
+      train    n=1168 (tp 198/stop 970/open 0) hit= 17.0% (BE 20.0%) expR(res)=-0.15R expR(all)=-0.15R MAE=1.44/2.04/20.30 stop_med=0.96% gapR=0.00/0.00 t_med=1.0
+      validate n=372 (tp 45/stop 313/open 14) hit= 12.6% (BE 20.0%) expR(res)=-0.37R expR(all)=-0.35R MAE=1.51/2.35/10.86 stop_med=0.69% gapR=0.00/0.00 t_med=1.0
+    ACCEPTANCE (va 3.2R): MAE<1R=False expR>0=False rate<=1/day=False ==> FAIL
+
+C-failedbd mode-2 validate audit trail (center R):
+  07-23 00:00 NEAR/USD   level 1.8665 stop 1.84874 -> stop (-1.00R in 9 bars, MAE 4.04)
+  07-23 12:00 XLM/USD    level 0.183542 stop 0.181926 -> stop (-1.00R in 0 bars, MAE 1.98)
+  07-24 00:00 SOL/USD    level 75.73 stop 75.24 -> stop (-1.00R in 2 bars, MAE 1.59)
+  07-24 00:00 BCH/USD    level 210.96 stop 209.482 -> stop (-1.00R in 0 bars, MAE 1.02)
+  07-24 00:00 SHIB/USD   level 4.112e-06 stop 4.08907e-06 -> tp (+3.20R in 1 bars, MAE 0.52)
+  07-24 00:00 PENGU/USD  level 0.006057 stop 0.00600028 -> stop (-1.00R in 3 bars, MAE 1.55)
+  07-24 20:00 RENDER/USD level 1.465 stop 1.45514 -> stop (-1.00R in 0 bars, MAE 1.01)
+  07-25 12:00 NEAR/USD   level 1.7877 stop 1.77164 -> tp (+3.20R in 8 bars, MAE 0.26)
+  07-27 20:00 SUI/USD    level 0.7015 stop 0.69646 -> stop (-1.00R in 0 bars, MAE 5.46)
+  07-27 20:00 XLM/USD    level 0.17594 stop 0.174609 -> stop (-1.00R in 0 bars, MAE 3.74)
+  07-28 08:00 HBAR/USD   level 0.06778 stop 0.0672825 -> stop (-1.00R in 1 bars, MAE 1.57)
+  07-28 16:00 ZEC/USD    level 466.62 stop 460.754 -> stop (-1.00R in 1 bars, MAE 1.03)
+  07-28 16:00 HYPE/USD   level 54.7 stop 54.1094 -> stop (-1.00R in 3 bars, MAE 1.13)
+  07-28 16:00 PAXG/USD   level 4029.79 stop 4020.38 -> stop (-1.00R in 0 bars, MAE 1.58)
+  07-28 16:00 XLM/USD    level 0.170762 stop 0.169406 -> stop (-1.00R in 1 bars, MAE 1.77)
+  07-29 08:00 ZEC/USD    level 457 stop 450.65 -> tp (+3.20R in 5 bars, MAE 0.17)
+  07-29 12:00 LTC/USD    level 45.17 stop 44.8789 -> stop (-1.00R in 0 bars, MAE 1.27)
+  07-30 00:00 BCH/USD    level 208.99 stop 207.06 -> tp (+3.20R in 3 bars, MAE 0.43)
+  07-31 20:00 BTC/USD    level 62684.4 stop 62340.5 -> stop (-1.00R in 0 bars, MAE 1.41)
+  07-31 20:00 LINK/USD   level 8.15486 stop 8.08752 -> stop (-1.00R in 3 bars, MAE 1.15)
+  08-01 04:00 LTC/USD    level 44.3 stop 44.0216 -> stop (-1.00R in 2 bars, MAE 2.62)
+  08-02 00:00 LTC/USD    level 44.04 stop 43.7854 -> tp (+3.20R in 9 bars, MAE 0.24)
+  08-04 08:00 UNI/USD    level 3.8721 stop 3.81717 -> stop (-1.00R in 1 bars, MAE 1.57)
+  08-05 08:00 RENDER/USD level 1.334 stop 1.32472 -> stop (-1.00R in 1 bars, MAE 1.72)
+  08-06 08:00 HBAR/USD   level 0.06841 stop 0.0679802 -> stop (-1.00R in 5 bars, MAE 1.26)
+  08-06 08:00 SHIB/USD   level 4.818e-06 stop 4.77386e-06 -> stop (-1.00R in 0 bars, MAE 2.45)
+  08-07 00:00 HBAR/USD   level 0.06815 stop 0.0677335 -> stop (-1.00R in 3 bars, MAE 1.08)
+  08-07 00:00 WLD/USD    level 0.3017 stop 0.298224 -> stop (-1.00R in 0 bars, MAE 1.09)
+  08-07 20:00 DOT/USD    level 0.8083 stop 0.802629 -> stop (-1.00R in 4 bars, MAE 2.05)
+  08-10 08:00 ALGO/USD   level 0.08215 stop 0.081461 -> stop (-1.00R in 2 bars, MAE 1.12)
+  08-10 08:00 RENDER/USD level 1.296 stop 1.2862 -> stop (-1.00R in 1 bars, MAE 1.02)
+  08-11 00:00 BCH/USD    level 213.02 stop 212.05 -> stop (-1.00R in 3 bars, MAE 1.98)
+  08-11 04:00 XRP/USD    level 1.0125 stop 1.00706 -> stop (-1.00R in 0 bars, MAE 2.06)
+  08-11 12:00 XRP/USD    level 1.005 stop 0.999576 -> stop (-1.00R in 0 bars, MAE 2.74)
+  08-11 20:00 ETH/USD    level 1866.61 stop 1857.3 -> open (+1.57R in 13 bars, MAE 0.51)
+  08-11 20:00 SUI/USD    level 0.6796 stop 0.674841 -> stop (-1.00R in 0 bars, MAE 1.01)
+  08-11 20:00 AAVE/USD   level 88.2 stop 87.5188 -> stop (-1.00R in 10 bars, MAE 1.64)
+  08-11 20:00 BCH/USD    level 212.3 stop 211.323 -> tp (+3.20R in 1 bars, MAE 0.99)
+  08-13 04:00 SHIB/USD   level 4.417e-06 stop 4.38362e-06 -> tp (+3.20R in 5 bars, MAE 0.57)
+  08-13 04:00 PENGU/USD  level 0.006251 stop 0.00617733 -> stop (-1.00R in 1 bars, MAE 1.60)
+  08-14 08:00 UNI/USD    level 3.4506 stop 3.41095 -> stop (-1.00R in 0 bars, MAE 6.90)
+  08-14 12:00 HBAR/USD   level 0.06524 stop 0.0649204 -> tp (+3.20R in 2 bars, MAE 0.75)
+  08-14 16:00 AAVE/USD   level 86.15 stop 85.5208 -> stop (-1.00R in 1 bars, MAE 1.38)
+  08-14 16:00 CRV/USD    level 0.24693 stop 0.242925 -> stop (-1.00R in 0 bars, MAE 2.04)
+  08-15 00:00 LTC/USD    level 43.68 stop 43.4942 -> tp (+3.20R in 4 bars, MAE 0.27)
+  08-15 04:00 XLM/USD    level 0.1582 stop 0.157239 -> open (-0.34R in 4 bars, MAE 0.70)
+  08-15 16:00 PENGU/USD  level 0.006025 stop 0.00597518 -> stop (-1.00R in 1 bars, MAE 1.36)
