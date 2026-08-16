@@ -129,3 +129,17 @@ NEW evidence is re-litigating a measured null:
   if built, must be level-structural (reclaim/higher-low, stop under
   structure, sub-1R MAE by construction) — built new and validated by this
   same protocol before it ever emits a ticket.
+- **Level-structural events x prop geometry, daily bars (2026-08-15)**: ALL
+  THREE FAIL the pre-registered acceptance (protocol committed 9a230fb BEFORE
+  the run; results + runner in docs/PROP_STRUCTURAL_*_20260815.*). Phase 2
+  NOT entered. A-reclaim: fails all 3 (validate -0.37R, MAE 1.14, 1.88/day).
+  B-higherlow: fails all 3 (-0.41R, MAE 1.16, 3.04/day). C-failed-breakdown:
+  the campaign's first positive validate number (+0.15R at 3.2R, 27.3% hit vs
+  23.8% BE, 0.50/day PASSES rate) but MAE median 1.17 >= 1R FAILS, and the
+  train side is NEGATIVE (-0.44R) — a sign-flip across the split on n=13 /
+  effective-N=1. By the pre-registered rule and the standing sign-flip
+  discipline: NOT evidence, registered here so it cannot be quietly re-cited.
+  Per protocol: STOPPED at daily bars; the 4h-bar study is the OPERATOR'S
+  decision, not automatic. Fleet + structural summary: five feeds measured
+  under one protocol (confirmed BUY, req-1, ORACLE, A, B, C) — every one
+  fails; median MAE >= 1R everywhere on daily bars.

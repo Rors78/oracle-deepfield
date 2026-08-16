@@ -1,0 +1,185 @@
+events total: 382   rejections: {('B-higherlow', 'stop>8.4%'): 32, ('A-reclaim', 'stop>8.4%'): 14, ('C-failedbd', 'stop>8.4%'): 5}
+regime BTC: train -17.2%  validate -3.4%
+effective-N (all types pooled): train=1 validate=1
+
+===== A-reclaim =====
+  fire rate: train 77/65d = 1.18/day · validate 49/26d = 1.88/day · effective-N tr=1 va=1
+  TP 2.5R
+    train    n= 77 (tp 14/stop 56/open 7) hit= 20.0% (BE 28.6%) expR(res)=-0.30R expR(all)=-0.24R MAE med/p75/max=1.18/1.40/3.14 stop_med=3.90% t_med=3.0
+    validate n= 49 (tp 8/stop 33/open 8) hit= 19.5% (BE 28.6%) expR(res)=-0.32R expR(all)=-0.27R MAE med/p75/max=1.14/1.35/2.51 stop_med=3.32% t_med=3
+  TP 3.2R  <== CENTER (acceptance cell)
+    train    n= 77 (tp 12/stop 56/open 9) hit= 17.6% (BE 23.8%) expR(res)=-0.26R expR(all)=-0.17R MAE med/p75/max=1.18/1.40/3.14 stop_med=3.90% t_med=3.0
+    validate n= 49 (tp 6/stop 34/open 9) hit= 15.0% (BE 23.8%) expR(res)=-0.37R expR(all)=-0.30R MAE med/p75/max=1.14/1.35/2.51 stop_med=3.32% t_med=3.0
+  TP 4.0R
+    train    n= 77 (tp 8/stop 58/open 11) hit= 12.1% (BE 20.0%) expR(res)=-0.39R expR(all)=-0.27R MAE med/p75/max=1.19/1.43/3.14 stop_med=3.90% t_med=3.0
+    validate n= 49 (tp 4/stop 34/open 11) hit= 10.5% (BE 20.0%) expR(res)=-0.47R expR(all)=-0.23R MAE med/p75/max=1.14/1.35/2.51 stop_med=3.32% t_med=3.0
+  ACCEPTANCE (validate, 3.2R): MAE<1R=False expR>0=False rate<=1/day=False  ==> FAIL
+
+===== B-higherlow =====
+  fire rate: train 147/65d = 2.26/day · validate 79/26d = 3.04/day · effective-N tr=1 va=1
+  TP 2.5R
+    train    n=147 (tp 30/stop 102/open 15) hit= 22.7% (BE 28.6%) expR(res)=-0.20R expR(all)=-0.17R MAE med/p75/max=1.20/1.65/5.98 stop_med=3.54% t_med=3.0
+    validate n= 79 (tp 14/stop 52/open 13) hit= 21.2% (BE 28.6%) expR(res)=-0.26R expR(all)=-0.18R MAE med/p75/max=1.14/1.67/5.29 stop_med=2.32% t_med=2.0
+  TP 3.2R  <== CENTER (acceptance cell)
+    train    n=147 (tp 19/stop 110/open 18) hit= 14.7% (BE 23.8%) expR(res)=-0.38R expR(all)=-0.30R MAE med/p75/max=1.27/1.74/5.98 stop_med=3.54% t_med=3
+    validate n= 79 (tp 9/stop 55/open 15) hit= 14.1% (BE 23.8%) expR(res)=-0.41R expR(all)=-0.29R MAE med/p75/max=1.16/1.75/5.29 stop_med=2.32% t_med=2.0
+  TP 4.0R
+    train    n=147 (tp 15/stop 113/open 19) hit= 11.7% (BE 20.0%) expR(res)=-0.41R expR(all)=-0.31R MAE med/p75/max=1.32/1.76/5.98 stop_med=3.54% t_med=3.0
+    validate n= 79 (tp 6/stop 58/open 15) hit=  9.4% (BE 20.0%) expR(res)=-0.53R expR(all)=-0.39R MAE med/p75/max=1.23/1.88/5.29 stop_med=2.32% t_med=3.0
+  ACCEPTANCE (validate, 3.2R): MAE<1R=False expR>0=False rate<=1/day=False  ==> FAIL
+
+===== C-failedbd =====
+  fire rate: train 17/65d = 0.26/day · validate 13/26d = 0.50/day · effective-N tr=2 va=1
+  TP 2.5R
+    train    n= 17 (tp 2/stop 13/open 2) hit= 13.3% (BE 28.6%) expR(res)=-0.53R expR(all)=-0.45R MAE med/p75/max=1.38/1.54/1.90 stop_med=4.03% t_med=5
+    validate n= 13 (tp 3/stop 8/open 2) hit= 27.3% (BE 28.6%) expR(res)=-0.05R expR(all)=-0.02R MAE med/p75/max=1.17/1.33/2.61 stop_med=3.14% t_med=2
+  TP 3.2R  <== CENTER (acceptance cell)
+    train    n= 17 (tp 2/stop 13/open 2) hit= 13.3% (BE 23.8%) expR(res)=-0.44R expR(all)=-0.37R MAE med/p75/max=1.38/1.54/1.90 stop_med=4.03% t_med=5
+    validate n= 13 (tp 3/stop 8/open 2) hit= 27.3% (BE 23.8%) expR(res)=+0.15R expR(all)=+0.14R MAE med/p75/max=1.17/1.33/2.61 stop_med=3.14% t_med=2
+  TP 4.0R
+    train    n= 17 (tp 1/stop 13/open 3) hit=  7.1% (BE 20.0%) expR(res)=-0.64R expR(all)=-0.42R MAE med/p75/max=1.38/1.54/1.90 stop_med=4.03% t_med=4.5
+    validate n= 13 (tp 2/stop 9/open 2) hit= 18.2% (BE 20.0%) expR(res)=-0.09R expR(all)=-0.06R MAE med/p75/max=1.29/1.44/2.61 stop_med=3.14% t_med=2
+  ACCEPTANCE (validate, 3.2R): MAE<1R=False expR>0=True rate<=1/day=True  ==> FAIL
+
+validate event lists (audit trail):
+  2026-07-21 A-reclaim    HBAR/USD   entry 0.06668 stop 0.0652827 (2.10%) -> tp (+3.20R in 2d, MAE 0.04)
+  2026-07-21 A-reclaim    RENDER/USD entry 1.517 stop 1.47684 (2.65%) -> stop (-1.00R in 3d, MAE 1.25)
+  2026-07-22 A-reclaim    AAVE/USD   entry 95.49 stop 90.7905 (4.92%) -> stop (-1.00R in 4d, MAE 1.02)
+  2026-07-22 A-reclaim    DOT/USD    entry 0.8462 stop 0.812747 (3.95%) -> stop (-1.00R in 2d, MAE 1.21)
+  2026-07-22 A-reclaim    ALGO/USD   entry 0.08461 stop 0.0818783 (3.23%) -> stop (-1.00R in 2d, MAE 1.05)
+  2026-07-23 A-reclaim    WLD/USD    entry 0.3845 stop 0.363933 (5.35%) -> stop (-1.00R in 2d, MAE 2.21)
+  2026-07-24 A-reclaim    NEAR/USD   entry 1.8835 stop 1.82088 (3.32%) -> stop (-1.00R in 1d, MAE 1.42)
+  2026-07-25 A-reclaim    ALGO/USD   entry 0.086 stop 0.0818519 (4.82%) -> stop (-1.00R in 3d, MAE 1.48)
+  2026-07-26 A-reclaim    SOL/USD    entry 74.47 stop 72.6405 (2.46%) -> stop (-1.00R in 3d, MAE 1.18)
+  2026-07-26 A-reclaim    DOGE/USD   entry 0.0716688 stop 0.0696022 (2.88%) -> stop (-1.00R in 3d, MAE 1.19)
+  2026-07-26 A-reclaim    LTC/USD    entry 46.53 stop 45.6426 (1.91%) -> stop (-1.00R in 4d, MAE 2.51)
+  2026-07-26 A-reclaim    AVAX/USD   entry 6.771 stop 6.23385 (7.93%) -> stop (-1.00R in 7d, MAE 1.35)
+  2026-07-27 A-reclaim    BCH/USD    entry 216.85 stop 204.786 (5.56%) -> stop (-1.00R in 3d, MAE 1.04)
+  2026-07-27 A-reclaim    CRV/USD    entry 0.21033 stop 0.200746 (4.56%) -> stop (-1.00R in 6d, MAE 1.22)
+  2026-07-27 A-reclaim    HYPE/USD   entry 59.61 stop 56.4655 (5.28%) -> stop (-1.00R in 1d, MAE 1.24)
+  2026-07-27 A-reclaim    RENDER/USD entry 1.487 stop 1.43794 (3.30%) -> stop (-1.00R in 1d, MAE 1.63)
+  2026-07-27 A-reclaim    WLD/USD    entry 0.3568 stop 0.336849 (5.59%) -> stop (-1.00R in 1d, MAE 1.71)
+  2026-07-29 A-reclaim    ADA/USD    entry 0.161703 stop 0.156926 (2.95%) -> tp (+3.20R in 5d, MAE 0.28)
+  2026-07-30 A-reclaim    PAXG/USD   entry 4076.46 stop 3986.52 (2.21%) -> tp (+3.20R in 12d, MAE 0.64)
+  2026-07-31 A-reclaim    SOL/USD    entry 74.44 stop 72.6902 (2.35%) -> stop (-1.00R in 1d, MAE 1.11)
+  2026-07-31 A-reclaim    TRX/USD    entry 0.328323 stop 0.322043 (1.91%) -> open (+0.95R in 14d, MAE 0.51)
+  2026-07-31 A-reclaim    PENGU/USD  entry 0.006039 stop 0.00576448 (4.55%) -> open (+0.79R in 14d, MAE 0.65)
+  2026-08-02 A-reclaim    HBAR/USD   entry 0.069 stop 0.0675559 (2.09%) -> stop (-1.00R in 6d, MAE 1.29)
+  2026-08-03 A-reclaim    ETH/USD    entry 1882.88 stop 1821.86 (3.24%) -> open (-0.03R in 13d, MAE 0.92)
+  2026-08-03 A-reclaim    XRP/USD    entry 1.08569 stop 1.06725 (1.70%) -> stop (-1.00R in 1d, MAE 1.33)
+  2026-08-03 A-reclaim    SOL/USD    entry 73.54 stop 70.923 (3.56%) -> open (+0.67R in 13d, MAE 0.63)
+  2026-08-03 A-reclaim    LTC/USD    entry 44.63 stop 43.5743 (2.37%) -> stop (-1.00R in 12d, MAE 1.20)
+  2026-08-03 A-reclaim    LINK/USD   entry 8.37049 stop 7.98649 (4.59%) -> tp (+3.20R in 13d, MAE 0.81)
+  2026-08-03 A-reclaim    AVAX/USD   entry 6.544 stop 6.15205 (5.99%) -> stop (-1.00R in 9d, MAE 1.10)
+  2026-08-03 A-reclaim    AAVE/USD   entry 92.01 stop 87.9972 (4.36%) -> stop (-1.00R in 4d, MAE 1.18)
+  2026-08-03 A-reclaim    DOT/USD    entry 0.7976 stop 0.771109 (3.32%) -> stop (-1.00R in 10d, MAE 1.14)
+  2026-08-03 A-reclaim    BCH/USD    entry 212.52 stop 204.906 (3.58%) -> stop (-1.00R in 12d, MAE 1.69)
+  2026-08-03 A-reclaim    ALGO/USD   entry 0.08581 stop 0.0797863 (7.02%) -> stop (-1.00R in 9d, MAE 1.07)
+  2026-08-03 A-reclaim    PEPE/USD   entry 2.906e-06 stop 2.70474e-06 (6.93%) -> stop (-1.00R in 10d, MAE 1.40)
+  2026-08-03 A-reclaim    ZEC/USD    entry 489.17 stop 457.441 (6.49%) -> open (-0.06R in 13d, MAE 0.73)
+  2026-08-03 A-reclaim    RENDER/USD entry 1.384 stop 1.3381 (3.32%) -> stop (-1.00R in 2d, MAE 1.09)
+  2026-08-04 A-reclaim    CRV/USD    entry 0.20576 stop 0.198458 (3.55%) -> tp (+3.20R in 5d, MAE 0.58)
+  2026-08-05 A-reclaim    BTC/USD    entry 64053.7 stop 62853.2 (1.87%) -> stop (-1.00R in 9d, MAE 1.04)
+  2026-08-05 A-reclaim    LTC/USD    entry 44.81 stop 43.61 (2.68%) -> stop (-1.00R in 10d, MAE 1.21)
+  2026-08-06 A-reclaim    HYPE/USD   entry 56.92 stop 54.9258 (3.50%) -> stop (-1.00R in 1d, MAE 1.14)
+  2026-08-07 A-reclaim    LINK/USD   entry 8.18721 stop 8.00275 (2.25%) -> tp (+3.20R in 5d, MAE 0.47)
+  2026-08-09 A-reclaim    SUI/USD    entry 0.6921 stop 0.660054 (4.63%) -> open (-0.48R in 7d, MAE 0.65)
+  2026-08-09 A-reclaim    AAVE/USD   entry 91.26 stop 88.4485 (3.08%) -> stop (-1.00R in 3d, MAE 1.82)
+  2026-08-09 A-reclaim    HBAR/USD   entry 0.06891 stop 0.0673002 (2.34%) -> stop (-1.00R in 3d, MAE 1.91)
+  2026-08-11 A-reclaim    DOT/USD    entry 0.8049 stop 0.786243 (2.32%) -> stop (-1.00R in 1d, MAE 1.48)
+  2026-08-12 A-reclaim    XRP/USD    entry 1.02221 stop 0.996996 (2.47%) -> stop (-1.00R in 3d, MAE 1.49)
+  2026-08-14 A-reclaim    AVAX/USD   entry 6.45 stop 6.21154 (3.70%) -> open (-0.51R in 2d, MAE 0.62)
+  2026-08-14 A-reclaim    HYPE/USD   entry 57.45 stop 55.1213 (4.05%) -> open (-0.25R in 2d, MAE 0.91)
+  2026-08-15 A-reclaim    SHIB/USD   entry 4.612e-06 stop 4.45351e-06 (3.44%) -> open (-0.74R in 1d, MAE 0.79)
+  2026-07-21 B-higherlow  AVAX/USD   entry 6.577 stop 6.389 (2.86%) -> stop (-1.00R in 3d, MAE 2.01)
+  2026-07-21 B-higherlow  ALGO/USD   entry 0.08333 stop 0.08154 (2.15%) -> stop (-1.00R in 7d, MAE 1.94)
+  2026-07-21 B-higherlow  SHIB/USD   entry 4.241e-06 stop 4.105e-06 (3.21%) -> stop (-1.00R in 3d, MAE 1.06)
+  2026-07-22 B-higherlow  BTC/USD    entry 66511.7 stop 63691.6 (4.24%) -> stop (-1.00R in 3d, MAE 1.01)
+  2026-07-22 B-higherlow  ETH/USD    entry 1928.41 stop 1842.3 (4.47%) -> stop (-1.00R in 11d, MAE 1.25)
+  2026-07-22 B-higherlow  XRP/USD    entry 1.14289 stop 1.08174 (5.35%) -> stop (-1.00R in 6d, MAE 1.32)
+  2026-07-22 B-higherlow  SUI/USD    entry 0.7713 stop 0.7388 (4.21%) -> stop (-1.00R in 3d, MAE 1.98)
+  2026-07-22 B-higherlow  DOGE/USD   entry 0.073274 stop 0.0710582 (3.02%) -> stop (-1.00R in 2d, MAE 2.69)
+  2026-07-22 B-higherlow  LTC/USD    entry 46.84 stop 46.4 (0.94%) -> stop (-1.00R in 1d, MAE 1.14)
+  2026-07-22 B-higherlow  ADA/USD    entry 0.173612 stop 0.160652 (7.46%) -> stop (-1.00R in 6d, MAE 1.54)
+  2026-07-22 B-higherlow  AAVE/USD   entry 95.49 stop 88.21 (7.62%) -> open (-0.70R in 14d, MAE 0.90)
+  2026-07-22 B-higherlow  HBAR/USD   entry 0.06951 stop 0.0654 (5.91%) -> open (-0.04R in 14d, MAE 0.63)
+  2026-07-22 B-higherlow  TRX/USD    entry 0.329532 stop 0.32485 (1.42%) -> tp (+3.20R in 3d, MAE 0.83)
+  2026-07-22 B-higherlow  ZEC/USD    entry 532.34 stop 525.5 (1.28%) -> stop (-1.00R in 1d, MAE 4.06)
+  2026-07-22 B-higherlow  PAXG/USD   entry 4071.37 stop 3981.92 (2.20%) -> open (-0.08R in 14d, MAE 0.87)
+  2026-07-22 B-higherlow  PENGU/USD  entry 0.006313 stop 0.005957 (5.64%) -> stop (-1.00R in 4d, MAE 1.03)
+  2026-07-22 B-higherlow  RENDER/USD entry 1.535 stop 1.467 (4.43%) -> stop (-1.00R in 2d, MAE 1.00)
+  2026-07-22 B-higherlow  XLM/USD    entry 0.191873 stop 0.18421 (3.99%) -> stop (-1.00R in 2d, MAE 1.51)
+  2026-07-25 B-higherlow  TRX/USD    entry 0.330544 stop 0.325632 (1.49%) -> stop (-1.00R in 3d, MAE 3.69)
+  2026-07-26 B-higherlow  ETH/USD    entry 1873.37 stop 1845.48 (1.49%) -> tp (+3.20R in 1d, MAE 0.03)
+  2026-07-26 B-higherlow  XRP/USD    entry 1.09685 stop 1.08425 (1.15%) -> stop (-1.00R in 2d, MAE 2.77)
+  2026-07-26 B-higherlow  SOL/USD    entry 74.47 stop 73.41 (1.42%) -> stop (-1.00R in 3d, MAE 2.04)
+  2026-07-26 B-higherlow  ALGO/USD   entry 0.08407 stop 0.0817 (2.82%) -> stop (-1.00R in 2d, MAE 1.78)
+  2026-07-26 B-higherlow  PAXG/USD   entry 4052.64 stop 4018.88 (0.83%) -> stop (-1.00R in 3d, MAE 1.34)
+  2026-07-27 B-higherlow  LINK/USD   entry 8.81853 stop 8.26074 (6.33%) -> stop (-1.00R in 2d, MAE 1.13)
+  2026-07-27 B-higherlow  ADA/USD    entry 0.165721 stop 0.161352 (2.64%) -> stop (-1.00R in 1d, MAE 2.77)
+  2026-07-27 B-higherlow  UNI/USD    entry 3.8896 stop 3.6089 (7.22%) -> open (+0.32R in 14d, MAE 0.76)
+  2026-07-29 B-higherlow  CRV/USD    entry 0.21129 stop 0.20095 (4.89%) -> stop (-1.00R in 4d, MAE 1.23)
+  2026-07-30 B-higherlow  ETH/USD    entry 1908.21 stop 1855 (2.79%) -> stop (-1.00R in 2d, MAE 1.15)
+  2026-07-31 B-higherlow  DOGE/USD   entry 0.0705259 stop 0.0686644 (2.64%) -> stop (-1.00R in 1d, MAE 1.14)
+  2026-07-31 B-higherlow  AVAX/USD   entry 6.43 stop 6.306 (1.93%) -> stop (-1.00R in 2d, MAE 3.11)
+  2026-07-31 B-higherlow  CRV/USD    entry 0.21212 stop 0.20326 (4.18%) -> stop (-1.00R in 2d, MAE 1.52)
+  2026-07-31 B-higherlow  HBAR/USD   entry 0.06837 stop 0.06692 (2.12%) -> stop (-1.00R in 12d, MAE 1.75)
+  2026-07-31 B-higherlow  PEPE/USD   entry 2.761e-06 stop 2.66e-06 (3.66%) -> stop (-1.00R in 13d, MAE 1.35)
+  2026-07-31 B-higherlow  SHIB/USD   entry 4.717e-06 stop 4.543e-06 (3.69%) -> stop (-1.00R in 11d, MAE 1.40)
+  2026-08-02 B-higherlow  BCH/USD    entry 207.9 stop 205.06 (1.37%) -> tp (+3.20R in 4d, MAE 0.30)
+  2026-08-02 B-higherlow  HBAR/USD   entry 0.069 stop 0.0674 (2.32%) -> stop (-1.00R in 6d, MAE 1.16)
+  2026-08-02 B-higherlow  ZEC/USD    entry 461.35 stop 451.92 (2.04%) -> tp (+3.20R in 1d, MAE 0.00)
+  2026-08-02 B-higherlow  PAXG/USD   entry 4043.72 stop 4019.6 (0.60%) -> stop (-1.00R in 2d, MAE 1.03)
+  2026-08-03 B-higherlow  XRP/USD    entry 1.08569 stop 1.04631 (3.63%) -> stop (-1.00R in 4d, MAE 1.45)
+  2026-08-03 B-higherlow  UNI/USD    entry 4.1627 stop 4.0153 (3.54%) -> stop (-1.00R in 1d, MAE 1.97)
+  2026-08-03 B-higherlow  PENGU/USD  entry 0.006142 stop 0.00586 (4.59%) -> open (-0.53R in 13d, MAE 0.79)
+  2026-08-03 B-higherlow  WLD/USD    entry 0.3164 stop 0.2961 (6.42%) -> stop (-1.00R in 5d, MAE 1.14)
+  2026-08-05 B-higherlow  BTC/USD    entry 64053.7 stop 62218.4 (2.87%) -> open (-0.56R in 11d, MAE 0.85)
+  2026-08-05 B-higherlow  ETH/USD    entry 1868.45 stop 1827.01 (2.22%) -> open (+0.31R in 11d, MAE 0.39)
+  2026-08-05 B-higherlow  DOGE/USD   entry 0.0700289 stop 0.0689252 (1.58%) -> stop (-1.00R in 2d, MAE 1.67)
+  2026-08-05 B-higherlow  LTC/USD    entry 44.81 stop 43.98 (1.85%) -> stop (-1.00R in 10d, MAE 1.75)
+  2026-08-05 B-higherlow  HBAR/USD   entry 0.06936 stop 0.06841 (1.37%) -> stop (-1.00R in 2d, MAE 1.39)
+  2026-08-05 B-higherlow  TRX/USD    entry 0.326848 stop 0.325103 (0.53%) -> tp (+3.20R in 7d, MAE 0.73)
+  2026-08-07 B-higherlow  BCH/USD    entry 212.65 stop 209.87 (1.31%) -> stop (-1.00R in 7d, MAE 2.73)
+  2026-08-08 B-higherlow  SOL/USD    entry 73.64 stop 72.29 (1.83%) -> open (+1.22R in 8d, MAE 0.07)
+  2026-08-08 B-higherlow  LINK/USD   entry 8.18658 stop 8.06071 (1.54%) -> tp (+3.20R in 4d, MAE 0.20)
+  2026-08-08 B-higherlow  ADA/USD    entry 0.200744 stop 0.185946 (7.37%) -> stop (-1.00R in 4d, MAE 1.16)
+  2026-08-08 B-higherlow  AVAX/USD   entry 6.431 stop 6.353 (1.21%) -> stop (-1.00R in 4d, MAE 4.09)
+  2026-08-08 B-higherlow  ALGO/USD   entry 0.08896 stop 0.08678 (2.45%) -> stop (-1.00R in 1d, MAE 1.14)
+  2026-08-08 B-higherlow  PEPE/USD   entry 2.81e-06 stop 2.768e-06 (1.49%) -> tp (+3.20R in 2d, MAE 0.17)
+  2026-08-08 B-higherlow  TRX/USD    entry 0.327415 stop 0.325569 (0.56%) -> tp (+3.20R in 4d, MAE 0.25)
+  2026-08-08 B-higherlow  ZEC/USD    entry 511.62 stop 487.29 (4.76%) -> stop (-1.00R in 4d, MAE 1.88)
+  2026-08-08 B-higherlow  PENGU/USD  entry 0.006004 stop 0.00592 (1.40%) -> tp (+3.20R in 1d, MAE 0.02)
+  2026-08-09 B-higherlow  SUI/USD    entry 0.6921 stop 0.664 (4.06%) -> open (-0.55R in 7d, MAE 0.74)
+  2026-08-09 B-higherlow  UNI/USD    entry 4.0044 stop 3.9301 (1.86%) -> stop (-1.00R in 2d, MAE 1.30)
+  2026-08-09 B-higherlow  DOT/USD    entry 0.8142 stop 0.8016 (1.55%) -> stop (-1.00R in 1d, MAE 1.39)
+  2026-08-09 B-higherlow  SHIB/USD   entry 4.622e-06 stop 4.564e-06 (1.25%) -> stop (-1.00R in 2d, MAE 2.57)
+  2026-08-09 B-higherlow  HYPE/USD   entry 55.11 stop 53.44 (3.03%) -> open (+1.05R in 7d, MAE 0.83)
+  2026-08-09 B-higherlow  NEAR/USD   entry 1.6121 stop 1.5775 (2.15%) -> stop (-1.00R in 3d, MAE 2.21)
+  2026-08-10 B-higherlow  ZEC/USD    entry 509.72 stop 497.35 (2.43%) -> stop (-1.00R in 1d, MAE 1.38)
+  2026-08-11 B-higherlow  HYPE/USD   entry 55.05 stop 53.75 (2.36%) -> stop (-1.00R in 1d, MAE 1.02)
+  2026-08-11 B-higherlow  XLM/USD    entry 0.161323 stop 0.160814 (0.32%) -> stop (-1.00R in 1d, MAE 5.07)
+  2026-08-12 B-higherlow  DOGE/USD   entry 0.0718572 stop 0.0690961 (3.84%) -> stop (-1.00R in 1d, MAE 1.11)
+  2026-08-12 B-higherlow  LINK/USD   entry 8.76895 stop 8.1632 (6.91%) -> open (+1.14R in 4d, MAE 0.26)
+  2026-08-12 B-higherlow  PAXG/USD   entry 4367.02 stop 4308 (1.35%) -> open (+0.13R in 4d, MAE 0.90)
+  2026-08-13 B-higherlow  BTC/USD    entry 63412 stop 63137.2 (0.43%) -> stop (-1.00R in 1d, MAE 2.23)
+  2026-08-13 B-higherlow  ETH/USD    entry 1878.32 stop 1852.43 (1.38%) -> open (+0.11R in 3d, MAE 0.63)
+  2026-08-13 B-higherlow  SOL/USD    entry 75.56 stop 74.58 (1.30%) -> stop (-1.00R in 2d, MAE 1.02)
+  2026-08-13 B-higherlow  SUI/USD    entry 0.6812 stop 0.672 (1.35%) -> stop (-1.00R in 2d, MAE 1.07)
+  2026-08-13 B-higherlow  BCH/USD    entry 212.51 stop 211.1 (0.66%) -> stop (-1.00R in 1d, MAE 5.29)
+  2026-08-14 B-higherlow  PENGU/USD  entry 0.006255 stop 0.006102 (2.45%) -> stop (-1.00R in 1d, MAE 1.50)
+  2026-08-15 B-higherlow  ETH/USD    entry 1880.21 stop 1861.89 (0.97%) -> open (+0.05R in 1d, MAE 0.33)
+  2026-08-15 B-higherlow  LINK/USD   entry 8.95833 stop 8.61401 (3.84%) -> open (+1.45R in 1d, MAE 0.00)
+  2026-07-25 C-failedbd   AVAX/USD   entry 6.296 stop 6.137 (2.53%) -> tp (+3.20R in 1d, MAE 0.43)
+  2026-07-27 C-failedbd   NEAR/USD   entry 1.8376 stop 1.7767 (3.31%) -> stop (-1.00R in 1d, MAE 2.61)
+  2026-07-31 C-failedbd   ALGO/USD   entry 0.07894 stop 0.07568 (4.13%) -> tp (+3.20R in 4d, MAE 0.38)
+  2026-07-31 C-failedbd   HYPE/USD   entry 55.82 stop 52.82 (5.37%) -> stop (-1.00R in 1d, MAE 1.33)
+  2026-07-31 C-failedbd   NEAR/USD   entry 1.6764 stop 1.5684 (6.44%) -> stop (-1.00R in 12d, MAE 1.30)
+  2026-08-03 C-failedbd   SOL/USD    entry 73.54 stop 70.54 (4.08%) -> open (+0.58R in 13d, MAE 0.55)
+  2026-08-03 C-failedbd   CRV/USD    entry 0.20266 stop 0.19861 (2.00%) -> tp (+3.20R in 4d, MAE 0.64)
+  2026-08-03 C-failedbd   RENDER/USD entry 1.384 stop 1.339 (3.25%) -> stop (-1.00R in 2d, MAE 1.11)
+  2026-08-07 C-failedbd   RENDER/USD entry 1.335 stop 1.315 (1.50%) -> stop (-1.00R in 1d, MAE 1.55)
+  2026-08-09 C-failedbd   XRP/USD    entry 1.03865 stop 1.0125 (2.52%) -> stop (-1.00R in 2d, MAE 1.29)
+  2026-08-09 C-failedbd   RENDER/USD entry 1.322 stop 1.304 (1.36%) -> stop (-1.00R in 1d, MAE 1.44)
+  2026-08-12 C-failedbd   XRP/USD    entry 1.02221 stop 0.99012 (3.14%) -> stop (-1.00R in 3d, MAE 1.17)
+  2026-08-15 C-failedbd   HBAR/USD   entry 0.06583 stop 0.06477 (1.61%) -> open (-0.38R in 1d, MAE 0.48)
