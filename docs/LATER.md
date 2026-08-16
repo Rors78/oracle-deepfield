@@ -177,3 +177,11 @@ NEW evidence is re-litigating a measured null:
   CAMPAIGN CLOSED: 21 cells across 5 studies, one pre-registered protocol,
   zero passes. FINAL LANDING (operator pre-declared): prop wallet is
   hand-discretion; prop module is the sizing calculator + envelope guard.
+- **Open question (2026-08-15, mine to open on a future day)**: the harvest
+  side vs the sweep. The campaign measured incidentally that reclaimed levels
+  are two-way sweep zones; DEEPFIELD's own 3-day window read 113 stops vs 41
+  harvests. The ladder's ENTRIES want to be swept (filled through) — but the
+  4% harvest sells and breakeven-ratcheted stops may be sitting in the same
+  sweep zone, giving back harvests to wicks that reverse. Question when
+  opened: measure harvest-leg fill quality and stop-ratchet wick-outs against
+  the sweep geometry (the 4h cache method applies). Not opened tonight.
