@@ -1,0 +1,106 @@
+═══ STUDY 1 — structural SHORT inversion (4h, retest fills) ═══
+rejections: {} · unfilled: {('B', 'train'): 599, ('A', 'train'): 114, ('B', 'validate'): 135, ('A', 'validate'): 37, ('C', 'train'): 21, ('C', 'validate'): 12} · D sources: {'A': 617, 'B': 838, 'C': 108}
+
+----- A-s -----
+  fills/day: tr 9.76 va 11.23 · effN tr=1 va=1
+  TP 2.5R
+    train    n= 917 (tp 173/st 744/op 0) hit= 18.9% (BE 28.6%) expR(res)=-0.34R expR(all)=-0.34R MAE=1.43/1.97/13.53 stop%=0.97/1.37/4.45 gate=0/917 t_med=0
+    validate n= 292 (tp 51/st 234/op 7) hit= 17.9% (BE 28.6%) expR(res)=-0.37R expR(all)=-0.34R MAE=1.37/1.88/6.06 stop%=0.70/0.84/1.85 gate=0/292 t_med=0
+  TP 3.2R  <== CENTER
+    train    n= 917 (tp 130/st 787/op 0) hit= 14.2% (BE 23.8%) expR(res)=-0.40R expR(all)=-0.40R MAE=1.46/2.02/13.53 stop%=0.97/1.37/4.45 gate=42/917 t_med=0
+    validate n= 292 (tp 38/st 244/op 10) hit= 13.5% (BE 23.8%) expR(res)=-0.43R expR(all)=-0.38R MAE=1.40/1.89/6.06 stop%=0.70/0.84/1.85 gate=0/292 t_med=0.0
+  TP 4.0R
+    train    n= 917 (tp 105/st 812/op 0) hit= 11.5% (BE 20.0%) expR(res)=-0.43R expR(all)=-0.43R MAE=1.48/2.06/13.53 stop%=0.97/1.37/4.45 gate=854/917 t_med=0
+    validate n= 292 (tp 36/st 246/op 10) hit= 12.8% (BE 20.0%) expR(res)=-0.36R expR(all)=-0.31R MAE=1.40/1.91/6.06 stop%=0.70/0.84/1.85 gate=264/292 t_med=0.0
+  ACCEPTANCE (va 3.2R): MAE<1R=False expR>0=False rate<=1/day=False ==> FAIL
+
+----- B-s -----
+  fills/day: tr 12.43 va 14.31 · effN tr=1 va=1
+  TP 2.5R
+    train    n=1168 (tp 117/st 1051/op 0) hit= 10.0% (BE 28.6%) expR(res)=-0.65R expR(all)=-0.65R MAE=1.61/2.27/7.72 stop%=0.96/1.35/7.03 gate=0/1168 t_med=0.0
+    validate n= 372 (tp 30/st 334/op 8) hit=  8.2% (BE 28.6%) expR(res)=-0.71R expR(all)=-0.69R MAE=1.61/2.25/6.41 stop%=0.69/0.90/2.15 gate=0/372 t_med=0.0
+  TP 3.2R  <== CENTER
+    train    n=1168 (tp 95/st 1073/op 0) hit=  8.1% (BE 23.8%) expR(res)=-0.66R expR(all)=-0.66R MAE=1.62/2.30/7.72 stop%=0.96/1.35/7.03 gate=56/1168 t_med=0.0
+    validate n= 372 (tp 27/st 337/op 8) hit=  7.4% (BE 23.8%) expR(res)=-0.69R expR(all)=-0.66R MAE=1.63/2.25/6.41 stop%=0.69/0.90/2.15 gate=0/372 t_med=0.0
+  TP 4.0R
+    train    n=1168 (tp 78/st 1090/op 0) hit=  6.7% (BE 20.0%) expR(res)=-0.67R expR(all)=-0.67R MAE=1.63/2.31/7.72 stop%=0.96/1.35/7.03 gate=1074/1168 t_med=0.0
+    validate n= 372 (tp 23/st 341/op 8) hit=  6.3% (BE 20.0%) expR(res)=-0.68R expR(all)=-0.66R MAE=1.64/2.25/6.41 stop%=0.69/0.90/2.15 gate=326/372 t_med=0.0
+  ACCEPTANCE (va 3.2R): MAE<1R=False expR>0=False rate<=1/day=False ==> FAIL
+
+----- C-s -----
+  fills/day: tr 1.87 va 1.81 · effN tr=1 va=1
+  TP 2.5R
+    train    n= 176 (tp 31/st 145/op 0) hit= 17.6% (BE 28.6%) expR(res)=-0.38R expR(all)=-0.38R MAE=1.51/1.92/6.54 stop%=1.03/1.46/3.37 gate=0/176 t_med=0.0
+    validate n=  47 (tp 7/st 38/op 2) hit= 15.6% (BE 28.6%) expR(res)=-0.46R expR(all)=-0.40R MAE=1.48/1.98/2.98 stop%=0.73/0.90/1.62 gate=0/47 t_med=1
+  TP 3.2R  <== CENTER
+    train    n= 176 (tp 22/st 154/op 0) hit= 12.5% (BE 23.8%) expR(res)=-0.47R expR(all)=-0.47R MAE=1.56/1.98/6.54 stop%=1.03/1.46/3.37 gate=8/176 t_med=0.0
+    validate n=  47 (tp 5/st 40/op 2) hit= 11.1% (BE 23.8%) expR(res)=-0.53R expR(all)=-0.47R MAE=1.53/1.98/2.98 stop%=0.73/0.90/1.62 gate=0/47 t_med=1
+  TP 4.0R
+    train    n= 176 (tp 21/st 155/op 0) hit= 11.9% (BE 20.0%) expR(res)=-0.40R expR(all)=-0.40R MAE=1.56/1.98/6.54 stop%=1.03/1.46/3.37 gate=166/176 t_med=0.0
+    validate n=  47 (tp 5/st 40/op 2) hit= 11.1% (BE 20.0%) expR(res)=-0.44R expR(all)=-0.39R MAE=1.53/1.98/2.98 stop%=0.73/0.90/1.62 gate=45/47 t_med=1
+  ACCEPTANCE (va 3.2R): MAE<1R=False expR>0=False rate<=1/day=False ==> FAIL
+
+----- D -----
+  fills/day: tr 12.44 va 15.15 · effN tr=1 va=1
+  TP 2.5R
+    train    n=1169 (tp 347/st 816/op 6) hit= 29.8% (BE 28.6%) expR(res)=+0.04R expR(all)=+0.05R MAE=1.17/1.49/10.14 stop%=1.70/2.57/8.01 gate=0/1169 t_med=4
+    validate n= 394 (tp 107/st 256/op 31) hit= 29.5% (BE 28.6%) expR(res)=+0.03R expR(all)=+0.07R MAE=1.14/1.49/5.69 stop%=1.20/1.75/4.72 gate=0/394 t_med=3
+  TP 3.2R  <== CENTER
+    train    n=1169 (tp 279/st 878/op 12) hit= 24.1% (BE 23.8%) expR(res)=+0.01R expR(all)=+0.03R MAE=1.20/1.53/10.14 stop%=1.70/2.57/8.01 gate=380/1169 t_med=5
+    validate n= 394 (tp 83/st 268/op 43) hit= 23.6% (BE 23.8%) expR(res)=-0.01R expR(all)=+0.08R MAE=1.17/1.51/6.46 stop%=1.20/1.75/4.72 gate=49/394 t_med=3
+  TP 4.0R
+    train    n=1169 (tp 231/st 916/op 22) hit= 20.1% (BE 20.0%) expR(res)=+0.01R expR(all)=+0.04R MAE=1.22/1.55/10.14 stop%=1.70/2.57/8.01 gate=1133/1169 t_med=5
+    validate n= 394 (tp 67/st 276/op 51) hit= 19.5% (BE 20.0%) expR(res)=-0.02R expR(all)=+0.12R MAE=1.20/1.52/6.46 stop%=1.20/1.75/4.72 gate=380/394 t_med=3
+  ACCEPTANCE (va 3.2R): MAE<1R=False expR>0=False rate<=1/day=False ==> FAIL
+
+═══ STUDY 2 — wide-stop 1x longs (8.4% cap REMOVED) ═══
+
+----- A-m1 (4h) -----
+  fires/day: tr 10.97 va 12.65 · effN tr=1 va=1
+    train    3.2R n=1031 (tp 217/st 813/op 1) hit= 21.1% (BE 23.8%) expR(res)=-0.12R expR(all)=-0.12R MAE=1.23/1.58/6.64 stop%=1.65/2.48/17.10 gate=312/1031 t_med=4.0  notional@$40risk med=$2,420
+    validate 3.2R n= 329 (tp 63/st 250/op 16) hit= 20.1% (BE 23.8%) expR(res)=-0.15R expR(all)=-0.14R MAE=1.24/1.64/8.44 stop%=1.09/1.56/5.10 gate=28/329 t_med=3  notional@$40risk med=$3,657
+  ACCEPTANCE (va 3.2R): MAE<1R=False expR>0=False rate<=1/day=False ==> FAIL
+
+----- A-m2 (4h) -----
+  fires/day: tr 9.76 va 11.23 · effN tr=1 va=1
+    train    3.2R n= 917 (tp 212/st 705/op 0) hit= 23.1% (BE 23.8%) expR(res)=-0.03R expR(all)=-0.03R MAE=1.37/1.93/8.13 stop%=0.97/1.37/4.45 gate=41/917 t_med=1  notional@$40risk med=$4,109
+    validate 3.2R n= 292 (tp 54/st 230/op 8) hit= 19.0% (BE 23.8%) expR(res)=-0.20R expR(all)=-0.19R MAE=1.40/2.15/11.83 stop%=0.70/0.84/1.85 gate=0/292 t_med=1.0  notional@$40risk med=$5,755
+  ACCEPTANCE (va 3.2R): MAE<1R=False expR>0=False rate<=1/day=False ==> FAIL
+
+----- B-m1 (4h) -----
+  fires/day: tr 18.80 va 19.50 · effN tr=1 va=1
+    train    3.2R n=1767 (tp 429/st 1304/op 34) hit= 24.8% (BE 23.8%) expR(res)=+0.04R expR(all)=+0.06R MAE=1.23/1.66/15.76 stop%=1.47/2.63/16.57 gate=561/1767 t_med=3  notional@$40risk med=$2,724
+    validate 3.2R n= 507 (tp 97/st 385/op 25) hit= 20.1% (BE 23.8%) expR(res)=-0.15R expR(all)=-0.15R MAE=1.29/1.95/39.80 stop%=0.94/1.58/7.87 gate=58/507 t_med=2.0  notional@$40risk med=$4,267
+  ACCEPTANCE (va 3.2R): MAE<1R=False expR>0=False rate<=1/day=False ==> FAIL
+
+----- B-m2 (4h) -----
+  fires/day: tr 12.43 va 14.31 · effN tr=1 va=1
+    train    3.2R n=1168 (tp 243/st 925/op 0) hit= 20.8% (BE 23.8%) expR(res)=-0.13R expR(all)=-0.13R MAE=1.42/1.99/20.30 stop%=0.96/1.35/7.03 gate=56/1168 t_med=1.0  notional@$40risk med=$4,173
+    validate 3.2R n= 372 (tp 61/st 298/op 13) hit= 17.0% (BE 23.8%) expR(res)=-0.29R expR(all)=-0.27R MAE=1.46/2.29/10.86 stop%=0.69/0.90/2.15 gate=0/372 t_med=1  notional@$40risk med=$5,777
+  ACCEPTANCE (va 3.2R): MAE<1R=False expR>0=False rate<=1/day=False ==> FAIL
+
+----- C-m1 (4h) -----
+  fires/day: tr 2.10 va 2.27 · effN tr=1 va=1
+    train    3.2R n= 197 (tp 42/st 153/op 2) hit= 21.5% (BE 23.8%) expR(res)=-0.10R expR(all)=-0.09R MAE=1.22/1.54/4.33 stop%=2.07/3.40/8.20 gate=90/197 t_med=4  notional@$40risk med=$1,928
+    validate 3.2R n=  59 (tp 10/st 40/op 9) hit= 20.0% (BE 23.8%) expR(res)=-0.16R expR(all)=-0.10R MAE=1.19/1.48/6.87 stop%=1.29/1.81/4.53 gate=8/59 t_med=4.0  notional@$40risk med=$3,109
+  ACCEPTANCE (va 3.2R): MAE<1R=False expR>0=False rate<=1/day=False ==> FAIL
+
+----- C-m2 (4h) -----
+  fires/day: tr 1.87 va 1.81 · effN tr=1 va=1
+    train    3.2R n= 176 (tp 36/st 140/op 0) hit= 20.5% (BE 23.8%) expR(res)=-0.14R expR(all)=-0.14R MAE=1.50/2.04/6.69 stop%=1.03/1.46/3.37 gate=8/176 t_med=1.0  notional@$40risk med=$3,897
+    validate 3.2R n=  47 (tp 9/st 36/op 2) hit= 20.0% (BE 23.8%) expR(res)=-0.16R expR(all)=-0.13R MAE=1.36/1.77/6.90 stop%=0.73/0.90/1.62 gate=0/47 t_med=1  notional@$40risk med=$5,476
+  ACCEPTANCE (va 3.2R): MAE<1R=False expR>0=False rate<=1/day=False ==> FAIL
+
+----- daily rerun, mode 1, uncapped -----
+  A: fires/day tr 1.38 va 1.92 · effN va=1
+    train    3.2R n=  90 (tp 14/st 62/op 14) hit= 18.4% (BE 23.8%) expR(res)=-0.23R expR(all)=-0.09R MAE=1.11/1.36/3.14 stop%=4.14/6.04/13.42 gate=78/90 t_med=3.0
+    validate 3.2R n=  50 (tp 6/st 35/op 9) hit= 14.6% (BE 23.8%) expR(res)=-0.39R expR(all)=-0.31R MAE=1.15/1.33/2.51 stop%=3.38/4.59/9.15 gate=42/50 t_med=3
+  ACCEPTANCE: FAIL (MAE<1R=False expR>0=False rate=False)
+  B: fires/day tr 2.72 va 3.12 · effN va=1
+    train    3.2R n= 177 (tp 24/st 126/op 27) hit= 16.0% (BE 23.8%) expR(res)=-0.33R expR(all)=-0.23R MAE=1.20/1.65/5.98 stop%=4.15/6.54/28.24 gate=136/177 t_med=3.0
+    validate 3.2R n=  81 (tp 9/st 56/op 16) hit= 13.8% (BE 23.8%) expR(res)=-0.42R expR(all)=-0.29R MAE=1.16/1.75/5.29 stop%=2.36/4.06/11.49 gate=42/81 t_med=2
+  ACCEPTANCE: FAIL (MAE<1R=False expR>0=False rate=False)
+  C: fires/day tr 0.34 va 0.50 · effN va=1
+    train    3.2R n=  22 (tp 3/st 14/op 5) hit= 17.6% (BE 23.8%) expR(res)=-0.26R expR(all)=-0.10R MAE=1.09/1.49/1.90 stop%=4.30/5.92/12.03 gate=21/22 t_med=5
+    validate 3.2R n=  13 (tp 3/st 8/op 2) hit= 27.3% (BE 23.8%) expR(res)=+0.15R expR(all)=+0.14R MAE=1.17/1.33/2.61 stop%=3.14/4.08/6.44 gate=9/13 t_med=2
+  ACCEPTANCE: FAIL (MAE<1R=False expR>0=True rate=True)

@@ -158,3 +158,22 @@ NEW evidence is re-litigating a measured null:
   feed candidates measured under one pre-registered protocol, eight dead.
   Operator's pre-declared landing: prop wallet = hand-discretion account,
   prop module = sizing calculator + envelope guard only.
+- **Phase 1c: short inversion + wide-stop 1x (2026-08-15)**: ALL 13 CELLS
+  FAIL (protocol pre-committed 66ab401; results/runner docs/PROP_INVERSION_
+  WIDESTOPS_*). Study 1 (short the retest): A-s/B-s/C-s decisively dead —
+  shorting the revisit is WORSE than buying it (B-s 7.4% validate hit,
+  MAE 1.6R, t_med=0: the fill bar whips through the stop). The two-sided
+  result is the finding: from the same price point, MAE >=1.4R in BOTH
+  directions — the revisit is a two-way liquidity sweep zone, not support
+  and not a breakdown signal. Event D (breach-close short) is the campaign's
+  most efficient number: validate 23.6% hit vs 23.8% break-even, -0.01R —
+  EXACTLY zero edge, and the 3.2R fee gate refuses 87% of its tickets
+  anyway; fails MAE (1.17) and rate (15 fills/day). Study 2 (cap removed,
+  1x): nothing changes — the 8.4% cap was never the binding constraint
+  (uncapped stops to 28% still validate negative everywhere; daily-C
+  reproduces its +0.15R/MAE-1.17 near-miss unchanged). Sanity: at 1x,
+  median notional at $40 risk is $2.4-5.8k — several cells exceed the $5k
+  wallet, unplaceable without the leverage the wide stop was meant to avoid.
+  CAMPAIGN CLOSED: 21 cells across 5 studies, one pre-registered protocol,
+  zero passes. FINAL LANDING (operator pre-declared): prop wallet is
+  hand-discretion; prop module is the sizing calculator + envelope guard.
