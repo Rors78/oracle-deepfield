@@ -226,7 +226,11 @@ PAPER_ROLLOVER_PCT = 0.00015
 # silently changes the blast radius" into a refused order + a loud log — making
 # min-sizing a CHECKED bound, not just a config knob. 0 = disabled; raise it if you
 # deliberately move to larger risk-mode sizing.
-EXEC_MAX_ORDER_NOTIONAL_USD = 50.0
+# 2026-08-24 small-account retune: 50 -> 15. Sized from the roster, not a round
+# number: priciest live-roster min rung (DOGE ~$4.54) x 3x conviction x 1x
+# SIZE_MULT ≈ $13.6, so 15 clears every valid order and still catches a corrupt
+# pairs row or a flipped size mode at ~1.5x equity instead of 5x.
+EXEC_MAX_ORDER_NOTIONAL_USD = 15.0
 
 # Stop distance is VOLATILITY-SCALED (operator ruling 2026-08-06) — see deepfield/vol.py.
 # STOP_MODE / STOP_PCT / STOP_MIN_PCT / STOP_MAX_PCT are DELETED, not defaulted: the
@@ -292,7 +296,7 @@ MARGIN_CAP_PCT = 0.90               # a single position may post at most this fr
 # targets margin-level ~350% (~$520 notional, still a 4.4x buffer over the 120%
 # stack floor). Env still overrides. The ceiling scales with SIZE_MULT so no clamp.
 try:
-    SIZE_MULT = max(1.0, float(os.environ.get("DEEPFIELD_SIZE_MULT", "2")))  # 2026-07-31: 1->2, operator — the 07-29 stop-ratchet's pre-registered revisit condition (post-ratchet proved-rung hit rate >70%) measured 90% (18 rungs harvested at +4% vs 2 stopped at breakeven since 07-29); the landscape differs from the 8x/16x era: respend governor paces all new-growth notional at $5/hr regardless of this knob, reverse gear + rails armed. Prior: 2026-07-24: 2->1 (min-size buys "for a while"), operator, alongside the second per-pair trim. The 07-22 trim restored ML 119->250% and the ladder spent the whole cushion inside 24h (ML back to 110-120%, free margin $32, 47 -> 103 lots) — 2x-min rungs across a 29-pair universe out-accumulate what the 200% stack floor can hold back, because the floor only gates NEW seeds, it never unwinds. 1x is the floor of this knob (max(1.0, ...)); the next lever down is the pair universe, not this. Prior: 3->2 on 07-20, operator (existing book untouched, plays out at 2x-min from here). Prior: 2->3 on 07-19. At the time of the change the book sat at 0.44x effective leverage against a measured 4.22x survivable ceiling — a tenth of the limit — so 3x only changes the PACE of accumulation, not where it ends. The ceiling is enforced by MARGIN_LEVEL_STACK_FLOOR_PCT (raised 160->200 in the same change), NOT by this multiplier. (History: 16->8 on 07-16 after the $1,484/9x/ML-106% near-call; 8->2 on 07-19 after the T/P flatten.)
+    SIZE_MULT = max(1.0, float(os.environ.get("DEEPFIELD_SIZE_MULT", "1")))  # 2026-08-24: 2->1, small-account retune (~$9.6 equity): a 2x-min rung is ~$5-9 notional = up to ~$0.90 margin, nearly a fifth of the ~$4.8 usable margin under the 200% stack floor — 1x doubles how many rungs/pairs the book can hold. Revisit with the exclusion list when equity recovers past ~$25. Prior: 2026-07-31: 1->2, operator — the 07-29 stop-ratchet's pre-registered revisit condition (post-ratchet proved-rung hit rate >70%) measured 90% (18 rungs harvested at +4% vs 2 stopped at breakeven since 07-29); the landscape differs from the 8x/16x era: respend governor paces all new-growth notional at $5/hr regardless of this knob, reverse gear + rails armed. Prior: 2026-07-24: 2->1 (min-size buys "for a while"), operator, alongside the second per-pair trim. The 07-22 trim restored ML 119->250% and the ladder spent the whole cushion inside 24h (ML back to 110-120%, free margin $32, 47 -> 103 lots) — 2x-min rungs across a 29-pair universe out-accumulate what the 200% stack floor can hold back, because the floor only gates NEW seeds, it never unwinds. 1x is the floor of this knob (max(1.0, ...)); the next lever down is the pair universe, not this. Prior: 3->2 on 07-20, operator (existing book untouched, plays out at 2x-min from here). Prior: 2->3 on 07-19. At the time of the change the book sat at 0.44x effective leverage against a measured 4.22x survivable ceiling — a tenth of the limit — so 3x only changes the PACE of accumulation, not where it ends. The ceiling is enforced by MARGIN_LEVEL_STACK_FLOOR_PCT (raised 160->200 in the same change), NOT by this multiplier. (History: 16->8 on 07-16 after the $1,484/9x/ML-106% near-call; 8->2 on 07-19 after the T/P flatten.)
 except ValueError:
     _log.error("DEEPFIELD_SIZE_MULT=%r is not a number — running at 1x (min size)",
                os.environ.get("DEEPFIELD_SIZE_MULT"))
@@ -347,6 +351,21 @@ EXCLUDED_PAIRS = frozenset({
     # of its races resolve at all: capital parked at 3x that neither banks nor
     # exits. Failed all three lenses (fit, validation, realized ledger).
     "RENDER/USD",
+    # Small-account retune 2026-08-24 (operator: account wound down to ~$9.6 —
+    # "re-optimize for the little left, precise sizing"). At this equity the
+    # 200% stack floor leaves ~half of equity as usable margin, so the whole
+    # book affords ~10 min-size rungs. Only the cheapest-minimum 10x pairs can
+    # ladder (min rung margin $0.25-0.45); every 5x/3x pair costs 3-5x the
+    # margin per rung and one rung of CRV or PEPE eats a quarter of the entire
+    # margin budget. Everything below is excluded until equity recovers —
+    # RE-ARM WHEN equity clears ~$25 (a 5x min rung then costs <5% of margin
+    # budget; CRV/PEPE first — they passed all three Edge Research A lenses and
+    # are still RESPEND_PRIORITY). Roster left trading: XRP, ETH, BTC, SUI,
+    # DOGE — all 10x, min notionals $2.48-4.54 at 08-24 prices.
+    "SOL/USD", "LTC/USD", "LINK/USD", "ADA/USD",                # 10x, pricier mins
+    "AAVE/USD", "UNI/USD", "DOT/USD", "BCH/USD", "CRV/USD",     # 5x tier
+    "HBAR/USD", "PEPE/USD", "TRX/USD", "HYPE/USD", "PAXG/USD",  # 5x tier
+    "PENGU/USD", "XLM/USD",                                     # 3x / 5x tier
 })
 
 # Respend SERVICE ORDER (Edge Research A, 2026-08-12): when the bucket cannot
@@ -513,8 +532,14 @@ MARGIN_LEVEL_STACK_FLOOR_PCT = 200
 # pacing ~10x slower than the pre-governor ladder that spent the whole 07-22
 # cushion in 24h. The real risk rails are unchanged and binding: L_eff ceiling,
 # kill switch, Gate A stops, reverse gear. This constant is tempo, not exposure.
-RESPEND_BUDGET_USD_PER_HR = 15.0
-RESPEND_BURST_USD         = 60.0
+# 2026-08-24 small-account retune: 15/60 -> 2/8. The old numbers were calibrated
+# for a ~$180-equity / ~$375-notional book; at ~$9.6 equity the whole book's
+# notional ceiling under the 200% stack floor is ~$48, and $15/hr would deploy
+# all of it inside the first burst. $2/hr + $8 burst = the burst seeds the first
+# 2-3 rungs immediately, then full deploy takes ~20h — same-day, same intent as
+# the 08-12 recalibration, scaled to the account.
+RESPEND_BUDGET_USD_PER_HR = 2.0
+RESPEND_BURST_USD         = 8.0
 
 # Defense buffer engine (audit Wave 1, DEEPFIELD_AUDIT_EVIDENCE.md §B/§G). The
 # ml floor above is a ratio; the DEFENSE tiers below are the SAME comfort zone

@@ -377,6 +377,11 @@ def test_ladder_rung_null_score_falls_back_to_flat_min(tmp_path, monkeypatch):
     conn = _conn(tmp_path, ordermin=0.1, costmin=0.5, lot_dec=8)
     pin_vol(conn, rung=1)
     monkeypatch.setattr(config, "LADDER_CONTINUOUS", True)
+    # A NULL-score rung is governed by the respend bucket (no conviction bypass),
+    # and this test's $10 mock rung must not depend on the production burst size
+    # (08-24 small-account retune set it below $10): pacing is off for this test,
+    # which asserts SIZING, not tempo.
+    monkeypatch.setattr(config, "RESPEND_BUDGET_USD_PER_HR", 0)
     monkeypatch.setattr(ex_mod.broker, "trade_balance", lambda: 1000.0)
     monkeypatch.setattr(ex_mod.broker, "private", _ladder_private([]))
     monkeypatch.setattr(ex_mod.broker, "query_order", lambda t: {"status": "closed", "vol_exec": "0.1"})
