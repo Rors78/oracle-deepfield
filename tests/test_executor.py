@@ -325,6 +325,10 @@ def test_ladder_rung_inherits_entry_conviction(tmp_path, monkeypatch):
     conn = _conn(tmp_path, ordermin=0.1, costmin=0.5, lot_dec=8)
     pin_vol(conn, rung=1)
     monkeypatch.setattr(config, "LADDER_CONTINUOUS", True)
+    # This test asserts conviction SIZING; its ~$30 mock rung must not depend on
+    # the production pacing/ceiling knobs (scaled down in the 08-24 retune).
+    monkeypatch.setattr(config, "RESPEND_BUDGET_USD_PER_HR", 0)
+    monkeypatch.setattr(config, "EXEC_MAX_ORDER_NOTIONAL_USD", 50.0)
     monkeypatch.setattr(ex_mod.broker, "trade_balance", lambda: 1000.0)
     monkeypatch.setattr(ex_mod.broker, "private", _ladder_private([]))
     monkeypatch.setattr(ex_mod.broker, "query_order", lambda t: {"status": "closed", "vol_exec": "0.3"})
@@ -420,6 +424,9 @@ def test_ladder_dedupe_allows_a_clean_step_down(tmp_path, monkeypatch):
     conn = _conn(tmp_path, ordermin=0.1, costmin=0.5, lot_dec=8)
     pin_vol(conn, rung=1)
     monkeypatch.setattr(config, "LADDER_CONTINUOUS", True)
+    # Asserts DEDUPE, not tempo: the $10 mock rung must not depend on the
+    # production respend burst (scaled below $10 in the 08-24 retune).
+    monkeypatch.setattr(config, "RESPEND_BUDGET_USD_PER_HR", 0)
     monkeypatch.setattr(ex_mod.broker, "trade_balance", lambda: 1000.0)
     monkeypatch.setattr(ex_mod.broker, "private", _ladder_private([]))
     monkeypatch.setattr(ex_mod.broker, "query_order", lambda t: {"status": "closed", "vol_exec": "0.1"})

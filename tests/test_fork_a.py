@@ -79,6 +79,10 @@ def _fund_everything_downstream(monkeypatch):
     A gate test is only a gate test when the gate is the only thing that can say
     no."""
     from deepfield import executor as ex_mod
+    # The $20 stub notional below must clear the sanity ceiling (see the size
+    # comment) — pin the ceiling rather than track the production value, which
+    # scales with the account (08-24 retune took it to $15 and broke the stub).
+    monkeypatch.setattr(config, "EXEC_MAX_ORDER_NOTIONAL_USD", 50.0)
     monkeypatch.setattr(ex_mod.Executor, "portfolio_value", lambda self: 1000.0)
     monkeypatch.setattr(ex_mod.Executor, "rails_ok", lambda self, eq: (True, ""))
     monkeypatch.setattr(ex_mod.Executor, "compute_stop",
